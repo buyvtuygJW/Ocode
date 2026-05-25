@@ -1,4 +1,4 @@
-name: Patched OpenCode WeeklyAuto Build
+name: Patched OpenCode weeklyAuto Build
 
 on:
   push:
@@ -9,7 +9,6 @@ on:
         required: true
         default: "dev"
   schedule:
-    # Every Monday 03:00 UTC
     - cron: "0 3 * * 1"
 
 permissions:
@@ -53,7 +52,7 @@ jobs:
           echo "Patch files:"
           find patches -maxdepth 1 -name '*.patch' | sort
 
-          echo "Checking patches for literal conflict markers..."
+          echo "Checking patch files for literal conflict markers..."
           if grep -RInE '^(<<<<<<<|=======|>>>>>>>)' patches; then
             echo "ERROR: conflict markers exist inside patch files"
             exit 1
@@ -105,6 +104,67 @@ jobs:
         run: |
           set -euo pipefail
 
+          auto_resolve_patch_conflict_take_patch_side() {
+            echo "Auto-resolving git-am conflicts by taking PATCH side (--theirs)."
+
+            CONFLICT_FILES="$(git diff --name-only --diff-filter=U || true)"
+
+            if [ -z "$CONFLICT_FILES" ]; then
+              echo "No conflicted files found."
+              return 1
+            fi
+
+            echo "Conflicted files:"
+            echo "$CONFLICT_FILES"
+
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "Taking patch side for: $f"
+              git checkout --theirs -- "$f" || return 1
+              git add "$f" || return 1
+            done <<< "$CONFLICT_FILES"
+
+            echo "Continuing git am..."
+            git am --continue
+          }
+
+          apply_all_patches() {
+            for p in $(find ../patches -maxdepth 1 -name '*.patch' | sort); do
+              echo ""
+              echo "Applying patch: $p"
+
+              if git am --3way "$p"; then
+                echo "Patch applied cleanly: $p"
+                continue
+              fi
+
+              echo "Patch conflicted: $p"
+              git status --short || true
+
+              echo ""
+              echo "Conflict markers before auto-resolve:"
+              git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . || true
+
+              if auto_resolve_patch_conflict_take_patch_side; then
+                echo "Auto-resolved and continued: $p"
+              else
+                echo "ERROR: auto-resolve failed for: $p"
+                git status --short || true
+                git am --abort || true
+                return 20
+              fi
+
+              echo "Checking for conflict markers after auto-resolve..."
+              if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+                echo "ERROR: conflict markers remain after auto-resolve"
+                git am --abort || true
+                return 21
+              fi
+            done
+
+            return 0
+          }
+
           try_build() {
             local ref="$1"
             local label="$2"
@@ -138,32 +198,21 @@ jobs:
             git config user.name "patched-build-bot"
             git config user.email "patched-build-bot@example.local"
 
-            for p in $(find ../patches -maxdepth 1 -name '*.patch' | sort); do
-              echo "Applying patch: $p"
-
-              if ! git am --3way "$p"; then
-                echo "ERROR: PATCH FAILED: $p"
-                git status --short || true
-
-                echo ""
-                echo "Conflict markers currently in tree:"
-                git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . || true
-
-                git am --abort || true
-                cd ..
-                return 20
-              fi
-            done
-
-            echo "Checking for unresolved conflict markers after patches..."
-            if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
-              echo "ERROR: unresolved conflict markers found after patch apply"
+            if ! apply_all_patches; then
+              echo "ERROR: patch application failed"
               cd ..
-              return 21
+              return 20
+            fi
+
+            echo "Final conflict marker check before build..."
+            if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+              echo "ERROR: unresolved conflict markers before build"
+              cd ..
+              return 22
             fi
 
             echo "Patched commits:"
-            git log --oneline -8
+            git log --oneline -12
 
             if ! bun install; then
               echo "ERROR: bun install failed"
