@@ -365,15 +365,6 @@ jobs:
             out/*.tar.gz
             out/SHA256SUMS.txt
 
-      - name: Upload all CLI artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: oc-${{ steps.build.outputs.built_label }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            out/*.zip
-            out/*.tar.gz
-            out/SHA256SUMS.txt
-
       - name: Create or update GitHub Release
         if: steps.build.outputs.built_label == 'latest'
         shell: bash
