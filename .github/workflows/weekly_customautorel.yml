@@ -1,4 +1,4 @@
-name: Patched OpenCode Auto Build
+name: Patched OpenCode WeeklyAuto Build
 
 on:
   push:
@@ -40,18 +40,24 @@ jobs:
           set -euo pipefail
 
           if [ ! -d patches ]; then
-            echo "Missing ./patches"
+            echo "ERROR: Missing ./patches"
             exit 1
           fi
 
           count="$(find patches -maxdepth 1 -name '*.patch' | wc -l)"
           if [ "$count" -eq 0 ]; then
-            echo "No patches/*.patch found"
+            echo "ERROR: No patches/*.patch found"
             exit 1
           fi
 
           echo "Patch files:"
           find patches -maxdepth 1 -name '*.patch' | sort
+
+          echo "Checking patches for literal conflict markers..."
+          if grep -RInE '^(<<<<<<<|=======|>>>>>>>)' patches; then
+            echo "ERROR: conflict markers exist inside patch files"
+            exit 1
+          fi
 
       - name: Load last successful upstream ref
         id: state
@@ -70,10 +76,28 @@ jobs:
           echo "last_success=$LAST_SUCCESS" >> "$GITHUB_OUTPUT"
           echo "Last successful upstream ref: ${LAST_SUCCESS:-<none>}"
 
+      - name: Resolve upstream Bun version
+        id: bunver
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf upstream-meta
+          git clone --no-checkout "$UPSTREAM_REPO" upstream-meta
+
+          cd upstream-meta
+          git fetch origin "$UPSTREAM_REF" --depth=1
+          git checkout --detach FETCH_HEAD
+
+          BUN_VERSION="$(node -p "require('./package.json').packageManager.split('@')[1]")"
+
+          echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using upstream Bun version: $BUN_VERSION"
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ steps.bunver.outputs.bun_version }}
 
       - name: Build latest upstream or fallback
         id: build
@@ -95,8 +119,18 @@ jobs:
             git clone --no-checkout "$UPSTREAM_REPO" opencode-src
 
             cd opencode-src
-            git fetch origin "$ref" --depth=1
-            git checkout --detach FETCH_HEAD
+
+            if ! git fetch origin "$ref" --depth=1; then
+              echo "ERROR: failed to fetch upstream ref: $ref"
+              cd ..
+              return 10
+            fi
+
+            if ! git checkout --detach FETCH_HEAD; then
+              echo "ERROR: failed to checkout FETCH_HEAD"
+              cd ..
+              return 11
+            fi
 
             UPSTREAM_SHA="$(git rev-parse HEAD)"
             echo "Checked out upstream SHA: $UPSTREAM_SHA"
@@ -106,26 +140,57 @@ jobs:
 
             for p in $(find ../patches -maxdepth 1 -name '*.patch' | sort); do
               echo "Applying patch: $p"
-              git am --3way "$p"
+
+              if ! git am --3way "$p"; then
+                echo "ERROR: PATCH FAILED: $p"
+                git status --short || true
+
+                echo ""
+                echo "Conflict markers currently in tree:"
+                git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . || true
+
+                git am --abort || true
+                cd ..
+                return 20
+              fi
             done
+
+            echo "Checking for unresolved conflict markers after patches..."
+            if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+              echo "ERROR: unresolved conflict markers found after patch apply"
+              cd ..
+              return 21
+            fi
 
             echo "Patched commits:"
             git log --oneline -8
 
-            bun install
+            if ! bun install; then
+              echo "ERROR: bun install failed"
+              cd ..
+              return 30
+            fi
 
-            # IMPORTANT:
-            # No --single. Full official-style CLI build creates linux/darwin/windows targets.
-            bun run --cwd packages/opencode build
+            # Full official-style CLI build. Do NOT use --single.
+            # Full build produces linux/darwin/windows targets.
+            if ! bun run --cwd packages/opencode build; then
+              echo "ERROR: opencode build failed"
+              cd ..
+              return 40
+            fi
 
-            test -d packages/opencode/dist/opencode-windows-x64
-            test -d packages/opencode/dist/opencode-windows-x64-baseline
-            test -d packages/opencode/dist/opencode-linux-x64
-            test -d packages/opencode/dist/opencode-linux-x64-baseline
-            test -d packages/opencode/dist/opencode-linux-arm64
-            test -d packages/opencode/dist/opencode-darwin-x64
-            test -d packages/opencode/dist/opencode-darwin-x64-baseline
-            test -d packages/opencode/dist/opencode-darwin-arm64
+            echo "Checking expected build outputs..."
+
+            test -d packages/opencode/dist/opencode-windows-x64 || return 51
+            test -d packages/opencode/dist/opencode-windows-x64-baseline || return 52
+
+            test -d packages/opencode/dist/opencode-linux-x64 || return 53
+            test -d packages/opencode/dist/opencode-linux-x64-baseline || return 54
+            test -d packages/opencode/dist/opencode-linux-arm64 || return 55
+
+            test -d packages/opencode/dist/opencode-darwin-x64 || return 56
+            test -d packages/opencode/dist/opencode-darwin-x64-baseline || return 57
+            test -d packages/opencode/dist/opencode-darwin-arm64 || return 58
 
             cd ..
 
@@ -139,12 +204,7 @@ jobs:
           LATEST_REF="$UPSTREAM_REF"
           LAST_SUCCESS="${{ steps.state.outputs.last_success }}"
 
-          set +e
-          try_build "$LATEST_REF" "latest"
-          latest_status=$?
-          set -e
-
-          if [ "$latest_status" -eq 0 ]; then
+          if try_build "$LATEST_REF" "latest"; then
             echo "Latest upstream build succeeded."
             exit 0
           fi
@@ -159,17 +219,13 @@ jobs:
 
           echo "Falling back to last successful upstream ref: $LAST_SUCCESS"
 
-          set +e
-          try_build "$LAST_SUCCESS" "fallback-last-success"
-          fallback_status=$?
-          set -e
-
-          if [ "$fallback_status" -ne 0 ]; then
-            echo "Fallback build also failed. Manual patch maintenance required."
-            exit 1
+          if try_build "$LAST_SUCCESS" "fallback-last-success"; then
+            echo "Fallback build succeeded."
+            exit 0
           fi
 
-          echo "Fallback build succeeded."
+          echo "Fallback build also failed. Manual patch maintenance required."
+          exit 1
 
       - name: Package CLI artifacts
         shell: bash
@@ -205,7 +261,7 @@ jobs:
           package_tar "$DIST/opencode-linux-x64-baseline" "opencode-linux-x64-baseline-custom"
           package_tar "$DIST/opencode-linux-arm64" "opencode-linux-arm64-custom"
 
-          # Darwin/macOS
+          # macOS / Darwin
           package_zip "$DIST/opencode-darwin-x64" "opencode-darwin-x64-custom"
           package_zip "$DIST/opencode-darwin-x64-baseline" "opencode-darwin-x64-baseline-custom"
           package_zip "$DIST/opencode-darwin-arm64" "opencode-darwin-arm64-custom"
