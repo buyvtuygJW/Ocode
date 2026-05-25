@@ -374,6 +374,78 @@ jobs:
             out/*.tar.gz
             out/SHA256SUMS.txt
 
+      - name: Create or update GitHub Release
+        if: steps.build.outputs.built_label == 'latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BUILT_SHA="${{ steps.build.outputs.built_sha }}"
+          SHORT_SHA="${BUILT_SHA:0:12}"
+          TAG="patched-opencode-${SHORT_SHA}"
+          TITLE="Patched OpenCode ${SHORT_SHA}"
+
+          echo "Creating release:"
+          echo "  tag=$TAG"
+          echo "  title=$TITLE"
+
+          # Ensure tag exists locally/remotely.
+          git config user.name "patched-build-bot"
+          git config user.email "patched-build-bot@example.local"
+
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "Tag already exists: $TAG"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          NOTES_FILE="release-notes.md"
+
+          cat > "$NOTES_FILE" <<EOF
+          # Patched OpenCode Build
+
+          Upstream commit:
+
+          \`\`\`
+          $BUILT_SHA
+          \`\`\`
+
+          Build label:
+
+          \`\`\`
+          ${{ steps.build.outputs.built_label }}
+          \`\`\`
+
+          Artifacts:
+
+          - Windows x64
+          - Windows x64 baseline
+          - Linux x64
+          - Linux x64 baseline
+          - Linux arm64
+          - macOS x64
+          - macOS x64 baseline
+          - macOS arm64
+
+          SHA256 hashes are included in \`SHA256SUMS.txt\`.
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release exists; updating assets."
+            gh release upload "$TAG" out/*.zip out/*.tar.gz out/SHA256SUMS.txt --clobber
+          else
+            echo "Creating release."
+            gh release create "$TAG" \
+              out/*.zip \
+              out/*.tar.gz \
+              out/SHA256SUMS.txt \
+              --title "$TITLE" \
+              --notes-file "$NOTES_FILE"
+          fi
+
       - name: Update last successful upstream ref
         if: steps.build.outputs.built_label == 'latest'
         shell: bash
