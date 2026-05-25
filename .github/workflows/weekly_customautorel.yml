@@ -365,28 +365,34 @@ jobs:
             out/*.tar.gz
             out/SHA256SUMS.txt
 
+      - name: Upload all CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-opencode-cli-${{ steps.build.outputs.built_label }}
+          path: |
+            out/*.zip
+            out/*.tar.gz
+            out/SHA256SUMS.txt
+
       - name: Update last successful upstream ref
         if: steps.build.outputs.built_label == 'latest'
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           BUILT_SHA="${{ steps.build.outputs.built_sha }}"
 
-          if [ -z "${BUILT_SHA}" ]; then
+          if [ -z "$BUILT_SHA" ]; then
             echo "ERROR: built_sha is empty"
             exit 1
           fi
 
-          rm -rf state-work
-          mkdir state          git init          mkdir state-work
+          echo "Updating $STATE_BRANCH with successful upstream SHA: $BUILT_SHA"
+
           git config user.name "patched-build-bot"
           git config user.email "patched-build-bot@example.local"
 
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
+          # Use the existing checkout repo + existing origin from actions/checkout.
           git fetch origin "$STATE_BRANCH" || true
 
           if git rev-parse --verify "origin/$STATE_BRANCH" >/dev/null 2>&1; then
@@ -408,4 +414,3 @@ jobs:
           fi
 
           git push origin "HEAD:$STATE_BRANCH"
-          cd state-work
