@@ -1,0 +1,258 @@
+name: Patched OpenCode Auto Build
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream branch/ref/tag"
+        required: true
+        default: "dev"
+  schedule:
+    # Every Monday 03:00 UTC
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: patched-opencode-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      UPSTREAM_REPO: https://github.com/anomalyco/opencode.git
+      UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'dev' }}
+      STATE_BRANCH: build-state
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate patches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -d patches ]; then
+            echo "Missing ./patches"
+            exit 1
+          fi
+
+          count="$(find patches -maxdepth 1 -name '*.patch' | wc -l)"
+          if [ "$count" -eq 0 ]; then
+            echo "No patches/*.patch found"
+            exit 1
+          fi
+
+          echo "Patch files:"
+          find patches -maxdepth 1 -name '*.patch' | sort
+
+      - name: Load last successful upstream ref
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin "$STATE_BRANCH:$STATE_BRANCH" || true
+
+          LAST_SUCCESS=""
+
+          if git show "$STATE_BRANCH:last-success-upstream.txt" >/tmp/last-success-upstream.txt 2>/dev/null; then
+            LAST_SUCCESS="$(cat /tmp/last-success-upstream.txt | tr -d '[:space:]')"
+          fi
+
+          echo "last_success=$LAST_SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "Last successful upstream ref: ${LAST_SUCCESS:-<none>}"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Build latest upstream or fallback
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          try_build() {
+            local ref="$1"
+            local label="$2"
+
+            echo ""
+            echo "================================================="
+            echo "TRY BUILD: $label"
+            echo "REF: $ref"
+            echo "================================================="
+
+            rm -rf opencode-src
+            git clone --no-checkout "$UPSTREAM_REPO" opencode-src
+
+            cd opencode-src
+            git fetch origin "$ref" --depth=1
+            git checkout --detach FETCH_HEAD
+
+            UPSTREAM_SHA="$(git rev-parse HEAD)"
+            echo "Checked out upstream SHA: $UPSTREAM_SHA"
+
+            git config user.name "patched-build-bot"
+            git config user.email "patched-build-bot@example.local"
+
+            for p in $(find ../patches -maxdepth 1 -name '*.patch' | sort); do
+              echo "Applying patch: $p"
+              git am --3way "$p"
+            done
+
+            echo "Patched commits:"
+            git log --oneline -8
+
+            bun install
+
+            # IMPORTANT:
+            # No --single. Full official-style CLI build creates linux/darwin/windows targets.
+            bun run --cwd packages/opencode build
+
+            test -d packages/opencode/dist/opencode-windows-x64
+            test -d packages/opencode/dist/opencode-windows-x64-baseline
+            test -d packages/opencode/dist/opencode-linux-x64
+            test -d packages/opencode/dist/opencode-linux-x64-baseline
+            test -d packages/opencode/dist/opencode-linux-arm64
+            test -d packages/opencode/dist/opencode-darwin-x64
+            test -d packages/opencode/dist/opencode-darwin-x64-baseline
+            test -d packages/opencode/dist/opencode-darwin-arm64
+
+            cd ..
+
+            echo "built_ref=$ref" >> "$GITHUB_OUTPUT"
+            echo "built_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+            echo "built_label=$label" >> "$GITHUB_OUTPUT"
+
+            return 0
+          }
+
+          LATEST_REF="$UPSTREAM_REF"
+          LAST_SUCCESS="${{ steps.state.outputs.last_success }}"
+
+          set +e
+          try_build "$LATEST_REF" "latest"
+          latest_status=$?
+          set -e
+
+          if [ "$latest_status" -eq 0 ]; then
+            echo "Latest upstream build succeeded."
+            exit 0
+          fi
+
+          echo ""
+          echo "Latest upstream build FAILED."
+
+          if [ -z "$LAST_SUCCESS" ]; then
+            echo "No last successful upstream ref exists. Cannot fallback."
+            exit 1
+          fi
+
+          echo "Falling back to last successful upstream ref: $LAST_SUCCESS"
+
+          set +e
+          try_build "$LAST_SUCCESS" "fallback-last-success"
+          fallback_status=$?
+          set -e
+
+          if [ "$fallback_status" -ne 0 ]; then
+            echo "Fallback build also failed. Manual patch maintenance required."
+            exit 1
+          fi
+
+          echo "Fallback build succeeded."
+
+      - name: Package CLI artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIST="opencode-src/packages/opencode/dist"
+          OUT="$PWD/out"
+
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          package_zip() {
+            local src="$1"
+            local name="$2"
+            echo "Packaging zip: $name"
+            (cd "$src/bin" && zip -9 -r "$OUT/$name.zip" .)
+          }
+
+          package_tar() {
+            local src="$1"
+            local name="$2"
+            echo "Packaging tar.gz: $name"
+            tar -czf "$OUT/$name.tar.gz" -C "$src/bin" .
+          }
+
+          # Windows
+          package_zip "$DIST/opencode-windows-x64" "opencode-windows-x64-custom"
+          package_zip "$DIST/opencode-windows-x64-baseline" "opencode-windows-x64-baseline-custom"
+
+          # Linux
+          package_tar "$DIST/opencode-linux-x64" "opencode-linux-x64-custom"
+          package_tar "$DIST/opencode-linux-x64-baseline" "opencode-linux-x64-baseline-custom"
+          package_tar "$DIST/opencode-linux-arm64" "opencode-linux-arm64-custom"
+
+          # Darwin/macOS
+          package_zip "$DIST/opencode-darwin-x64" "opencode-darwin-x64-custom"
+          package_zip "$DIST/opencode-darwin-x64-baseline" "opencode-darwin-x64-baseline-custom"
+          package_zip "$DIST/opencode-darwin-arm64" "opencode-darwin-arm64-custom"
+
+          cd "$OUT"
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload all CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-opencode-cli-${{ steps.build.outputs.built_label }}
+          path: |
+            out/*.zip
+            out/*.tar.gz
+            out/SHA256SUMS.txt
+
+      - name: Update last successful upstream ref
+        if: steps.build.outputs.built_label == 'latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILT_SHA="${{ steps.build.outputs.built_sha }}"
+
+          rm -rf state-work
+          mkdir state-work
+          cd state-work
+
+          git init
+          git config user.name "patched-build-bot"
+          git config user.email "patched-build-bot@example.local"
+
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git fetch origin "$STATE_BRANCH" || true
+
+          if git rev-parse --verify "origin/$STATE_BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$STATE_BRANCH" "origin/$STATE_BRANCH"
+          else
+            git checkout --orphan "$STATE_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          echo "$BUILT_SHA" > last-success-upstream.txt
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > last-success-time.txt
+
+          git add last-success-upstream.txt last-success-time.txt
+          git commit -m "state: update last successful upstream $BUILT_SHA" || true
+          git push origin "$STATE_BRANCH"
