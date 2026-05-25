@@ -368,16 +368,20 @@ jobs:
       - name: Update last successful upstream ref
         if: steps.build.outputs.built_label == 'latest'
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           BUILT_SHA="${{ steps.build.outputs.built_sha }}"
 
-          rm -rf state-work
-          mkdir state-work
-          cd state-work
+          if [ -z "${BUILT_SHA}" ]; then
+            echo "ERROR: built_sha is empty"
+            exit 1
+          fi
 
-          git init
+          rm -rf state-work
+          mkdir state          git init          mkdir state-work
           git config user.name "patched-build-bot"
           git config user.email "patched-build-bot@example.local"
 
@@ -396,5 +400,12 @@ jobs:
           date -u +"%Y-%m-%dT%H:%M:%SZ" > last-success-time.txt
 
           git add last-success-upstream.txt last-success-time.txt
-          git commit -m "state: update last successful upstream $BUILT_SHA" || true
-          git push origin "$STATE_BRANCH"
+
+          if git diff --cached --quiet; then
+            echo "No state change to commit."
+          else
+            git commit -m "state: update last successful upstream $BUILT_SHA"
+          fi
+
+          git push origin "HEAD:$STATE_BRANCH"
+          cd state-work
