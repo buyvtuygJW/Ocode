@@ -368,7 +368,7 @@ jobs:
       - name: Upload all CLI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: patched-opencode-cli-${{ steps.build.outputs.built_label }}
+          name: oc-${{ steps.build.outputs.built_label }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             out/*.zip
             out/*.tar.gz
