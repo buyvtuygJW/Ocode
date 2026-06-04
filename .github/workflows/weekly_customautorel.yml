@@ -1,0 +1,531 @@
+name: Patched OpenCode WeeklyAuto Build
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream branch/ref/tag"
+        required: true
+        default: "production"
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: patched-opencode-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      UPSTREAM_REPO: https://github.com/anomalyco/opencode.git
+      UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'production' }}
+      STATE_BRANCH: dev
+      STATE_FILE_DIR: .github/opencode-build-state
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate final personalize patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH="patches/FinalPERSONALIZE.patch"
+
+          if [ ! -f "$PATCH" ]; then
+            echo "ERROR: Missing patch:"
+            echo "  $PATCH"
+            exit 1
+          fi
+
+          echo "Using patch:"
+          echo "  $PATCH"
+
+          if ! grep -qE '^(diff --git|--- |\+\+\+ )' "$PATCH"; then
+            echo "ERROR: Patch does not look like a git/unified diff:"
+            echo "  $PATCH"
+            exit 1
+          fi
+
+          echo "Checking patch for literal conflict markers..."
+          if grep -nE '^(<<<<<<<|=======|>>>>>>>)' "$PATCH"; then
+            echo "ERROR: conflict markers exist inside patch:"
+            echo "  $PATCH"
+            exit 1
+          fi
+
+          echo "Checking patch does not patch automation/self/state files..."
+          if grep -nE '^diff --git a/(patches/|\.github/opencode-build-state/|\.github/workflows/weekly_customautorel\.yml)' "$PATCH"; then
+            echo "ERROR: FinalPERSONALIZE.patch must not patch automation/self/state files."
+            echo "These files are copied into the final dev branch after build."
+            exit 1
+          fi
+
+          echo "Patch validation OK."
+
+      - name: Load last successful upstream ref
+        id: load_state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin "$STATE_BRANCH" || true
+
+          LAST_SUCCESS=""
+
+          if git show "origin/$STATE_BRANCH:$STATE_FILE_DIR/last-success-upstream.txt" >/tmp/last-success-upstream.txt 2>/dev/null; then
+            LAST_SUCCESS="$(cat /tmp/last-success-upstream.txt | tr -d '[:space:]')"
+          fi
+
+          echo "last_success=$LAST_SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "Last successful upstream ref from $STATE_BRANCH: ${LAST_SUCCESS:-<none>}"
+
+      - name: Resolve upstream Bun version
+        id: bunver
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf upstream-meta
+          git clone --no-checkout "$UPSTREAM_REPO" upstream-meta
+
+          cd upstream-meta
+          git fetch origin "$UPSTREAM_REF" --depth=1
+          git checkout --detach FETCH_HEAD
+
+          BUN_VERSION="$(node -p "require('./package.json').packageManager.split('@')[1]")"
+
+          echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using upstream Bun version: $BUN_VERSION"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bunver.outputs.bun_version }}
+
+      - name: Build latest upstream or fallback
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          final_patch_file() {
+            echo "../patches/FinalPERSONALIZE.patch"
+          }
+
+          auto_resolve_git_apply_conflict_take_patch_side() {
+            echo "Auto-resolving git-apply conflicts by taking PATCH side (--theirs)."
+
+            CONFLICT_FILES="$(git diff --name-only --diff-filter=U || true)"
+
+            if [ -z "$CONFLICT_FILES" ]; then
+              echo "No conflicted files found."
+              return 1
+            fi
+
+            echo "Conflicted files:"
+            echo "$CONFLICT_FILES"
+
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+
+              echo ""
+              echo "Resolving conflict by taking patch side:"
+              echo "  $f"
+
+              echo "Index stages:"
+              git ls-files -u -- "$f" || true
+
+              if git ls-files -u -- "$f" | awk '$3 == "3" { found=1 } END { exit found ? 0 : 1 }'; then
+                echo "Patch side exists. Taking --theirs:"
+                git checkout --theirs -- "$f"
+                git add -- "$f"
+              else
+                echo "Patch side has no stage-3 version. Treating as patch-side delete:"
+                git rm -f -- "$f"
+              fi
+            done <<< "$CONFLICT_FILES"
+
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              echo "ERROR: Unmerged files remain after auto-resolve:"
+              git diff --name-only --diff-filter=U
+              return 1
+            fi
+
+            return 0
+          }
+
+          apply_custom_git_patches() {
+            PATCH="$(final_patch_file)"
+
+            echo ""
+            echo "Applying final personalize patch:"
+            echo "  $PATCH"
+
+            if [ ! -f "$PATCH" ]; then
+              echo "ERROR: Missing patch:"
+              echo "  $PATCH"
+              return 20
+            fi
+
+            if git apply --3way --index --whitespace=fix "$PATCH"; then
+              echo "Patch applied cleanly:"
+              echo "  $PATCH"
+            else
+              echo "Patch conflicted or failed:"
+              echo "  $PATCH"
+
+              git status --short || true
+
+              echo ""
+              echo "Conflict markers before auto-resolve:"
+              git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . || true
+
+              if auto_resolve_git_apply_conflict_take_patch_side; then
+                echo "Auto-resolved by taking patch side."
+              else
+                echo "ERROR: auto-resolve failed for:"
+                echo "  $PATCH"
+                git status --short || true
+                return 20
+              fi
+            fi
+
+            echo ""
+            echo "Checking for remaining unmerged index entries..."
+            if git ls-files -u | grep -q .; then
+              echo "ERROR: unmerged index entries remain:"
+              git ls-files -u
+              return 21
+            fi
+
+            echo ""
+            echo "Checking for conflict markers after patch apply..."
+            if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+              echo "ERROR: conflict markers remain after auto-resolve"
+              return 22
+            fi
+
+            echo ""
+            echo "Patch status:"
+            git status --short
+
+            if git diff --cached --quiet; then
+              echo "ERROR: final patch produced no staged changes"
+              return 23
+            fi
+
+            git commit -m "Apply FinalPERSONALIZE patch"
+
+            echo "Applied final personalize patch."
+            return 0
+          }
+
+          try_build() {
+            local ref="$1"
+            local label="$2"
+
+            echo ""
+            echo "================================================="
+            echo "TRY BUILD: $label"
+            echo "REF: $ref"
+            echo "================================================="
+
+            rm -rf opencode-src
+            git clone --no-checkout "$UPSTREAM_REPO" opencode-src
+
+            cd opencode-src
+
+            if ! git fetch origin "$ref"; then
+              echo "ERROR: failed to fetch upstream ref: $ref"
+              cd ..
+              return 10
+            fi
+
+            if ! git checkout --detach FETCH_HEAD; then
+              echo "ERROR: failed to checkout FETCH_HEAD"
+              cd ..
+              return 11
+            fi
+
+            UPSTREAM_SHA="$(git rev-parse HEAD)"
+            echo "Checked out upstream SHA: $UPSTREAM_SHA"
+
+            git config user.name "patched-build-bot"
+            git config user.email "patched-build-bot@example.local"
+
+            if ! apply_custom_git_patches; then
+              echo "ERROR: custom patch application failed"
+              cd ..
+              return 20
+            fi
+
+            echo "Final conflict marker check before build..."
+            if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+              echo "ERROR: unresolved conflict markers before build"
+              cd ..
+              return 23
+            fi
+
+            echo "Patched commits:"
+            git log --oneline -12
+
+            if ! bun install; then
+              echo "ERROR: bun install failed"
+              cd ..
+              return 30
+            fi
+
+            if ! bun run --cwd packages/opencode build; then
+              echo "ERROR: opencode build failed"
+              cd ..
+              return 40
+            fi
+
+            echo "Checking expected build outputs..."
+
+            test -d packages/opencode/dist/opencode-windows-x64 || return 51
+            test -d packages/opencode/dist/opencode-windows-x64-baseline || return 52
+
+            test -d packages/opencode/dist/opencode-linux-x64 || return 53
+            test -d packages/opencode/dist/opencode-linux-x64-baseline || return 54
+            test -d packages/opencode/dist/opencode-linux-arm64 || return 55
+
+            test -d packages/opencode/dist/opencode-darwin-x64 || return 56
+            test -d packages/opencode/dist/opencode-darwin-x64-baseline || return 57
+            test -d packages/opencode/dist/opencode-darwin-arm64 || return 58
+
+            cd ..
+
+            echo "built_ref=$ref" >> "$GITHUB_OUTPUT"
+            echo "built_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+            echo "built_label=$label" >> "$GITHUB_OUTPUT"
+
+            return 0
+          }
+
+          LATEST_REF="$UPSTREAM_REF"
+          LAST_SUCCESS="${{ steps.load_state.outputs.last_success }}"
+
+          if try_build "$LATEST_REF" "latest"; then
+            echo "Latest upstream build succeeded."
+            exit 0
+          fi
+
+          echo ""
+          echo "Latest upstream build FAILED."
+
+          if [ -z "$LAST_SUCCESS" ]; then
+            echo "No last successful upstream ref exists. Cannot fallback."
+            exit 1
+          fi
+
+          echo "Falling back to last successful upstream ref: $LAST_SUCCESS"
+
+          if try_build "$LAST_SUCCESS" "fallback-last-success"; then
+            echo "Fallback build succeeded."
+            exit 0
+          fi
+
+          echo "Fallback build also failed. Manual patch maintenance required."
+          exit 1
+
+      - name: Package CLI artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIST="opencode-src/packages/opencode/dist"
+          OUT="$PWD/out"
+
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          package_zip() {
+            local src="$1"
+            local name="$2"
+            echo "Packaging zip: $name"
+            (cd "$src/bin" && zip -9 -r "$OUT/$name.zip" .)
+          }
+
+          package_tar() {
+            local src="$1"
+            local name="$2"
+            echo "Packaging tar.gz: $name"
+            tar -czf "$OUT/$name.tar.gz" -C "$src/bin" .
+          }
+
+          package_zip "$DIST/opencode-windows-x64" "opencode-windows-x64-custom"
+          package_zip "$DIST/opencode-windows-x64-baseline" "opencode-windows-x64-baseline-custom"
+
+          package_tar "$DIST/opencode-linux-x64" "opencode-linux-x64-custom"
+          package_tar "$DIST/opencode-linux-x64-baseline" "opencode-linux-x64-baseline-custom"
+          package_tar "$DIST/opencode-linux-arm64" "opencode-linux-arm64-custom"
+
+          package_zip "$DIST/opencode-darwin-x64" "opencode-darwin-x64-custom"
+          package_zip "$DIST/opencode-darwin-x64-baseline" "opencode-darwin-x64-baseline-custom"
+          package_zip "$DIST/opencode-darwin-arm64" "opencode-darwin-arm64-custom"
+
+          cd "$OUT"
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload all CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc-${{ steps.build.outputs.built_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/*.zip
+            out/*.tar.gz
+            out/SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        if: steps.build.outputs.built_label == 'latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BUILT_SHA="${{ steps.build.outputs.built_sha }}"
+          SHORT_SHA="${BUILT_SHA:0:12}"
+          TAG="patched-opencode-${SHORT_SHA}"
+          TITLE="Patched OpenCode ${SHORT_SHA}"
+
+          echo "Creating/updating release:"
+          echo "  tag=$TAG"
+          echo "  title=$TITLE"
+
+          git config user.name "patched-build-bot"
+          git config user.email "patched-build-bot@example.local"
+
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "Tag already exists: $TAG"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          NOTES_FILE="release-notes.md"
+
+          cat > "$NOTES_FILE" <<EOF
+          # Patched OpenCode Build
+
+          Upstream commit:
+
+          \`\`\`
+          $BUILT_SHA
+          \`\`\`
+
+          Build label:
+
+          \`\`\`
+          ${{ steps.build.outputs.built_label }}
+          \`\`\`
+
+          Artifacts:
+
+          - Windows x64
+          - Windows x64 baseline
+          - Linux x64
+          - Linux x64 baseline
+          - Linux arm64
+          - macOS x64
+          - macOS x64 baseline
+          - macOS arm64
+
+          SHA256 hashes are included in \`SHA256SUMS.txt\`.
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release exists; updating assets."
+            gh release upload "$TAG" out/*.zip out/*.tar.gz out/SHA256SUMS.txt --clobber
+          else
+            echo "Creating release."
+            gh release create "$TAG" \
+              out/*.zip \
+              out/*.tar.gz \
+              out/SHA256SUMS.txt \
+              --title "$TITLE" \
+              --notes-file "$NOTES_FILE"
+          fi
+
+      - name: Sync patched upstream source to dev
+        if: steps.build.outputs.built_label == 'latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BUILT_SHA="${{ steps.build.outputs.built_sha }}"
+
+          if [ -z "$BUILT_SHA" ]; then
+            echo "ERROR: built_sha is empty"
+            exit 1
+          fi
+
+          if [ ! -d "opencode-src/.git" ]; then
+            echo "ERROR: opencode-src git repo missing"
+            exit 1
+          fi
+
+          if [ ! -f "patches/FinalPERSONALIZE.patch" ]; then
+            echo "ERROR: patches/FinalPERSONALIZE.patch missing from automation repo"
+            exit 1
+          fi
+
+          if [ ! -f ".github/workflows/weekly_customautorel.yml" ]; then
+            echo "ERROR: workflow file missing from automation repo"
+            exit 1
+          fi
+
+          echo "Syncing patched upstream source to branch:"
+          echo "  $STATE_BRANCH"
+          echo "Upstream SHA:"
+          echo "  $BUILT_SHA"
+
+          cd opencode-src
+
+          git config user.name "patched-build-bot"
+          git config user.email "patched-build-bot@example.local"
+
+          mkdir -p "patches"
+          mkdir -p ".github/workflows"
+          mkdir -p "$STATE_FILE_DIR"
+
+          cp "../patches/FinalPERSONALIZE.patch" "patches/FinalPERSONALIZE.patch"
+          cp "../.github/workflows/weekly_customautorel.yml" ".github/workflows/weekly_customautorel.yml"
+
+          echo "$BUILT_SHA" > "$STATE_FILE_DIR/last-success-upstream.txt"
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STATE_FILE_DIR/last-success-time.txt"
+
+          echo "Final branch content status before commit:"
+          git status --short
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit in patched source tree."
+          else
+            git commit -m "sync: upstream $BUILT_SHA + personalize patch [skip ci]"
+          fi
+
+          TARGET_REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git remote remove target 2>/dev/null || true
+          git remote add target "$TARGET_REPO"
+
+          echo "Force pushing patched source tree to:"
+          echo "  $STATE_BRANCH"
+
+          git push --force target "HEAD:$STATE_BRANCH"
