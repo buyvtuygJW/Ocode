@@ -228,7 +228,7 @@ jobs:
               return 23
             fi
 
-            git commit -m "Apply FinalPERSONALIZE patch"
+            git commit -m "ApplyFinalPERSONALIZEpatch"
 
             echo "Applied final personalize patch."
 
@@ -240,7 +240,7 @@ jobs:
             if [ -f "$XPATCH" ]; then
               echo "Attempting optional patch: $XPATCH"
               if git apply --3way --index --whitespace=fix "$XPATCH" && ! git ls-files -u | grep -q .; then
-                git commit -m "Apply FinalPersonalizeX (transparency)"
+                git commit -m "ApplyFinalPersonalizeX(transparency)"
                 APPLIED_TRANSPARENCY="on"
                 echo "Optional transparency patch applied."
               else
@@ -263,6 +263,24 @@ jobs:
             #   2. they are not synced onto the dev branch where they would try to run.
             rm -rf .github/workflows
             echo "Upstream workflows removed."
+            return 0
+          }
+
+          run_opencode_build() {
+            if ! bun run --cwd packages/opencode build -- --skip-embed-web-ui; then
+              echo "opencode build failed"
+              return 1
+            fi
+            echo "Checking expected build outputs..."
+            for d in \
+              opencode-windows-x64 opencode-windows-x64-baseline \
+              opencode-linux-x64 opencode-linux-x64-baseline opencode-linux-arm64 \
+              opencode-darwin-x64 opencode-darwin-x64-baseline opencode-darwin-arm64; do
+              if [ ! -d "packages/opencode/dist/$d" ]; then
+                echo "missing build output: $d"
+                return 1
+              fi
+            done
             return 0
           }
 
@@ -323,24 +341,24 @@ jobs:
               return 30
             fi
 
-            if ! bun run --cwd packages/opencode build -- --skip-embed-web-ui; then
-              echo "ERROR: opencode build failed"
-              cd ..
-              return 40
+            if ! run_opencode_build; then
+              if [ "${APPLIED_TRANSPARENCY:-off}" = "on" ]; then
+                echo "Build failed with the optional transparency patch applied."
+                echo "Dropping FinalPersonalizeX and retrying the build without it..."
+                git reset --hard HEAD~1 >/dev/null 2>&1 || true
+                APPLIED_TRANSPARENCY="off"
+                if ! run_opencode_build; then
+                  echo "ERROR: opencode build failed even without the optional patch"
+                  cd ..
+                  return 40
+                fi
+                echo "Build succeeded WITHOUT transparency (optional patch dropped; release will warn)."
+              else
+                echo "ERROR: opencode build failed"
+                cd ..
+                return 40
+              fi
             fi
-
-            echo "Checking expected build outputs..."
-
-            test -d packages/opencode/dist/opencode-windows-x64 || return 51
-            test -d packages/opencode/dist/opencode-windows-x64-baseline || return 52
-
-            test -d packages/opencode/dist/opencode-linux-x64 || return 53
-            test -d packages/opencode/dist/opencode-linux-x64-baseline || return 54
-            test -d packages/opencode/dist/opencode-linux-arm64 || return 55
-
-            test -d packages/opencode/dist/opencode-darwin-x64 || return 56
-            test -d packages/opencode/dist/opencode-darwin-x64-baseline || return 57
-            test -d packages/opencode/dist/opencode-darwin-arm64 || return 58
 
             cd ..
 
@@ -565,7 +583,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit in patched source tree."
           else
-            git commit -m "sync: upstream $BUILT_SHA + personalize patch [skip ci]"
+            git commit -m "sync:upstream $BUILT_SHA +personalizepatch[skip ci]"
           fi
 
           TARGET_REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
