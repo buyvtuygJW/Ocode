@@ -231,6 +231,26 @@ jobs:
             git commit -m "Apply FinalPERSONALIZE patch"
 
             echo "Applied final personalize patch."
+
+            # Optional transparency patch (best-effort): apply if it fits, else skip.
+            # The core build NEVER fails over it; the release notes flag a skip so a
+            # download tells you it's time to re-port FinalPersonalizeX.patch.
+            APPLIED_TRANSPARENCY="off"
+            XPATCH="../patches/FinalPersonalizeX.patch"
+            if [ -f "$XPATCH" ]; then
+              echo "Attempting optional patch: $XPATCH"
+              if git apply --3way --index --whitespace=fix "$XPATCH" && ! git ls-files -u | grep -q .; then
+                git commit -m "Apply FinalPersonalizeX (transparency)"
+                APPLIED_TRANSPARENCY="on"
+                echo "Optional transparency patch applied."
+              else
+                echo "Optional transparency patch did NOT apply; skipping (build continues without it)."
+                git reset --hard HEAD >/dev/null 2>&1 || true
+              fi
+            else
+              echo "No optional transparency patch present."
+            fi
+
             return 0
           }
 
@@ -327,6 +347,7 @@ jobs:
             echo "built_ref=$ref" >> "$GITHUB_OUTPUT"
             echo "built_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
             echo "built_label=$label" >> "$GITHUB_OUTPUT"
+            echo "transparency=${APPLIED_TRANSPARENCY:-off}" >> "$GITHUB_OUTPUT"
 
             return 0
           }
@@ -464,6 +485,14 @@ jobs:
           SHA256 hashes are included in \`SHA256SUMS.txt\`.
           EOF
 
+          if [ "${{ steps.build.outputs.transparency }}" != "on" ]; then
+            {
+              echo ""
+              echo "> WARNING: the optional UI transparency patch (FinalPersonalizeX.patch) did NOT apply to this upstream and was skipped."
+              echo "> This build has NO transparency toggle. Re-port FinalPersonalizeX.patch against current upstream when you want it back."
+            } >> "$NOTES_FILE"
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release exists; updating assets."
             gh release upload "$TAG" out/*.zip out/*.tar.gz out/SHA256SUMS.txt --clobber
@@ -522,6 +551,7 @@ jobs:
           mkdir -p "$STATE_FILE_DIR"
 
           cp "../patches/FinalPERSONALIZE.patch" "patches/FinalPERSONALIZE.patch"
+          if [ -f "../patches/FinalPersonalizeX.patch" ]; then cp "../patches/FinalPersonalizeX.patch" "patches/FinalPersonalizeX.patch"; fi
           cp "../.github/workflows/weekly_customautorel.yml" ".github/workflows/weekly_customautorel.yml"
 
           echo "$BUILT_SHA" > "$STATE_FILE_DIR/last-success-upstream.txt"
