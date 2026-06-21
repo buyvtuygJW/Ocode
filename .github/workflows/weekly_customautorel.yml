@@ -230,6 +230,18 @@ jobs:
             return 0
           }
 
+          strip_upstream_workflows() {
+            echo ""
+            echo "Removing upstream .github/workflows (kept out of patch; can never block build)..."
+            # opencode-src never contains our own automation workflow, so it is safe
+            # to drop ALL upstream CI here. This guarantees:
+            #   1. broken / secret-bound upstream workflows can never block the build, and
+            #   2. they are not synced onto the dev branch where they would try to run.
+            rm -rf .github/workflows
+            echo "Upstream workflows removed."
+            return 0
+          }
+
           try_build() {
             local ref="$1"
             local label="$2"
@@ -262,6 +274,8 @@ jobs:
 
             git config user.name "patched-build-bot"
             git config user.email "patched-build-bot@example.local"
+
+            strip_upstream_workflows
 
             if ! apply_custom_git_patches; then
               echo "ERROR: custom patch application failed"
