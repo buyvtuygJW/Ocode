@@ -276,8 +276,8 @@ jobs:
             UPSTREAM_SHA="$(git rev-parse HEAD)"
             echo "Checked out upstream SHA: $UPSTREAM_SHA"
 
-            git config user.name "patched-build-bot"
-            git config user.email "patched-build-bot@example.local"
+            git config user.name "claudedbuildbot"
+            git config user.email "claudedbuildbot@example.local"
 
             strip_upstream_workflows
 
@@ -303,7 +303,7 @@ jobs:
               return 30
             fi
 
-            if ! bun run --cwd packages/opencode build; then
+            if ! bun run --cwd packages/opencode build -- --skip-embed-web-ui; then
               echo "ERROR: opencode build failed"
               cd ..
               return 40
@@ -423,8 +423,8 @@ jobs:
           echo "  tag=$TAG"
           echo "  title=$TITLE"
 
-          git config user.name "patched-build-bot"
-          git config user.email "patched-build-bot@example.local"
+          git config user.name "claudedbuildbot"
+          git config user.email "claudedbuildbot@example.local"
 
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
             echo "Tag already exists: $TAG"
@@ -514,8 +514,8 @@ jobs:
 
           cd opencode-src
 
-          git config user.name "patched-build-bot"
-          git config user.email "patched-build-bot@example.local"
+          git config user.name "claudedbuildbot"
+          git config user.email "claudedbuildbot@example.local"
 
           mkdir -p "patches"
           mkdir -p ".github/workflows"
