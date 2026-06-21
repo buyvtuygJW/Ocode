@@ -27,6 +27,10 @@ jobs:
       UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'production' }}
       STATE_BRANCH: dev
       STATE_FILE_DIR: .github/opencode-build-state
+      # Disable husky so the .husky/pre-push hook (bun turbo typecheck across all
+      # packages) never runs during install/commit/sync — wasted time, and a type
+      # nit there could block the dev sync. We don't need it; types are handled.
+      HUSKY: "0"
 
     steps:
       - name: Checkout patch repo

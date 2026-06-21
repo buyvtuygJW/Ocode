@@ -31,7 +31,7 @@ index 6ad6495..e42e257 100644
  
  export class CancelledError extends Schema.TaggedErrorClass<CancelledError>()("UICancelledError", {}) {}
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index b616df6..3cd72b1 100644
+index b616df6..e6b5ec0 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -92,6 +92,64 @@ export interface Interface {
@@ -39,7 +39,7 @@ index b616df6..3cd72b1 100644
  }
  
 +//PATCH START to custom ROLE>
-+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "fs"
++import { existsSync, mkdirSync, readFileSync, writeFileSync /*, appendFileSync */ } from "fs"
 +
 +type RoleEvalConfig = {
 +  usersystem: string
@@ -57,27 +57,27 @@ index b616df6..3cd72b1 100644
 +    assistant_system: "",
 +  }
 +
-+  const debugFile = path.join(root, ".opencode", "role-debug.log")
++  // const debugFile = path.join(root, ".opencode", "role-debug.log")
 +
 +  try {
 +    mkdirSync(path.dirname(file), { recursive: true })
-+    appendFileSync(
-+      debugFile,
-+      [
-+        `[${new Date().toISOString()}]`,
-+        `cwd=${process.cwd()}`,
-+        `projectRoot=${projectRoot}`,
-+        `root=${root}`,
-+        `file=${file}`,
-+        `exists=${existsSync(file)}`,
-+        "",
-+      ].join("\n"),
-+      "utf8",
-+    )
++    // appendFileSync(
++    //   debugFile,
++    //   [
++    //     `[${new Date().toISOString()}]`,
++    //     `cwd=${process.cwd()}`,
++    //     `projectRoot=${projectRoot}`,
++    //     `root=${root}`,
++    //     `file=${file}`,
++    //     `exists=${existsSync(file)}`,
++    //     "",
++    //   ].join("\n"),
++    //   "utf8",
++    // )
 +
 +    if (!existsSync(file)) {
 +      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
-+      appendFileSync(debugFile, `created=${file}\n\n`, "utf8")
++      // appendFileSync(debugFile, `created=${file}\n\n`, "utf8")
 +      return stock
 +    }
 +
@@ -88,9 +88,9 @@ index b616df6..3cd72b1 100644
 +      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
 +    }
 +  } catch (err) {
-+    try {
-+      appendFileSync(debugFile, `ERROR=${String(err)}\n\n`, "utf8")
-+    } catch {}
++    // try {
++    //   appendFileSync(debugFile, `ERROR=${String(err)}\n\n`, "utf8")
++    // } catch {}
 +    return stock
 +  }
 +}
