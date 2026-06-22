@@ -1,0 +1,169 @@
+diff --git a/packages/opencode/src/cli/logo.ts b/packages/opencode/src/cli/logo.ts
+index 9117d38..b86eef6 100644
+--- a/packages/opencode/src/cli/logo.ts
++++ b/packages/opencode/src/cli/logo.ts
+@@ -1 +1,8 @@
++import { logo as upstreamLogo } from "@opencode-ai/tui/logo"
++
+ export * from "@opencode-ai/tui/logo"
++
++export const logo = {
++  ...upstreamLogo,
++  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
++}
+diff --git a/packages/opencode/src/cli/ui.ts b/packages/opencode/src/cli/ui.ts
+index 6ad6495..e42e257 100644
+--- a/packages/opencode/src/cli/ui.ts
++++ b/packages/opencode/src/cli/ui.ts
+@@ -3,10 +3,10 @@ import { Schema } from "effect"
+ import { logo as glyphs } from "./logo"
+ 
+ const wordmark = [
+-  `⠀                                ▄     `,
+-  `█▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
+-  `█  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀`,
+-  `▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
++  `⠀█▀▀▀▀▀▀█               ▄     `,
++  ` ▀█    █▀  █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
++  `  ▀█__█▀   █    █  █ █  █ █▀▀▀`,
++  `█▄▄█  █▄▄█ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
+ ]
+ 
+ export class CancelledError extends Schema.TaggedErrorClass<CancelledError>()("UICancelledError", {}) {}
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index b616df6..e6b5ec0 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -92,6 +92,64 @@ export interface Interface {
+   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
+ }
+ 
++//PATCH START to custom ROLE>
++import { existsSync, mkdirSync, readFileSync, writeFileSync /*, appendFileSync */ } from "fs"
++
++type RoleEvalConfig = {
++  usersystem: string
++  assistant_system: string
++}
++
++function loadRoleEvalConfig(projectRoot: string): RoleEvalConfig {
++  const root = path.resolve(projectRoot || process.cwd())
++  const file = process.env.OPENCODE_ROLE_FILE
++    ? path.resolve(process.env.OPENCODE_ROLE_FILE)
++    : path.join(root, ".opencode", "role.json")
++
++  const stock: RoleEvalConfig = {
++    usersystem: "",
++    assistant_system: "",
++  }
++
++  // const debugFile = path.join(root, ".opencode", "role-debug.log")
++
++  try {
++    mkdirSync(path.dirname(file), { recursive: true })
++    // appendFileSync(
++    //   debugFile,
++    //   [
++    //     `[${new Date().toISOString()}]`,
++    //     `cwd=${process.cwd()}`,
++    //     `projectRoot=${projectRoot}`,
++    //     `root=${root}`,
++    //     `file=${file}`,
++    //     `exists=${existsSync(file)}`,
++    //     "",
++    //   ].join("\n"),
++    //   "utf8",
++    // )
++
++    if (!existsSync(file)) {
++      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
++      // appendFileSync(debugFile, `created=${file}\n\n`, "utf8")
++      return stock
++    }
++
++    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleEvalConfig>
++
++    return {
++      usersystem: typeof parsed.usersystem === "string" ? parsed.usersystem : "",
++      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
++    }
++  } catch (err) {
++    // try {
++    //   appendFileSync(debugFile, `ERROR=${String(err)}\n\n`, "utf8")
++    // } catch {}
++    return stock
++  }
++}
++//PATCH END,P1.P2 is per user&assistant function edit to use var>roleEvalConfig.assistant etc.
++
+ export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+ 
+ export const layer = Layer.effect(
+@@ -1312,7 +1370,16 @@ export const layer = Layer.effect(
+               instruction.system().pipe(Effect.orDie),
+               MessageV2.toModelMessagesEffect(msgs, model),
+             ])
+-            const system = [...env, ...instructions, ...(skills ? [skills] : [])]
++            // CUSTOM-ROLE-SYSTEM START
++            const roleRoot = ctx.worktree === "/" || ctx.worktree === "\\" ? ctx.directory : ctx.worktree
++            const roleEvalConfig = loadRoleEvalConfig(roleRoot)
++            const system = [
++              roleEvalConfig.assistant_system,
++              ...env,
++              ...instructions,
++              ...(skills ? [skills] : []),
++            ].filter(Boolean)
++            // CUSTOM-ROLE-SYSTEM END
+             const format = lastUser.format ?? { type: "text" as const }
+             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+             const result = yield* handle.process({
+diff --git a/packages/core/src/flag/flag.ts b/packages/core/src/flag/flag.ts
+index a0eb78a13e..8838d44b41 100644
+--- a/packages/core/src/flag/flag.ts
++++ b/packages/core/src/flag/flag.ts
+@@ -20,7 +20,7 @@ export const Flag = {
+   OPENCODE_GIT_BASH_PATH: process.env["OPENCODE_GIT_BASH_PATH"],
+   OPENCODE_CONFIG: process.env["OPENCODE_CONFIG"],
+   OPENCODE_CONFIG_CONTENT: process.env["OPENCODE_CONFIG_CONTENT"],
+-  OPENCODE_DISABLE_AUTOUPDATE: truthy("OPENCODE_DISABLE_AUTOUPDATE"),
++  OPENCODE_DISABLE_AUTOUPDATE: true, // SANITIZE(#459): no auto update-check (github/chocolatey/opencode.ai)
+   OPENCODE_ALWAYS_NOTIFY_UPDATE: truthy("OPENCODE_ALWAYS_NOTIFY_UPDATE"),
+   OPENCODE_DISABLE_PRUNE: truthy("OPENCODE_DISABLE_PRUNE"),
+   OPENCODE_DISABLE_TERMINAL_TITLE: truthy("OPENCODE_DISABLE_TERMINAL_TITLE"),
+diff --git a/packages/core/src/observability/otlp.ts b/packages/core/src/observability/otlp.ts
+index dd99ebc143..e336e0b2d7 100644
+--- a/packages/core/src/observability/otlp.ts
++++ b/packages/core/src/observability/otlp.ts
+@@ -4,7 +4,7 @@ import { Flag } from "../flag/flag"
+ import { InstallationChannel, InstallationVersion } from "../installation/version"
+ import { runID } from "./shared"
+
+-const endpoint = Flag.OTEL_EXPORTER_OTLP_ENDPOINT
++const endpoint = undefined // SANITIZE(#459): force OTLP/telemetry off (no honeycomb)
+
+ const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
+   ? Flag.OTEL_EXPORTER_OTLP_HEADERS.split(",").reduce(
+diff --git a/packages/opencode/src/share/share-next.ts b/packages/opencode/src/share/share-next.ts
+index 90c2eafac8..8f9aca0886 100644
+--- a/packages/opencode/src/share/share-next.ts
++++ b/packages/opencode/src/share/share-next.ts
+@@ -20,7 +20,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { EventV2 } from "@opencode-ai/core/event"
+
+-const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
++const disabled = true // SANITIZE(#459): force sharing off (no opncd.ai/api.opencode.ai session content)
+
+ export type Api = {
+   create: string
+diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
+index a58a8cf995..3ff28659ae 100644
+--- a/packages/tui/src/logo.ts
++++ b/packages/tui/src/logo.ts
+@@ -1,5 +1,5 @@
+ export const logo = {
+-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
++  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
+   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+ }
+ 
