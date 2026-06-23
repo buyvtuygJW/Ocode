@@ -262,6 +262,7 @@ jobs:
             #   1. broken / secret-bound upstream workflows can never block the build, and
             #   2. they are not synced onto the dev branch where they would try to run.
             rm -rf .github/workflows
+            rm -f README*
             echo "Upstream workflows removed."
             return 0
           }
