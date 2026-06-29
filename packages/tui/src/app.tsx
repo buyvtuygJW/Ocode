@@ -685,6 +685,14 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       {
+        name: "theme.transparent",
+        title: "Toggle transparency",
+        category: "System",
+        run: () => {
+          themeState.toggleTransparent()
+        },
+      },
+      {
         name: "agent.cycle",
         title: "Agent cycle",
         category: "Agent",
