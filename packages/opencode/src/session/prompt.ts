@@ -148,6 +148,12 @@ function loadRoleEvalConfig(projectRoot: string): RoleEvalConfig {
     return stock
   }
 }
+
+function stripIdentity(prompt: string) {
+  // beast.txt fuses identity with the "keep going until resolved" instruction in sentence one - leave it intact.
+  if (prompt.startsWith("You are opencode, an agent")) return prompt
+  return prompt.replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
+}
 //PATCH END,P1.P2 is per user&assistant function edit to use var>roleEvalConfig.assistant etc.
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
@@ -1372,19 +1378,23 @@ export const layer = Layer.effect(
             ])
             // CUSTOM-ROLE-SYSTEM START
             const roleRoot = ctx.worktree === "/" || ctx.worktree === "\\" ? ctx.directory : ctx.worktree
-            const roleEvalConfig = loadRoleEvalConfig(roleRoot)
-            const system = [
-              roleEvalConfig.assistant_system,
-              ...env,
-              ...instructions,
-              ...(skills ? [skills] : []),
-            ].filter(Boolean)
+            const persona = loadRoleEvalConfig(roleRoot).assistant_system
+            // Persona set -> it leads the prompt and the stock identity opener is stripped; empty -> untouched stock behavior.
+            const roleAgent = persona
+              ? {
+                  ...agent,
+                  prompt: [persona, ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).map(stripIdentity)]
+                    .filter(Boolean)
+                    .join("\n"),
+                }
+              : agent
+            const system = [...env, ...instructions, ...(skills ? [skills] : [])].filter(Boolean)
             // CUSTOM-ROLE-SYSTEM END
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
               user: lastUser,
-              agent,
+              agent: roleAgent,
               permission: session.permission,
               sessionID,
               parentSessionID: session.parentID,

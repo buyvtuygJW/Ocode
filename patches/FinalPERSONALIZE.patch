@@ -34,7 +34,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index b616df6..e6b5ec0 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -92,6 +92,64 @@ export interface Interface {
+@@ -92,6 +92,70 @@ export interface Interface {
    readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
  }
  
@@ -94,29 +94,45 @@ index b616df6..e6b5ec0 100644
 +    return stock
 +  }
 +}
++
++function stripIdentity(prompt: string) {
++  // beast.txt fuses identity with the "keep going until resolved" instruction in sentence one - leave it intact.
++  if (prompt.startsWith("You are opencode, an agent")) return prompt
++  return prompt.replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
 +//PATCH END,P1.P2 is per user&assistant function edit to use var>roleEvalConfig.assistant etc.
 +
  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
  
  export const layer = Layer.effect(
-@@ -1312,7 +1370,16 @@ export const layer = Layer.effect(
+@@ -1312,12 +1376,25 @@ export const layer = Layer.effect(
                instruction.system().pipe(Effect.orDie),
                MessageV2.toModelMessagesEffect(msgs, model),
              ])
 -            const system = [...env, ...instructions, ...(skills ? [skills] : [])]
 +            // CUSTOM-ROLE-SYSTEM START
 +            const roleRoot = ctx.worktree === "/" || ctx.worktree === "\\" ? ctx.directory : ctx.worktree
-+            const roleEvalConfig = loadRoleEvalConfig(roleRoot)
-+            const system = [
-+              roleEvalConfig.assistant_system,
-+              ...env,
-+              ...instructions,
-+              ...(skills ? [skills] : []),
-+            ].filter(Boolean)
++            const persona = loadRoleEvalConfig(roleRoot).assistant_system
++            // Persona set -> it leads the prompt and the stock identity opener is stripped; empty -> untouched stock behavior.
++            const roleAgent = persona
++              ? {
++                  ...agent,
++                  prompt: [persona, ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).map(stripIdentity)]
++                    .filter(Boolean)
++                    .join("\n"),
++                }
++              : agent
++            const system = [...env, ...instructions, ...(skills ? [skills] : [])].filter(Boolean)
 +            // CUSTOM-ROLE-SYSTEM END
              const format = lastUser.format ?? { type: "text" as const }
              if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
              const result = yield* handle.process({
+               user: lastUser,
+-              agent,
++              agent: roleAgent,
+               permission: session.permission,
+               sessionID,
+               parentSessionID: session.parentID,
 diff --git a/packages/core/src/flag/flag.ts b/packages/core/src/flag/flag.ts
 index a0eb78a13e..8838d44b41 100644
 --- a/packages/core/src/flag/flag.ts
