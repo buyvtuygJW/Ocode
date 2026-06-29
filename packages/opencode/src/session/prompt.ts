@@ -108,6 +108,70 @@ export interface Interface {
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
 }
 
+//PATCH START to custom ROLE>
+import { existsSync, mkdirSync, readFileSync, writeFileSync /*, appendFileSync */ } from "fs"
+
+type RoleEvalConfig = {
+  usersystem: string
+  assistant_system: string
+}
+
+function loadRoleEvalConfig(projectRoot: string): RoleEvalConfig {
+  const root = path.resolve(projectRoot || process.cwd())
+  const file = process.env.OPENCODE_ROLE_FILE
+    ? path.resolve(process.env.OPENCODE_ROLE_FILE)
+    : path.join(root, ".opencode", "role.json")
+
+  const stock: RoleEvalConfig = {
+    usersystem: "",
+    assistant_system: "",
+  }
+
+  // const debugFile = path.join(root, ".opencode", "role-debug.log")
+
+  try {
+    mkdirSync(path.dirname(file), { recursive: true })
+    // appendFileSync(
+    //   debugFile,
+    //   [
+    //     `[${new Date().toISOString()}]`,
+    //     `cwd=${process.cwd()}`,
+    //     `projectRoot=${projectRoot}`,
+    //     `root=${root}`,
+    //     `file=${file}`,
+    //     `exists=${existsSync(file)}`,
+    //     "",
+    //   ].join("\n"),
+    //   "utf8",
+    // )
+
+    if (!existsSync(file)) {
+      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
+      // appendFileSync(debugFile, `created=${file}\n\n`, "utf8")
+      return stock
+    }
+
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleEvalConfig>
+
+    return {
+      usersystem: typeof parsed.usersystem === "string" ? parsed.usersystem : "",
+      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
+    }
+  } catch (err) {
+    // try {
+    //   appendFileSync(debugFile, `ERROR=${String(err)}\n\n`, "utf8")
+    // } catch {}
+    return stock
+  }
+}
+
+function stripIdentity(prompt: string) {
+  // beast.txt fuses identity with the "keep going until resolved" instruction in sentence one - leave it intact.
+  if (prompt.startsWith("You are opencode, an agent")) return prompt
+  return prompt.replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
+}
+//PATCH END,P1.P2 is per user&assistant function edit to use var>roleEvalConfig.assistant etc.
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
 
 export const layer = Layer.effect(
@@ -1260,17 +1324,30 @@ export const layer = Layer.effect(
               sys.mcp(agent, session.permission),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
+            // CUSTOM-ROLE-SYSTEM START
+            const roleCtx = yield* InstanceState.context
+            const roleRoot = roleCtx.worktree === "/" || roleCtx.worktree === "\\" ? roleCtx.directory : roleCtx.worktree
+            const persona = loadRoleEvalConfig(roleRoot).assistant_system
+            const roleAgent = persona
+              ? {
+                  ...agent,
+                  prompt: [persona, ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).map(stripIdentity)]
+                    .filter(Boolean)
+                    .join("\n"),
+                }
+              : agent
             const system = [
               ...env,
               ...instructions,
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
             ]
+            // CUSTOM-ROLE-SYSTEM END
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
               user: lastUser,
-              agent,
+              agent: roleAgent,
               permission: session.permission,
               sessionID,
               parentSessionID: session.parentID,
