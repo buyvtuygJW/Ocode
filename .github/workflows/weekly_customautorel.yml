@@ -232,6 +232,9 @@ jobs:
 
             echo "Applied final personalize patch."
 
+            # Remember the core commit so a failed build can roll back ALL optional patches.
+            CORE_SHA="$(git rev-parse HEAD)"
+
             # Optional transparency patch (best-effort): apply if it fits, else skip.
             # The core build NEVER fails over it; the release notes flag a skip so a
             # download tells you it's time to re-port FinalPersonalizeX.patch.
@@ -249,6 +252,44 @@ jobs:
               fi
             else
               echo "No optional transparency patch present."
+            fi
+
+            # Optional OpenScience research-agents patch (best-effort): apply if it fits, else skip.
+            # Independent of the transparency patch; the core build NEVER fails over it. A skip is
+            # flagged in the release notes so a download tells you to re-port FinalPersonalizeS.patch.
+            APPLIED_SCIENCE="off"
+            SPATCH="../patches/FinalPersonalizeS.patch"
+            if [ -f "$SPATCH" ]; then
+              echo "Attempting optional patch: $SPATCH"
+              if git apply --3way --index --whitespace=fix "$SPATCH" && ! git ls-files -u | grep -q .; then
+                git commit -m "ApplyFinalPersonalizeS(research-agents)"
+                APPLIED_SCIENCE="on"
+                echo "Optional research-agents patch applied."
+              else
+                echo "Optional research-agents patch did NOT apply; skipping (build continues without it)."
+                git reset --hard HEAD >/dev/null 2>&1 || true
+              fi
+            else
+              echo "No optional research-agents patch present."
+            fi
+
+            # Optional RSI /distill loop patch (best-effort): native distill_session tool +
+            # built-in /distill command, compiled into the binary. Core build NEVER fails over it.
+            # This is the riskiest optional (hand-written effect code); a skip is flagged in the notes.
+            APPLIED_RSI="off"
+            RPATCH="../patches/FinalPersonalizeR.patch"
+            if [ -f "$RPATCH" ]; then
+              echo "Attempting optional patch: $RPATCH"
+              if git apply --3way --index --whitespace=fix "$RPATCH" && ! git ls-files -u | grep -q .; then
+                git commit -m "ApplyFinalPersonalizeR(rsi-distill-loop)"
+                APPLIED_RSI="on"
+                echo "Optional RSI loop patch applied."
+              else
+                echo "Optional RSI loop patch did NOT apply; skipping (build continues without it)."
+                git reset --hard HEAD >/dev/null 2>&1 || true
+              fi
+            else
+              echo "No optional RSI loop patch present."
             fi
 
             return 0
@@ -342,17 +383,19 @@ jobs:
             fi
 
             if ! run_opencode_build; then
-              if [ "${APPLIED_TRANSPARENCY:-off}" = "on" ]; then
-                echo "Build failed with the optional transparency patch applied."
-                echo "Dropping FinalPersonalizeX and retrying the build without it..."
-                git reset --hard HEAD~1 >/dev/null 2>&1 || true
+              if [ "${APPLIED_TRANSPARENCY:-off}" = "on" ] || [ "${APPLIED_SCIENCE:-off}" = "on" ] || [ "${APPLIED_RSI:-off}" = "on" ]; then
+                echo "Build failed with optional patch(es) applied (transparency=${APPLIED_TRANSPARENCY:-off}, science=${APPLIED_SCIENCE:-off}, rsi=${APPLIED_RSI:-off})."
+                echo "Dropping ALL optional patches and retrying the build without them..."
+                git reset --hard "${CORE_SHA:-HEAD}" >/dev/null 2>&1 || true
                 APPLIED_TRANSPARENCY="off"
+                APPLIED_SCIENCE="off"
+                APPLIED_RSI="off"
                 if ! run_opencode_build; then
-                  echo "ERROR: opencode build failed even without the optional patch"
+                  echo "ERROR: opencode build failed even without the optional patches"
                   cd ..
                   return 40
                 fi
-                echo "Build succeeded WITHOUT transparency (optional patch dropped; release will warn)."
+                echo "Build succeeded WITHOUT optional patches (dropped; release will warn)."
               else
                 echo "ERROR: opencode build failed"
                 cd ..
@@ -366,6 +409,8 @@ jobs:
             echo "built_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
             echo "built_label=$label" >> "$GITHUB_OUTPUT"
             echo "transparency=${APPLIED_TRANSPARENCY:-off}" >> "$GITHUB_OUTPUT"
+            echo "science=${APPLIED_SCIENCE:-off}" >> "$GITHUB_OUTPUT"
+            echo "rsi=${APPLIED_RSI:-off}" >> "$GITHUB_OUTPUT"
 
             return 0
           }
@@ -397,6 +442,7 @@ jobs:
           exit 1
 
       - name: Package CLI artifacts
+        id: package
         shell: bash
         run: |
           set -euo pipefail
@@ -431,6 +477,19 @@ jobs:
           package_zip "$DIST/opencode-darwin-x64" "opencode-darwin-x64-custom"
           package_zip "$DIST/opencode-darwin-x64-baseline" "opencode-darwin-x64-baseline-custom"
           package_zip "$DIST/opencode-darwin-arm64" "opencode-darwin-arm64-custom"
+
+          # Optional science-skills pack (best-effort; only for a 'latest' release; NEVER fails the build).
+          # Skills are too many to compile into the binary, so they ship as a downloadable asset.
+          SKILLS_PACK="off"
+          if [ "${{ steps.build.outputs.built_label }}" = "latest" ]; then
+            if bash patches/build-openscience-skills.sh "$OUT/openscience-skills.tar.gz"; then
+              SKILLS_PACK="on"
+              echo "science-skills pack built -> openscience-skills.tar.gz"
+            else
+              echo "science-skills pack build failed; skipping (best-effort, release continues)."
+            fi
+          fi
+          echo "skills_pack=$SKILLS_PACK" >> "$GITHUB_OUTPUT"
 
           cd "$OUT"
           sha256sum * > SHA256SUMS.txt
@@ -511,6 +570,51 @@ jobs:
             } >> "$NOTES_FILE"
           fi
 
+          if [ "${{ steps.build.outputs.science }}" != "on" ]; then
+            {
+              echo ""
+              echo "> WARNING: the optional research-agents patch (FinalPersonalizeS.patch) did NOT apply to this upstream and was skipped."
+              echo "> This build has NO research/biology/physics/ml agents. Re-port FinalPersonalizeS.patch against current upstream when you want them back."
+            } >> "$NOTES_FILE"
+          fi
+
+          if [ "${{ steps.build.outputs.rsi }}" != "on" ]; then
+            {
+              echo ""
+              echo "> WARNING: the optional RSI /distill loop patch (FinalPersonalizeR.patch) did NOT apply/build against this upstream and was skipped."
+              echo "> This build has NO /distill command or distill_session tool. Re-port FinalPersonalizeR.patch against current upstream when you want it back."
+            } >> "$NOTES_FILE"
+          fi
+
+          if [ "${{ steps.package.outputs.skills_pack }}" = "on" ]; then
+            ASSET="https://github.com/${{ github.repository }}/releases/download/$TAG/openscience-skills.tar.gz"
+            {
+              echo ""
+              echo "## Science skills (~290, optional download)"
+              echo ""
+              echo "De-branded science skills (biology / chemistry / physics / ML / databases / ...), packaged as openscience-skills.tar.gz."
+              echo "Install into opencode's global skill dir (~/.claude/skills), discovered via skills/**/SKILL.md:"
+              echo ""
+              echo '```bash'
+              echo "mkdir -p ~/.claude/skills && curl -fsSL $ASSET | tar xz -C ~/.claude/skills"
+              echo '```'
+              echo '```powershell'
+              echo "New-Item ~/.claude/skills -Type Directory -Force; iwr $ASSET -OutFile \$env:TEMP\\os.tgz; tar -xzf \$env:TEMP\\os.tgz -C ~/.claude/skills"
+              echo '```'
+            } >> "$NOTES_FILE"
+          fi
+
+          if [ "${{ steps.build.outputs.rsi }}" = "on" ]; then
+            {
+              echo ""
+              echo "## /distill self-improvement loop (RSI) — built into this binary"
+              echo ""
+              echo "Native, deterministic (no LLM scoring): the /distill command + distill_session tool score the current"
+              echo "session on the RSI rubric and, if it clears >=75/100, save a reusable skill to ~/.config/opencode/skills/learned/"
+              echo "(auto-discovered next session). Just run /distill at the end of a research session."
+            } >> "$NOTES_FILE"
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release exists; updating assets."
             gh release upload "$TAG" out/*.zip out/*.tar.gz out/SHA256SUMS.txt --clobber
@@ -570,6 +674,9 @@ jobs:
 
           cp "../patches/FinalPERSONALIZE.patch" "patches/FinalPERSONALIZE.patch"
           if [ -f "../patches/FinalPersonalizeX.patch" ]; then cp "../patches/FinalPersonalizeX.patch" "patches/FinalPersonalizeX.patch"; fi
+          if [ -f "../patches/FinalPersonalizeS.patch" ]; then cp "../patches/FinalPersonalizeS.patch" "patches/FinalPersonalizeS.patch"; fi
+          if [ -f "../patches/FinalPersonalizeR.patch" ]; then cp "../patches/FinalPersonalizeR.patch" "patches/FinalPersonalizeR.patch"; fi
+          if [ -f "../patches/build-openscience-skills.sh" ]; then cp "../patches/build-openscience-skills.sh" "patches/build-openscience-skills.sh"; fi
           cp "../.github/workflows/weekly_customautorel.yml" ".github/workflows/weekly_customautorel.yml"
 
           echo "$BUILT_SHA" > "$STATE_FILE_DIR/last-success-upstream.txt"
