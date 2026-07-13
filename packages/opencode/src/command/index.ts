@@ -9,6 +9,7 @@ import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_DISTILL from "./template/distill.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
 
 type State = {
@@ -85,6 +86,15 @@ const layer = Layer.effect(
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      }
+      commands["distill"] = {
+        name: "distill",
+        description: "distill this session into a reusable skill (RSI, deterministic)",
+        source: "command",
+        get template() {
+          return PROMPT_DISTILL
+        },
+        hints: hints(PROMPT_DISTILL),
       }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {
