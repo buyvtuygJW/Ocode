@@ -4,7 +4,7 @@ import { Flag } from "../flag/flag"
 import { InstallationChannel, InstallationVersion } from "../installation/version"
 import { runID } from "./shared"
 
-const endpoint = Flag.OTEL_EXPORTER_OTLP_ENDPOINT
+const endpoint = undefined // SANITIZE(#459): force OTLP/telemetry off (no honeycomb)
 
 const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
   ? Flag.OTEL_EXPORTER_OTLP_HEADERS.split(",").reduce(
