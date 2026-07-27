@@ -14,6 +14,15 @@ import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_RESEARCH from "./prompt/research.txt"
+import PROMPT_BIOLOGY from "./prompt/biology.txt"
+import PROMPT_PHYSICS from "./prompt/physics.txt"
+import PROMPT_ML from "./prompt/ml.txt"
+import PROMPT_WRITE from "./prompt/write.txt"
+import PROMPT_LITERATURE_REVIEW from "./prompt/literature-review.txt"
+import PROMPT_CRITIQUE from "./prompt/critique.txt"
+import PROMPT_PHYSICS_CRITIQUE from "./prompt/physics-critique.txt"
+import PROMPT_REVIEWER from "./prompt/reviewer.txt"
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
@@ -151,6 +160,188 @@ const layer = Layer.effect(
               user,
             ),
             mode: "primary",
+            native: true,
+          },
+          // --- OpenScience research agents (optional patch: FinalPersonalizeS) ---
+          research: {
+            name: "research",
+            description:
+              "Scientific research agent — literature review, data analysis, cloud GPU compute, and synthesis across a bundled science skill library.",
+            options: {},
+            color: "#06b6d4",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_enter: "allow",
+              }),
+              user,
+            ),
+            prompt: PROMPT_RESEARCH,
+            mode: "primary",
+            native: true,
+          },
+          biology: {
+            name: "biology",
+            description:
+              "Computational biology agent — bioinformatics analysis, 30+ biological database integrations, and systematic data-to-answer workflows.",
+            options: {},
+            color: "#10b981",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+              }),
+              user,
+            ),
+            prompt: PROMPT_BIOLOGY,
+            mode: "all",
+            native: true,
+          },
+          physics: {
+            name: "physics",
+            description:
+              "Computational physics agent — simulation, PDE solving, dynamical systems, symbolic regression, data analysis, and scientific computing.",
+            options: {},
+            color: "#8b5cf6",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+              }),
+              user,
+            ),
+            prompt: PROMPT_PHYSICS,
+            mode: "all",
+            native: true,
+          },
+          ml: {
+            name: "ml",
+            description:
+              "Machine learning agent — trains, evaluates, and analyzes models end-to-end (deep learning, LLMs, classical ML, RL) with rigorous evaluation, and builds specialized models to replace frontier APIs.",
+            options: {},
+            color: "#6366f1",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+              }),
+              user,
+            ),
+            prompt: PROMPT_ML,
+            mode: "all",
+            native: true,
+          },
+          write: {
+            name: "write",
+            description:
+              "Scientific & technical writing. Produces LaTeX papers, grants, literature reviews with verified citations and figures.",
+            options: {},
+            color: "#a78bfa",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+              }),
+              user,
+            ),
+            prompt: PROMPT_WRITE,
+            mode: "subagent",
+            native: true,
+          },
+          "literature-review": {
+            name: "literature-review",
+            description:
+              "Full PRISMA literature review — systematic search, screening, eligibility, synthesis, verification.",
+            options: {},
+            color: "#818cf8",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                bash: "allow",
+                read: "allow",
+                glob: "allow",
+                grep: "allow",
+                webfetch: "allow",
+                websearch: "allow",
+                skill: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            prompt: PROMPT_LITERATURE_REVIEW,
+            mode: "subagent",
+            native: true,
+          },
+          critique: {
+            name: "critique",
+            steps: 60,
+            description:
+              "Scientific critique specialist. Finds blocking errors — data leakage, wrong statistics, unsupported claims — in research artifacts before expensive or irreversible actions. Read-only.",
+            options: {},
+            color: "#ef4444",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                glob: "allow",
+                grep: "allow",
+                skill: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            prompt: PROMPT_CRITIQUE,
+            mode: "subagent",
+            native: true,
+          },
+          "physics-critique": {
+            name: "physics-critique",
+            steps: 60,
+            description:
+              "Physics critique specialist — validates computational physics results (PDE solutions, PINN outputs, fitted parameters) against rigorous physical and numerical criteria. Read-only.",
+            options: {},
+            color: "#c084fc",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                glob: "allow",
+                grep: "allow",
+                bash: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            prompt: PROMPT_PHYSICS_CRITIQUE,
+            mode: "subagent",
+            native: true,
+          },
+          reviewer: {
+            name: "reviewer",
+            steps: 60,
+            description:
+              "Blind, adversarial reviewer of research outputs. Traces every claim, number, and figure back to evidence — flags citation mismatches, untraceable numbers, and figure/stat mismatches. Read-only.",
+            options: {},
+            color: "#f59e0b",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                read: "allow",
+                glob: "allow",
+                grep: "allow",
+                bash: "allow",
+                skill: "allow",
+                external_directory: readonlyExternalDirectory,
+              }),
+              user,
+            ),
+            prompt: PROMPT_REVIEWER,
+            mode: "subagent",
             native: true,
           },
           plan: {
