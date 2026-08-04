@@ -2,15 +2,16 @@ diff --git a/packages/opencode/src/command/index.ts b/packages/opencode/src/comm
 index 057754cd9..d2c05c015 100644
 --- a/packages/opencode/src/command/index.ts
 +++ b/packages/opencode/src/command/index.ts
-@@ -9,6 +9,7 @@ import { MCP } from "../mcp"
+@@ -9,6 +9,8 @@ import { MCP } from "../mcp"
  import { Skill } from "../skill"
  import PROMPT_INITIALIZE from "./template/initialize.txt"
  import PROMPT_REVIEW from "./template/review.txt"
 +import PROMPT_DISTILL from "./template/distill.txt"
++import PROMPT_SCHEDULE from "./template/schedule.txt"
  import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
  
  type State = {
-@@ -86,6 +87,15 @@ const layer = Layer.effect(
+@@ -86,6 +88,24 @@ const layer = Layer.effect(
          subtask: true,
          hints: hints(PROMPT_REVIEW),
        }
@@ -22,6 +23,15 @@ index 057754cd9..d2c05c015 100644
 +          return PROMPT_DISTILL
 +        },
 +        hints: hints(PROMPT_DISTILL),
++      }
++      commands["schedule"] = {
++        name: "schedule",
++        description: "run qm-style background schedules that are due (deterministic crons)",
++        source: "command",
++        get template() {
++          return PROMPT_SCHEDULE
++        },
++        hints: hints(PROMPT_SCHEDULE),
 +      }
  
        for (const [name, command] of Object.entries(cfg.command ?? {})) {
@@ -324,38 +334,356 @@ index 000000000..3cde364a6
 @@ -0,0 +1 @@
 +Deterministically distill the CURRENT session into a reusable learned skill using the RSI (Recursive Self-Improvement) heuristic — NO LLM scoring. Reconstructs this session's tool trajectory, scores it 0-100 on Correctness/Efficiency/Coverage/Reproducibility, and only if it scores >= 75 writes a reusable skill to the global opencode skills dir (~/.config/opencode/skills/learned/<name>/SKILL.md), which opencode auto-discovers in future sessions. Run this at the end of a research session. Returns the score breakdown and either the saved skill path or the reason it was skipped.
 diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
-index 15acc757f..b478993d1 100644
+index 553fa1e..dbd5636 100644
 --- a/packages/opencode/src/tool/registry.ts
 +++ b/packages/opencode/src/tool/registry.ts
-@@ -29,6 +29,7 @@ import { WebSearchTool } from "./websearch"
+@@ -29,6 +29,8 @@ import { WebSearchTool } from "./websearch"
  import { LspTool } from "./lsp"
  import * as Truncate from "./truncate"
  import { ApplyPatchTool } from "./apply_patch"
 +import { DistillTool } from "./distill"
++import { ScheduleTool } from "./schedule"
  import { Glob } from "@opencode-ai/core/util/glob"
  import path from "path"
  import { pathToFileURL } from "url"
-@@ -109,6 +110,7 @@ const layer = Layer.effect(
+@@ -105,6 +107,8 @@ export const layer = Layer.effect(
      const greptool = yield* GrepTool
      const patchtool = yield* ApplyPatchTool
      const skilltool = yield* SkillTool
 +    const distilltool = yield* DistillTool
++    const scheduletool = yield* ScheduleTool
      const agent = yield* Agent.Service
-     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
-     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
-@@ -214,6 +216,7 @@ const layer = Layer.effect(
+
+     const state = yield* InstanceState.make<State>(
+@@ -208,6 +212,8 @@ export const layer = Layer.effect(
            todo: Tool.init(todo),
            search: Tool.init(websearch),
            skill: Tool.init(skilltool),
 +          distill: Tool.init(distilltool),
++          schedule: Tool.init(scheduletool),
            patch: Tool.init(patchtool),
            question: Tool.init(question),
            lsp: Tool.init(lsptool),
-@@ -238,6 +241,7 @@ const layer = Layer.effect(
+@@ -231,6 +237,8 @@ export const layer = Layer.effect(
              tool.search,
              tool.skill,
              tool.patch,
 +            tool.distill,
-             ...(tool.execute ? [tool.execute] : []),
++            tool.schedule,
              ...(flags.experimentalLspTool ? [tool.lsp] : []),
              ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+           ],
+diff --git a/packages/opencode/src/command/template/schedule.txt b/packages/opencode/src/command/template/schedule.txt
+new file mode 100644
+index 000000000..b089c8ff7
+--- /dev/null
++++ b/packages/opencode/src/command/template/schedule.txt
+@@ -0,0 +1,16 @@
++Call the `schedule_task` tool now with action="due".
++
++For EACH schedule it reports as due, in order:
++1. Execute that schedule's prompt as if the user had just typed it (delegate to its
++   agent via the task tool if one is set).
++2. When it finishes, call `schedule_task` with action="mark" and that schedule's name
++   so the run is recorded.
++
++If nothing is due, call `schedule_task` with action="list" and report when the next
++schedule will fire.
++
++Schedules are deterministic qm-style crons — plain JSON, no server:
++- add:    schedule_task action="add" name="inbox" every="daily@09:00" prompt="triage my inbox"
++- remove: schedule_task action="remove" name="inbox"
++- export: schedule_task action="export" prints crontab/schtasks lines so the OS runs
++  `opencode run "<prompt>"` unattended, without an open session.
+diff --git a/packages/opencode/src/tool/schedule.ts b/packages/opencode/src/tool/schedule.ts
+new file mode 100644
+index 000000000..0961cf4c9
+--- /dev/null
++++ b/packages/opencode/src/tool/schedule.ts
+@@ -0,0 +1,279 @@
++import { Effect, Schema } from "effect"
++import * as Tool from "./tool"
++import { Global } from "@opencode-ai/core/global"
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
++import { join } from "node:path"
++import DESCRIPTION from "./schedule.txt"
++
++// Deterministic qm-style background schedules ("crons and watches run work while
++// nobody's watching") — ported as native code. NO LLM, NO server, NO Postgres.
++// Schedules are plain JSON in the global opencode config dir; the built-in /schedule
++// command executes whatever is due inside a normal session, and `export` emits
++// OS-scheduler lines (crontab / schtasks) that run `opencode run "<prompt>"` truly
++// unattended, without an open session.
++
++const FILE = "schedules.json"
++
++export const Parameters = Schema.Struct({
++  action: Schema.Literal("add", "list", "remove", "due", "mark", "export"),
++  name: Schema.optional(Schema.String),
++  every: Schema.optional(Schema.String),
++  prompt: Schema.optional(Schema.String),
++  agent: Schema.optional(Schema.String),
++})
++
++type Metadata = {
++  count?: number
++  due?: number
++}
++
++// ---- storage ----------------------------------------------------------------
++function storePath(): string {
++  return join(Global.Path.config, FILE)
++}
++function load(): any[] {
++  const p = storePath()
++  if (!existsSync(p)) return []
++  try {
++    const data = JSON.parse(readFileSync(p, "utf8"))
++    return Array.isArray(data && data.tasks) ? data.tasks : []
++  } catch {
++    return []
++  }
++}
++function save(tasks: any[]): void {
++  mkdirSync(Global.Path.config, { recursive: true })
++  writeFileSync(storePath(), JSON.stringify({ version: 1, tasks }, null, 2), "utf8")
++}
++
++// ---- deterministic cadence math ---------------------------------------------
++// every: "<N>m" | "<N>h" | "<N>d" (interval) or "daily@HH:MM" (local wall clock)
++function intervalMs(every: string): number | null {
++  const m = /^(\d+)([mhd])$/.exec(String(every).trim())
++  if (!m) return null
++  const n = Number(m[1])
++  if (!n) return null
++  return n * (m[2] === "m" ? 60_000 : m[2] === "h" ? 3_600_000 : 86_400_000)
++}
++function dailyAt(every: string): { hh: number; mm: number } | null {
++  const m = /^daily@(\d{1,2}):(\d{2})$/.exec(String(every).trim())
++  if (!m) return null
++  const hh = Number(m[1])
++  const mm = Number(m[2])
++  if (hh > 23 || mm > 59) return null
++  return { hh, mm }
++}
++function isDue(t: any, now: number): boolean {
++  const iv = intervalMs(t.every)
++  if (iv !== null) return t.lastRun == null || now - t.lastRun >= iv
++  const d = dailyAt(t.every)
++  if (!d) return false
++  const fire = new Date(now)
++  fire.setHours(d.hh, d.mm, 0, 0)
++  const fireAt = fire.getTime()
++  return now >= fireAt && (t.lastRun == null || t.lastRun < fireAt)
++}
++function nextRun(t: any, now: number): number {
++  const iv = intervalMs(t.every)
++  if (iv !== null) return t.lastRun == null ? now : t.lastRun + iv
++  const d = dailyAt(t.every)
++  if (!d) return now
++  const fire = new Date(now)
++  fire.setHours(d.hh, d.mm, 0, 0)
++  let fireAt = fire.getTime()
++  if (isDue(t, now)) return fireAt
++  if (fireAt <= now) fireAt += 86_400_000
++  return fireAt
++}
++function cronExpr(t: any): string {
++  const d = dailyAt(t.every)
++  if (d) return `${d.mm} ${d.hh} * * *`
++  const m = /^(\d+)([mhd])$/.exec(String(t.every).trim())
++  if (!m) return "0 * * * *"
++  const n = Number(m[1])
++  if (m[2] === "m") return `*/${Math.min(n, 59)} * * * *`
++  if (m[2] === "h") return `0 */${Math.min(n, 23)} * * *`
++  return `0 9 */${Math.min(n, 28)} * *`
++}
++function fmt(ts: number): string {
++  return new Date(ts).toISOString().replace("T", " ").slice(0, 16) + "Z"
++}
++function dueCount(tasks: any[], now: number): number {
++  return tasks.filter((t) => isDue(t, now)).length
++}
++function describe(t: any, now: number): string {
++  const state = isDue(t, now) ? "DUE NOW" : `next ~${fmt(nextRun(t, now))}`
++  const runs = `${t.runs || 0} run(s)` + (t.lastRun ? `, last ${fmt(t.lastRun)}` : "")
++  const agent = t.agent ? ` — agent=${t.agent}` : ""
++  return `- ${t.name} [${t.every}] ${state} — ${runs}${agent}\n  prompt: ${t.prompt}`
++}
++
++// ---- actions ------------------------------------------------------------------
++function run(args: any): { title: string; output: string; count: number; due: number } {
++  const now = Date.now()
++  const tasks = load()
++  const action = String(args.action || "")
++  const name = args.name == null ? "" : String(args.name).trim()
++
++  if (action === "add") {
++    const every = String(args.every || "").trim()
++    const prompt = String(args.prompt || "").trim()
++    if (!name || !every || !prompt) {
++      return {
++        title: "schedule: add failed",
++        output: 'add requires name, every ("<N>m"|"<N>h"|"<N>d"|"daily@HH:MM") and prompt.',
++        count: tasks.length,
++        due: dueCount(tasks, now),
++      }
++    }
++    if (intervalMs(every) === null && dailyAt(every) === null) {
++      return {
++        title: "schedule: add failed",
++        output: `invalid cadence "${every}" — use "<N>m", "<N>h", "<N>d" or "daily@HH:MM".`,
++        count: tasks.length,
++        due: dueCount(tasks, now),
++      }
++    }
++    const existing = tasks.find((t) => t.name === name)
++    if (existing) {
++      existing.every = every
++      existing.prompt = prompt
++      if (args.agent) existing.agent = String(args.agent)
++    } else {
++      const entry: any = { name, every, prompt, createdAt: now, lastRun: null, runs: 0 }
++      if (args.agent) entry.agent = String(args.agent)
++      tasks.push(entry)
++    }
++    save(tasks)
++    return {
++      title: `schedule: ${existing ? "updated" : "added"} "${name}"`,
++      output:
++        `${existing ? "Updated" : "Added"} "${name}" [${every}] -> ${storePath()}\n` +
++        `It runs whenever /schedule is invoked while due; use action="export" for unattended OS scheduling.`,
++      count: tasks.length,
++      due: dueCount(tasks, now),
++    }
++  }
++
++  if (action === "remove") {
++    const idx = tasks.findIndex((t) => t.name === name)
++    if (idx < 0) {
++      return {
++        title: `schedule: "${name}" not found`,
++        output: `No schedule named "${name}".`,
++        count: tasks.length,
++        due: dueCount(tasks, now),
++      }
++    }
++    tasks.splice(idx, 1)
++    save(tasks)
++    return {
++      title: `schedule: removed "${name}"`,
++      output: `Removed "${name}". ${tasks.length} schedule(s) remain.`,
++      count: tasks.length,
++      due: dueCount(tasks, now),
++    }
++  }
++
++  if (action === "mark") {
++    const t = tasks.find((x) => x.name === name)
++    if (!t) {
++      return {
++        title: `schedule: "${name}" not found`,
++        output: `No schedule named "${name}".`,
++        count: tasks.length,
++        due: dueCount(tasks, now),
++      }
++    }
++    t.lastRun = now
++    t.runs = (t.runs || 0) + 1
++    save(tasks)
++    return {
++      title: `schedule: marked "${name}"`,
++      output: `Recorded run of "${name}" at ${fmt(now)} (${t.runs} total). Next ~${fmt(nextRun(t, now))}.`,
++      count: tasks.length,
++      due: dueCount(tasks, now),
++    }
++  }
++
++  if (action === "due") {
++    const due = tasks.filter((t) => isDue(t, now))
++    if (!due.length) {
++      const upcoming = tasks.slice().sort((a, b) => nextRun(a, now) - nextRun(b, now))[0]
++      const hint = upcoming
++        ? ` Next up: "${upcoming.name}" ~${fmt(nextRun(upcoming, now))}.`
++        : ' No schedules exist — add one with action="add".'
++      return { title: "schedule: nothing due", output: `Nothing is due.${hint}`, count: tasks.length, due: 0 }
++    }
++    const lines = due.map((t, i) => `${i + 1}. name=${t.name}${t.agent ? ` agent=${t.agent}` : ""}\n   prompt: ${t.prompt}`)
++    return {
++      title: `schedule: ${due.length} due`,
++      output:
++        `${due.length} schedule(s) are due. Execute each prompt below in order, then call this tool with action="mark" and its name:\n` +
++        lines.join("\n"),
++      count: tasks.length,
++      due: due.length,
++    }
++  }
++
++  if (action === "export") {
++    if (!tasks.length) {
++      return { title: "schedule: nothing to export", output: "No schedules exist.", count: 0, due: 0 }
++    }
++    const cron = tasks.map(
++      (t) => `${cronExpr(t)} opencode run ${t.agent ? `--agent ${t.agent} ` : ""}${JSON.stringify(t.prompt)}`,
++    )
++    const win = tasks.map(
++      (t) =>
++        `schtasks /Create /F /TN "opencode-${t.name}" /SC DAILY /ST 09:00 /TR "opencode run ${t.agent ? `--agent ${t.agent} ` : ""}'${String(t.prompt).replace(/"/g, "'")}'"`,
++    )
++    return {
++      title: `schedule: exported ${tasks.length}`,
++      output:
++        "For truly unattended runs (no open session), register these with the OS scheduler.\n" +
++        "crontab (crontab -e):\n" +
++        cron.join("\n") +
++        "\nWindows (adjust /SC and /ST to the cadence):\n" +
++        win.join("\n"),
++      count: tasks.length,
++      due: dueCount(tasks, now),
++    }
++  }
++
++  // list (default)
++  if (!tasks.length) {
++    return {
++      title: "schedule: empty",
++      output: `No schedules. Add one: action="add" name="inbox" every="daily@09:00" prompt="...". Stored at ${storePath()}.`,
++      count: 0,
++      due: 0,
++    }
++  }
++  const due = dueCount(tasks, now)
++  return {
++    title: `schedule: ${tasks.length} task(s), ${due} due`,
++    output: tasks.map((t) => describe(t, now)).join("\n") + `\nstore: ${storePath()}`,
++    count: tasks.length,
++    due,
++  }
++}
++
++// ---- native tool ----------------------------------------------------------
++export const ScheduleTool = Tool.define<typeof Parameters, Metadata, never>(
++  "schedule_task",
++  Effect.gen(function* () {
++    return {
++      description: DESCRIPTION,
++      parameters: Parameters,
++      execute: (args: Schema.Schema.Type<typeof Parameters>, _ctx: Tool.Context<Metadata>) =>
++        Effect.gen(function* () {
++          const r = yield* Effect.sync(() => run(args as any))
++          return {
++            title: r.title,
++            output: r.output,
++            metadata: { count: r.count, due: r.due },
++          }
++        }),
++    } satisfies Tool.DefWithoutID<typeof Parameters, Metadata>
++  }),
++)
+diff --git a/packages/opencode/src/tool/schedule.txt b/packages/opencode/src/tool/schedule.txt
+new file mode 100644
+index 000000000..908479838
+--- /dev/null
++++ b/packages/opencode/src/tool/schedule.txt
+@@ -0,0 +1,1 @@
++Manage deterministic qm-style background schedules (crons) — plain JSON in the global opencode config dir (schedules.json), NO LLM scoring, NO server. Actions: add (name + every: "<N>m"|"<N>h"|"<N>d"|"daily@HH:MM" + prompt [+ agent]) upserts a schedule; list shows all with next-run times; remove deletes by name; due lists the schedules whose time has come (execute each prompt, then call mark); mark records a completed run by name; export prints crontab/schtasks lines that run `opencode run "<prompt>"` so the OS scheduler executes them truly unattended. The built-in /schedule command runs everything that is due.

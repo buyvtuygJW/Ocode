@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # build-openscience-skills.sh
-# Fetch OpenScience's science-skill library, strip product plumbing, and package it as
+# Build the BIG skills pack: OpenScience's science-skill library (stripped of product
+# plumbing) MERGED with ECC's engineering/agent skills, packaged as
 # openscience-skills.tar.gz — a downloadable RELEASE ASSET (install into ~/.claude/skills,
-# discovered via "skills/**/SKILL.md"). Skills are too many (~1,500 files) to compile into
-# the binary, so they ship as a pack.
+# discovered via "skills/**/SKILL.md"). Too many files to compile into the binary, so
+# they ship as one pack.
 #
 # Essence-only: ships the *knowledge* (SKILL.md + references/scripts), NOT the OpenScience
-# cloud (Atlas graph, dashboard sync, `openscience`/`atlas` CLIs).
+# cloud (Atlas graph, dashboard sync, `openscience`/`atlas` CLIs) and NOT the ECC harness
+# plumbing (only ECC's canonical repo-root skills/ tree; .agents/.kiro/.cursor copies and
+# docs/<lang> translations are skipped). ECC skills land under their own `ecc/` category
+# dir at the pack root, so they can never collide with the OpenScience category dirs.
 #
 # Best-effort by contract: exits non-zero on any failure so the caller (the build
-# workflow) can SKIP the pack without failing the core build.
+# workflow) can SKIP the pack without failing the core build. The ECC merge is
+# best-effort WITHIN that: if ECC can't be fetched, we still ship the OpenScience pack.
 #
 # Usage:   build-openscience-skills.sh [out.tar.gz]
 # Env:     OS_SKILLS_SRC=/path/to/backend/cli/skills   # reuse a local tree, skip cloning
+#          ECC_SKILLS_SRC=/path/to/ECC/skills          # reuse a local tree, skip cloning
 set -uo pipefail
 
 UPSTREAM="https://github.com/synthetic-sciences/openscience"
@@ -58,9 +64,33 @@ if [ "${#FILES[@]}" -gt 0 ]; then
 fi
 RESID=$(grep -rIl -e 'openscience' -e 'syntheticsciences' "$PACK" 2>/dev/null | wc -l | tr -d ' ')
 echo "residual product-token files after de-brand: $RESID (expect 0)"
+OS_COUNT=$(find "$PACK" -name SKILL.md | wc -l | tr -d ' ')
+
+# 3b) merge ECC skills (canonical repo-root skills/ only) under ecc/ — BEST-EFFORT:
+#     any failure here is a WARN, never fatal; we still ship the OpenScience pack.
+#     Runs after de-brand on purpose so the OpenScience sed never touches ECC files.
+ECC_UPSTREAM="https://github.com/affaan-m/ECC"
+if [ -n "${ECC_SKILLS_SRC:-}" ] && [ -d "$ECC_SKILLS_SRC" ]; then
+  echo "using local ECC skills source: $ECC_SKILLS_SRC"
+  mkdir -p "$PACK/ecc"
+  cp -a "$ECC_SKILLS_SRC/." "$PACK/ecc/" || { echo "WARN: ECC local copy failed — packing without ECC"; rm -rf "$PACK/ecc"; }
+else
+  echo "sparse-cloning $ECC_UPSTREAM (skills only)..."
+  if git clone --no-checkout --filter=blob:none --depth 1 "$ECC_UPSTREAM" "$WORK/ecc" &&
+     git -C "$WORK/ecc" sparse-checkout set --no-cone "skills" &&
+     git -C "$WORK/ecc" checkout &&
+     [ -d "$WORK/ecc/skills" ]; then
+    mkdir -p "$PACK/ecc"
+    cp -a "$WORK/ecc/skills/." "$PACK/ecc/" || { echo "WARN: ECC copy failed — packing without ECC"; rm -rf "$PACK/ecc"; }
+  else
+    echo "WARN: ECC fetch failed — packing without ECC"
+  fi
+fi
+ECC_COUNT=$(find "$PACK/ecc" -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')
+echo "ECC skills merged: $ECC_COUNT"
 
 # 4) package (tarball root holds the category dirs; extract into ~/.claude/skills)
 COUNT=$(find "$PACK" -name SKILL.md | wc -l | tr -d ' ')
-if [ "$COUNT" -lt 100 ]; then echo "only $COUNT skills found — refusing to package a partial pack"; exit 15; fi
+if [ "$OS_COUNT" -lt 100 ]; then echo "only $OS_COUNT OpenScience skills found — refusing to package a partial pack"; exit 15; fi
 tar czf "$OUT" -C "$PACK" . || { echo "tar failed"; exit 20; }
-echo "packed $COUNT skills -> $OUT ($(du -h "$OUT" | cut -f1))"
+echo "packed $COUNT skills (openscience=$OS_COUNT ecc=$ECC_COUNT) -> $OUT ($(du -h "$OUT" | cut -f1))"
