@@ -140,10 +140,15 @@ export const fromCatalogModel = (
         })
   const key = apiKey(resolved, credential)
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
+    // Default to store:false so OpenAI does not retain the Responses payload
+    // (zero-logging). An explicit store in provider options still wins.
+    const enforced = produce(resolved, (draft) => {
+      if (draft.request.body["store"] === undefined) draft.request.body["store"] = false
+    })
     return Effect.succeed(
-      withDefaults(resolved, OpenAIResponses.route)
+      withDefaults(enforced, OpenAIResponses.route)
         .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
-        .model({ id: resolved.api.id }),
+        .model({ id: enforced.api.id }),
     )
   }
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
