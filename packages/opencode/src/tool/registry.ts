@@ -29,6 +29,7 @@ import { WebSearchTool } from "./websearch"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+import * as CustomTools from "./custom"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -239,6 +240,7 @@ const layer = Layer.effect(
             tool.skill,
             tool.patch,
             ...(tool.execute ? [tool.execute] : []),
+            ...(yield* CustomTools.builtin),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],

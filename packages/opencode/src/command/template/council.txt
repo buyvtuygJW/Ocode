@@ -1,0 +1,9 @@
+Convene the council on the user's request via the `council` tool.
+
+$ARGUMENTS
+
+Pass the user's question as `question`. If they named a strategy (council, compare, debate, moa, router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.
+
+Relay the result as-is: the synthesized/resolved answer for council/moa/debate; side-by-side for compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; the chosen model for router.
+
+If it says not configured, print the file path it returned and tell the user to add two or more "provider/model" entries — do not invent models.

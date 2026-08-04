@@ -1,0 +1,5 @@
+Convene a multi-model council: fan the same question to several models directly (bypasses the task tool's single-model limit) and combine their answers by strategy. See the `strategy` parameter for the seven modes and their aliases.
+
+Members come from council.json — a per-project ".opencode/council.json" overrides the global config dir. Resolution: the inline `members` argument, else the per-project file (a blank template is auto-created; entries with an empty "model" are skipped), else the global file.
+
+If nothing is configured, the tool seeds the global council.json with your current model and prints its path. A council needs at least two models; with one, use the normal task/subagent flow.

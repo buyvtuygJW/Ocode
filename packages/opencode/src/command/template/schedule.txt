@@ -1,0 +1,16 @@
+Call the `schedule_task` tool now with action="due".
+
+For EACH schedule it reports as due, in order:
+1. Execute that schedule's prompt as if the user had just typed it (delegate to its
+   agent via the task tool if one is set).
+2. When it finishes, call `schedule_task` with action="mark" and that schedule's name
+   so the run is recorded.
+
+If nothing is due, call `schedule_task` with action="list" and report when the next
+schedule will fire.
+
+Schedules are deterministic qm-style crons — plain JSON, no server:
+- add:    schedule_task action="add" name="inbox" every="daily@09:00" prompt="triage my inbox"
+- remove: schedule_task action="remove" name="inbox"
+- export: schedule_task action="export" prints crontab/schtasks lines so the OS runs
+  `opencode run "<prompt>"` unattended, without an open session.
