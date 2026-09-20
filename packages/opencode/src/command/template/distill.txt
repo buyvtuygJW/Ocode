@@ -1,0 +1,10 @@
+Call the `distill_session` tool now.
+
+It deterministically — in code, with NO LLM scoring — reconstructs THIS session's tool
+trajectory, scores it 0-100 on the RSI rubric (Correctness / Efficiency / Coverage /
+Reproducibility), and only if it scores >= 75 saves a reusable learned skill under the global
+opencode skills dir, which opencode auto-discovers in future sessions.
+
+Do NOT score or reconstruct the session yourself. Just invoke `distill_session` and report its
+output verbatim: the score breakdown, and either the saved skill path or the reason it was not
+distilled.
