@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { Global } from "@opencode-ai/core/global"
 import { Provider } from "@/provider/provider"
@@ -184,16 +184,14 @@ export const CouncilTool = Tool.define(
     const askSafe = (m: Member, system: string, user: string, temperature: number): Effect.Effect<Ans> =>
       ask(m.model, system, user, temperature).pipe(
         Effect.map((text): Ans => ({ name: m.name, model: m.model, text })),
-        Effect.catchAll((e) => Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} failed: ${String(e)}]` })),
-        Effect.catchAllDefect((d) => Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} crashed: ${String(d)}]` })),
+        Effect.catchCause((cause) =>
+          Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} failed: ${String(Cause.squash(cause))}]` }),
+        ),
       )
 
     const run = Effect.fn("CouncilTool.execute")(function* (args: Schema.Schema.Type<typeof Parameters>, _ctx: Tool.Context) {
       const globalFile = join(Global.Path.config, FILE)
-      const projectDir = yield* InstanceState.directory.pipe(
-        Effect.catchAll(() => Effect.succeed("")),
-        Effect.catchAllDefect(() => Effect.succeed("")),
-      )
+      const projectDir = yield* InstanceState.directory.pipe(Effect.catchCause(() => Effect.succeed("")))
       const projectFile = projectDir ? join(projectDir, ".opencode", FILE) : ""
 
       // per-project blank template (fast skip marker) — created once if missing
@@ -224,8 +222,7 @@ export const CouncilTool = Tool.define(
       if (members.length === 0) {
         const cur = yield* provider.defaultModel().pipe(
           Effect.map((m) => `${m.providerID}/${m.modelID}`),
-          Effect.catchAll(() => Effect.succeed("")),
-          Effect.catchAllDefect(() => Effect.succeed("")),
+          Effect.catchCause(() => Effect.succeed("")),
         )
         let seeded = false
         if (!existsSync(globalFile)) {
@@ -260,8 +257,7 @@ export const CouncilTool = Tool.define(
 
       const askChair = (system: string, user: string, temperature: number, fallback: string) =>
         ask(chairman, system, user, temperature).pipe(
-          Effect.catchAll(() => Effect.succeed(fallback)),
-          Effect.catchAllDefect(() => Effect.succeed(fallback)),
+          Effect.catchCause(() => Effect.succeed(fallback)),
         )
 
       // no question -> status/list
@@ -342,8 +338,7 @@ export const CouncilTool = Tool.define(
         const runs = yield* Effect.all(
           members.map((m) =>
             ask(m.model, "You are a strict evaluator.", scorePrompt, 0).pipe(
-              Effect.catchAll(() => Effect.succeed("")),
-              Effect.catchAllDefect(() => Effect.succeed("")),
+              Effect.catchCause(() => Effect.succeed("")),
             ),
           ),
           { concurrency: 4 },
