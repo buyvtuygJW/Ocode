@@ -110,11 +110,11 @@ index 0000000..b089c8f
 +  `opencode run "<prompt>"` unattended, without an open session.
 diff --git a/packages/opencode/src/tool/council.ts b/packages/opencode/src/tool/council.ts
 new file mode 100644
-index 0000000..f16685c
+index 0000000..35f2113
 --- /dev/null
 +++ b/packages/opencode/src/tool/council.ts
-@@ -0,0 +1,423 @@
-+import { Cause, Effect, Schema } from "effect"
+@@ -0,0 +1,428 @@
++import { Effect, Schema } from "effect"
 +import * as Tool from "./tool"
 +import { Global } from "@opencode-ai/core/global"
 +import { Provider } from "@/provider/provider"
@@ -300,14 +300,16 @@ index 0000000..f16685c
 +    const askSafe = (m: Member, system: string, user: string, temperature: number): Effect.Effect<Ans> =>
 +      ask(m.model, system, user, temperature).pipe(
 +        Effect.map((text): Ans => ({ name: m.name, model: m.model, text })),
-+        Effect.catchCause((cause) =>
-+          Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} failed: ${String(Cause.squash(cause))}]` }),
-+        ),
++        Effect.catchAll((e) => Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} failed: ${String(e)}]` })),
++        Effect.catchAllDefect((d) => Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} crashed: ${String(d)}]` })),
 +      )
 +
 +    const run = Effect.fn("CouncilTool.execute")(function* (args: Schema.Schema.Type<typeof Parameters>, _ctx: Tool.Context) {
 +      const globalFile = join(Global.Path.config, FILE)
-+      const projectDir = yield* InstanceState.directory.pipe(Effect.catchCause(() => Effect.succeed("")))
++      const projectDir = yield* InstanceState.directory.pipe(
++        Effect.catchAll(() => Effect.succeed("")),
++        Effect.catchAllDefect(() => Effect.succeed("")),
++      )
 +      const projectFile = projectDir ? join(projectDir, ".opencode", FILE) : ""
 +
 +      // per-project blank template (fast skip marker) — created once if missing
@@ -338,7 +340,8 @@ index 0000000..f16685c
 +      if (members.length === 0) {
 +        const cur = yield* provider.defaultModel().pipe(
 +          Effect.map((m) => `${m.providerID}/${m.modelID}`),
-+          Effect.catchCause(() => Effect.succeed("")),
++          Effect.catchAll(() => Effect.succeed("")),
++          Effect.catchAllDefect(() => Effect.succeed("")),
 +        )
 +        let seeded = false
 +        if (!existsSync(globalFile)) {
@@ -373,7 +376,8 @@ index 0000000..f16685c
 +
 +      const askChair = (system: string, user: string, temperature: number, fallback: string) =>
 +        ask(chairman, system, user, temperature).pipe(
-+          Effect.catchCause(() => Effect.succeed(fallback)),
++          Effect.catchAll(() => Effect.succeed(fallback)),
++          Effect.catchAllDefect(() => Effect.succeed(fallback)),
 +        )
 +
 +      // no question -> status/list
@@ -454,7 +458,8 @@ index 0000000..f16685c
 +        const runs = yield* Effect.all(
 +          members.map((m) =>
 +            ask(m.model, "You are a strict evaluator.", scorePrompt, 0).pipe(
-+              Effect.catchCause(() => Effect.succeed("")),
++              Effect.catchAll(() => Effect.succeed("")),
++              Effect.catchAllDefect(() => Effect.succeed("")),
 +            ),
 +          ),
 +          { concurrency: 4 },
