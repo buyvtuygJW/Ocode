@@ -308,19 +308,6 @@ jobs:
           }
 
           run_opencode_build() {
-            # Inject the real upstream version. Without this, @opencode-ai/script
-            # sees a non-"latest" channel (detached/dev checkout), marks the build
-            # as a preview and stamps it 0.0.0-<channel>-<timestamp>. Version-gated
-            # gateways (e.g. Console free tier: "OpenCode 1.18.0 or newer is
-            # required") then reject the binary.
-            OPENCODE_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' packages/opencode/package.json | head -n 1)"
-            if [ -z "$OPENCODE_VERSION" ]; then
-              echo "ERROR: could not resolve upstream version from packages/opencode/package.json"
-              return 1
-            fi
-            export OPENCODE_VERSION
-            export OPENCODE_CHANNEL=latest
-            echo "Building with OPENCODE_VERSION=$OPENCODE_VERSION OPENCODE_CHANNEL=latest"
             if ! bun run --cwd packages/opencode build -- --skip-embed-web-ui; then
               echo "opencode build failed"
               return 1
@@ -713,22 +700,16 @@ jobs:
           if [ -f "../patches/FinalPersonalizeR.patch" ]; then cp "../patches/FinalPersonalizeR.patch" "patches/FinalPersonalizeR.patch"; fi
           if [ -f "../patches/build-openscience-skills.sh" ]; then cp "../patches/build-openscience-skills.sh" "patches/build-openscience-skills.sh"; fi
 
-          # GITHUB_TOKEN (GitHub App) can NEVER create/update workflow files on push,
-          # but pushing a workflow file whose content is UNCHANGED vs the remote tip
-          # IS allowed. So: drop ALL upstream workflows (they'd become an "update"
-          # the moment upstream edits them, and they'd try to run in our repo), then
-          # re-add OUR OWN automation workflow byte-for-byte so the weekly cron and
-          # push trigger survive on dev. (Previously dev shipped ZERO workflow files,
-          # which silently killed the schedule: no cron runs between 2026-08-04 and
-          # 2026-09-20 until a manual push resurrected it.)
+          # GITHUB_TOKEN (GitHub App) can NEVER create/update workflow files on push.
+          # Deletions ARE allowed -> dev branch ships ZERO workflow files:
+          #   - upstream's tracked .github/workflows/* (beta.yml etc.) would become an
+          #     "update" the moment upstream changes them between syncs
+          #   - and they'd try to run in our repo anyway
           git rm -r -q --sparse --cached --ignore-unmatch .github/workflows
           rm -rf .github/workflows
-          if [ -f "../.github/workflows/weekly_customautorel.yml" ]; then
-            mkdir -p .github/workflows
-            cp "../.github/workflows/weekly_customautorel.yml" ".github/workflows/weekly_customautorel.yml"
-            echo "Re-added own automation workflow (unchanged content -> push allowed)."
-          else
-            echo "WARNING: automation workflow missing from trigger checkout; dev will ship no workflows (cron dies until re-pushed)."
+          if git ls-files --error-unmatch .github/workflows >/dev/null 2>&1; then
+            echo "ERROR: .github/workflows still tracked; refusing to push (GITHUB_TOKEN would be rejected)"
+            exit 1
           fi
 
           echo "$BUILT_SHA" > "$STATE_FILE_DIR/last-success-upstream.txt"
@@ -753,13 +734,4 @@ jobs:
           echo "Force pushing patched source tree to:"
           echo "  $STATE_BRANCH"
 
-          if ! git push --force target "HEAD:$STATE_BRANCH"; then
-            echo "WARNING: push rejected (likely workflow-file permission); retrying without workflow files"
-            git rm -r -q --cached --ignore-unmatch .github/workflows
-            rm -rf .github/workflows
-            git add -A
-            if ! git diff --cached --quiet; then
-              git commit -m "sync:upstream $BUILT_SHA +personalizepatch (workflow files stripped)[skip ci]"
-            fi
-            git push --force target "HEAD:$STATE_BRANCH"
-          fi
+          git push --force target "HEAD:$STATE_BRANCH"
