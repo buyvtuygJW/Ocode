@@ -23,7 +23,7 @@ new file mode 100644
 index 000000000..3978f6751
 --- /dev/null
 +++ b/packages/opencode/src/tool/custom.ts
-@@ -0,0 +1,1112 @@
+@@ -0,0 +1,1106 @@
 +// ============================================================================
 +// PERSONALIZATION (FinalPersonalizeR) — SINGLE owned file.
 +// Everything for /distill, /schedule, /council lives HERE: tools, commands,
@@ -701,12 +701,7 @@ index 000000000..3978f6751
 +    .map((m, i) => ({ name: String(m.name || `model${i + 1}`), model: m.model.trim() }))
 +}
 +function block(answers: Ans[]): string {
-+  return answers.map((a, i) => `### [${i + 1}] ${a.model}\n${a.text}`).join("\n\n")
-+}
-+// Chairman-facing rendering: numbered and anonymous. Never includes member names
-+// or model IDs, so the judge weighs content instead of brand.
-+function blindBlock(answers: Ans[]): string {
-+  return answers.map((a, i) => `### [${i + 1}]\n${a.text}`).join("\n\n")
++  return answers.map((a, i) => `### [${i + 1}] ${a.name} (${a.model})\n${a.text}`).join("\n\n")
 +}
 +function clampIndex(text: string, n: number): number {
 +  const m = String(text ?? "").match(/\d+/)
@@ -770,7 +765,7 @@ index 000000000..3978f6751
 +      ask(m.model, system, user, temperature).pipe(
 +        Effect.map((text): Ans => ({ name: m.name, model: m.model, text })),
 +        Effect.catchCause((cause) =>
-+          Effect.succeed({ name: m.name, model: m.model, text: `[failed: ${String(Cause.squash(cause)).slice(0, 100)}]` }),
++          Effect.succeed({ name: m.name, model: m.model, text: `[${m.name} failed: ${String(Cause.squash(cause))}]` }),
 +        ),
 +      )
 +
@@ -972,10 +967,9 @@ index 000000000..3978f6751
 +        output = `## Council synthesis\n\n${final}\n\n---\n### Member answers\n\n${block(answers)}`
 +        title = `council: synthesized ${members.length} answers`
 +      } else if (strategy === "moa") {
-+        // Aggregator sees anonymous, unordered proposals - content over authorship.
 +        const final = yield* askChair(
-+          "You are the aggregator in a Mixture-of-Agents pipeline. The proposals are anonymous and unordered; judge them purely on merit and never speculate about who wrote which.",
-+          `Question:\n${question}\n\nProposed answers:\n\n${blindBlock(answers)}\n\nAggregate them into one higher-quality answer, keeping the best of each. Output the aggregated answer only.`,
++          "You are the aggregator in a Mixture-of-Agents pipeline.",
++          `Question:\n${question}\n\nProposed answers:\n\n${block(answers)}\n\nAggregate them into one higher-quality answer, keeping the best of each. Output the aggregated answer only.`,
 +          0.3,
 +          `[aggregation unavailable]\n\n${block(answers)}`,
 +        )
