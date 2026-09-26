@@ -432,7 +432,12 @@ const layer = Layer.effect(
           })
         }
 
-        return yield* Effect.promise(() => generateObject(params).then((r) => r.object))
+        return yield* Effect.promise(() =>
+          generateObject({
+            ...params,
+            providerOptions: ProviderTransform.providerOptions(resolved, { store: false }),
+          }).then((r) => r.object),
+        )
       }),
     })
   }),
