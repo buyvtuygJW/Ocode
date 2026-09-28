@@ -307,7 +307,57 @@ jobs:
             return 0
           }
 
+          resolve_opencode_version() {
+            # The build stamps this string into the binary via --define OPENCODE_VERSION,
+            # and the SAME string becomes the process user-agent: opencode/<version>.
+            # packages/script/src/index.ts derives it like this:
+            #   CHANNEL  = git branch --show-current      <-- EMPTY, try_build() checks out --detach
+            #   PREVIEW  = CHANNEL !== "latest"           <-- therefore true
+            #   VERSION  = 0.0.0-${CHANNEL}-<timestamp>   <-- therefore "0.0.0--<timestamp>"
+            # 0.0.0 (and that empty prerelease field is not even valid semver) is why the
+            # server answers "OpenCode 1.18.0 or newer is required to use the free tier".
+            # Pin the real upstream version so the gate sees a true release number.
+            local v="$OPENCODE_VERSION"
+
+            # 1) honour an explicit override, 2) else the upstream tree's own version
+            if [ -z "$v" ]; then
+              v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                     packages/opencode/package.json 2>/dev/null | head -1)"
+            fi
+
+            # 3) last resort: whatever upstream actually published
+            case "$v" in
+              ''|0.0.0*)
+                echo "package.json version unusable ('${v:-<empty>}'), asking npm..."
+                v="$(curl -fsSL --max-time 20 https://registry.npmjs.org/opencode-ai/latest \
+                     | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                ;;
+            esac
+
+            # must be a real release number, and at or above the free-tier floor
+            if [[ ! "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)([.-].*)?$ ]]; then
+              echo "ERROR: could not resolve a real upstream version (got '${v:-<empty>}')"
+              echo "Refusing to build: a 0.0.0 binary is locked out of the free tier."
+              return 1
+            fi
+            local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+            if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 18 ]; }; then
+              echo "ERROR: resolved version $v is below the 1.18.0 free-tier floor"
+              return 1
+            fi
+
+            # A non-"0.0.0-" OPENCODE_VERSION already makes index.ts pick channel "latest",
+            # but set it explicitly so the build never depends on that inference.
+            export OPENCODE_VERSION="$v"
+            export OPENCODE_CHANNEL="latest"
+            echo "Build version: OPENCODE_VERSION=$OPENCODE_VERSION OPENCODE_CHANNEL=$OPENCODE_CHANNEL"
+            return 0
+          }
+
           run_opencode_build() {
+            if ! resolve_opencode_version; then
+              return 1
+            fi
             if ! bun run --cwd packages/opencode build -- --skip-embed-web-ui; then
               echo "opencode build failed"
               return 1
@@ -322,6 +372,26 @@ jobs:
                 return 1
               fi
             done
+
+            # The whole point of this patch: prove the version actually landed in the
+            # artifact. build.ts already runs `--version` as a smoke test, but it only
+            # checks that the binary starts -- it never looks at the number.
+            echo "Verifying the stamped version survived into the binary..."
+            local bin
+            bin="$(find packages/opencode/dist/opencode-linux-x64 -type f -name opencode \
+                   -perm -u+x 2>/dev/null | head -1)"
+            if [ -z "$bin" ]; then
+              echo "ERROR: could not locate the linux-x64 opencode binary to verify"
+              return 1
+            fi
+            local reported
+            reported="$("$bin" --version 2>&1 | tr -d '\r')"
+            if ! printf '%s' "$reported" | grep -qF "$OPENCODE_VERSION"; then
+              echo "ERROR: binary reports '$reported', expected it to contain $OPENCODE_VERSION"
+              echo "A 0.0.0 build is locked out of the free tier -- refusing to release it."
+              return 1
+            fi
+            echo "Binary reports: $reported"
             return 0
           }
 
