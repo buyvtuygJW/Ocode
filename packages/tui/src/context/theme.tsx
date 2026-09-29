@@ -1,4 +1,4 @@
-import { CliRenderEvents, SyntaxStyle, type TerminalColors } from "@opentui/core"
+import { CliRenderEvents, RGBA, SyntaxStyle, type TerminalColors } from "@opentui/core"
 import { useRenderer } from "@opentui/solid"
 import {
   DEFAULT_THEMES,
@@ -87,6 +87,7 @@ type State = {
   lock: "dark" | "light" | undefined
   active: string
   ready: boolean
+  transparent: boolean
 }
 
 const [store, setStore] = createStore<State>({
@@ -95,6 +96,7 @@ const [store, setStore] = createStore<State>({
   lock: undefined,
   active: "opencode",
   ready: false,
+  transparent: false,
 })
 
 subscribeThemes((themes) => setStore("themes", themes))
@@ -121,6 +123,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
         const active = config.theme ?? kv.get("theme", "opencode")
         draft.active = typeof active === "string" ? active : "opencode"
         draft.ready = false
+        draft.transparent = kv.get("theme_transparent") === true
       }),
     )
 
@@ -253,7 +256,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
       themeRefreshTimeouts.length = 0
     })
 
-    const values = createMemo(() => {
+    const baseValues = createMemo(() => {
       const active = store.themes[store.active]
       if (active) return resolveTheme(active, store.mode)
 
@@ -265,6 +268,11 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
 
       return resolveTheme(store.themes.opencode, store.mode)
     })
+
+    // CUSTOM-TRANSPARENCY: when toggled on, force the resolved background fully transparent
+    const values = createMemo(() =>
+      store.transparent ? { ...baseValues(), background: RGBA.fromInts(0, 0, 0, 0) } : baseValues(),
+    )
 
     createEffect(() => renderer.setBackgroundColor(values().background))
 
@@ -295,6 +303,12 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
         setStore("active", theme)
         kv.set("theme", theme)
         return true
+      },
+      transparent: () => store.transparent,
+      toggleTransparent() {
+        const next = !store.transparent
+        setStore("transparent", next)
+        kv.set("theme_transparent", next)
       },
       get ready() {
         return store.ready
