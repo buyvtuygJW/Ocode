@@ -12,6 +12,9 @@ import * as Tool from "./tool"
 import { Global } from "@opencode-ai/core/global"
 import { Provider } from "@/provider/provider"
 import { InstanceState } from "@/effect/instance-state"
+import { Session } from "@/session/session"
+import { MessageID } from "@/session/schema"
+import type { TaskPromptOps } from "./task"
 import { generateText, type ModelMessage } from "ai"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, dirname } from "node:path"
@@ -821,9 +824,10 @@ export const CouncilTool = Tool.define(
   "council",
   Effect.gen(function* () {
     const provider = yield* Provider.Service
+    const sessions = yield* Session.Service
 
     // one-shot model call (mirrors Agent.generate); may fail into the error channel
-    const ask = Effect.fn("CouncilTool.ask")(function* (model: string, system: string, user: string, temperature: number) {
+    const askDirect = Effect.fn("CouncilTool.askDirect")(function* (model: string, system: string, user: string, temperature: number) {
       const pm = Provider.parseModel(model)
       const resolved = yield* provider.getModel(pm.providerID, pm.modelID)
       const language = yield* provider.getLanguage(resolved)
@@ -838,29 +842,89 @@ export const CouncilTool = Tool.define(
       return String(text ?? "").trim()
     })
 
+    // Same call, but routed through a real child session — the exact path a TUI subagent
+    // takes. Origin-restricted models (the opencode free tier: "can only be used from
+    // within the opencode TUI") refuse a raw SDK request yet accept session traffic.
+    // Every tool is denied, so the member can only do what askDirect does: one question
+    // in, one answer out. Temperature is the session/agent default here, not ours.
+    const askViaSession = Effect.fn("CouncilTool.askViaSession")(function* (
+      ctx: Tool.Context,
+      label: string,
+      model: string,
+      system: string,
+      user: string,
+    ) {
+      const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
+      if (!ops) return yield* Effect.fail(new Error("no session transport in this context"))
+      const pm = Provider.parseModel(model)
+      const child = yield* sessions.create({
+        parentID: ctx.sessionID,
+        title: `council: ${label} (${model})`,
+        agent: ctx.agent,
+        permission: [{ permission: "*", pattern: "*", action: "deny" }],
+      })
+      const result = yield* ops.prompt({
+        messageID: MessageID.ascending(),
+        sessionID: child.id,
+        model: { providerID: pm.providerID, modelID: pm.modelID },
+        agent: ctx.agent,
+        system,
+        parts: [{ type: "text", text: user }],
+      })
+      if (result.info.role === "assistant" && result.info.error) {
+        const message =
+          "message" in result.info.error.data && typeof result.info.error.data.message === "string"
+            ? result.info.error.data.message
+            : result.info.error.name
+        return yield* Effect.fail(new Error(message))
+      }
+      const text = (result.parts.findLast((p) => p.type === "text")?.text ?? "").trim()
+      if (!text) return yield* Effect.fail(new Error("empty response"))
+      return text
+    })
+
+    // Direct first — it is cheap and carries no agent preamble. Only when the provider
+    // rejects it do we pay for the session route, so paid models behave exactly as before
+    // and free-tier models stop being dead weight in the council.
+    const ask = (ctx: Tool.Context, label: string, model: string, system: string, user: string, temperature: number) =>
+      askDirect(model, system, user, temperature).pipe(
+        Effect.catchCause((direct) =>
+          ctx.extra?.promptOps
+            ? askViaSession(ctx, label, model, system, user).pipe(
+                Effect.catchCause((session) =>
+                  Effect.fail(
+                    new Error(`${String(Cause.squash(session))} (direct: ${String(Cause.squash(direct))})`),
+                  ),
+                ),
+              )
+            : Effect.failCause(direct),
+        ),
+      )
+
     // never-failing member answer — a failure becomes a visible marker instead of killing the council
     // A retired-but-catalogued model fails here, not at validation. Rather than returning a
     // dead member as a "[failed]" marker that silently shrinks the council, walk the ranked
     // siblings once each. The swap is reported in the answer's model label, never hidden.
     const askSafe: (
+      ctx: Tool.Context,
       m: Member,
       system: string,
       user: string,
       temperature: number,
       alts?: string[],
-    ) => Effect.Effect<Ans> = (m, system, user, temperature, alts = []) =>
-      ask(m.model, system, user, temperature).pipe(
+    ) => Effect.Effect<Ans> = (ctx, m, system, user, temperature, alts = []) =>
+      ask(ctx, m.name, m.model, system, user, temperature).pipe(
         Effect.map((text): Ans => ({ name: m.name, model: m.model, text })),
         Effect.catchCause((cause) =>
           alts.length
-            ? askSafe({ name: m.name, model: alts[0] }, system, user, temperature, alts.slice(1)).pipe(
+            ? askSafe(ctx, { name: m.name, model: alts[0] }, system, user, temperature, alts.slice(1)).pipe(
                 Effect.map((a): Ans => (a.text.startsWith("[failed:") ? a : { ...a, model: `${a.model} (fell back from ${m.model})` })),
               )
             : Effect.succeed({ name: m.name, model: m.model, text: `[failed: ${String(Cause.squash(cause)).slice(0, 100)}]` }),
         ),
       )
 
-    const run = Effect.fn("CouncilTool.execute")(function* (args: Schema.Schema.Type<typeof CouncilParams>, _ctx: Tool.Context) {
+    const run = Effect.fn("CouncilTool.execute")(function* (args: Schema.Schema.Type<typeof CouncilParams>, ctx: Tool.Context) {
       const globalFile = join(Global.Path.config, COUNCIL_FILE)
       const projectDir = yield* InstanceState.directory.pipe(Effect.catchCause(() => Effect.succeed("")))
       const projectFile = projectDir ? join(projectDir, ".opencode", COUNCIL_FILE) : ""
@@ -1039,7 +1103,7 @@ export const CouncilTool = Tool.define(
       const question = String(args.question || "").trim()
 
       const askChair = (system: string, user: string, temperature: number, fallback: string) =>
-        ask(chairman, system, user, temperature).pipe(
+        ask(ctx, "chairman", chairman, system, user, temperature).pipe(
           Effect.catchCause(() => Effect.succeed(fallback)),
         )
 
@@ -1070,7 +1134,7 @@ export const CouncilTool = Tool.define(
       let answers: Ans[] = []
       if (["council", "compare", "moa", "consensus", "arena"].includes(strategy)) {
         answers = yield* Effect.all(
-          members.map((m) => askSafe(m, MEMBER_SYSTEM, question, 0.7, altIds(provs, m.model, 2))),
+          members.map((m) => askSafe(ctx, m, MEMBER_SYSTEM, question, 0.7, altIds(provs, m.model, 2))),
           { concurrency: 4 },
         )
       }
@@ -1110,7 +1174,7 @@ export const CouncilTool = Tool.define(
           "1",
         )
         const idx = clampIndex(picked, members.length)
-        const ans = yield* askSafe(members[idx], MEMBER_SYSTEM, question, 0.4)
+        const ans = yield* askSafe(ctx, members[idx], MEMBER_SYSTEM, question, 0.4)
         winner = members[idx].name
         output = `## Smart Router\nRouted to [${idx + 1}] ${members[idx].name} (${members[idx].model}).\n\n${ans.text}`
         title = `council: routed to ${members[idx].name}`
@@ -1121,7 +1185,7 @@ export const CouncilTool = Tool.define(
           `Score EACH candidate 1-10 for correctness and quality. Reply ONLY with JSON like {"1": 8, "2": 5} covering all ${answers.length}.`
         const runs = yield* Effect.all(
           members.map((m) =>
-            ask(m.model, "You are a strict evaluator.", scorePrompt, 0).pipe(
+            ask(ctx, m.name + " (scoring)", m.model, "You are a strict evaluator.", scorePrompt, 0).pipe(
               Effect.catchCause(() => Effect.succeed("")),
             ),
           ),
@@ -1158,7 +1222,7 @@ export const CouncilTool = Tool.define(
         const transcript: { label: string; text: string }[] = []
         let current = yield* Effect.all(
           members.map((m) =>
-            askSafe(m, "You are a debater on an expert panel.", `Question:\n${question}\n\nGive your opening position.`, 0.7),
+            askSafe(ctx, m, "You are a debater on an expert panel.", `Question:\n${question}\n\nGive your opening position.`, 0.7),
           ),
           { concurrency: 4 },
         )
@@ -1168,6 +1232,7 @@ export const CouncilTool = Tool.define(
           current = yield* Effect.all(
             members.map((m, i) =>
               askSafe(
+                ctx,
                 m,
                 "You are a debater on an expert panel.",
                 `Question:\n${question}\n\nOther members said:\n${prev
