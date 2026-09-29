@@ -20,10 +20,10 @@ index 057754cd9..35f958087 100644
          commands[name] = {
 diff --git a/packages/opencode/src/tool/custom.ts b/packages/opencode/src/tool/custom.ts
 new file mode 100644
-index 000000000..519533aa2
+index 000000000..3978f6751
 --- /dev/null
 +++ b/packages/opencode/src/tool/custom.ts
-@@ -0,0 +1,1231 @@
+@@ -0,0 +1,1112 @@
 +// ============================================================================
 +// PERSONALIZATION (FinalPersonalizeR) — SINGLE owned file.
 +// Everything for /distill, /schedule, /council lives HERE: tools, commands,
@@ -700,90 +700,6 @@ index 000000000..519533aa2
 +    .filter((m) => m && typeof m.model === "string" && m.model.trim().length > 0)
 +    .map((m, i) => ({ name: String(m.name || `model${i + 1}`), model: m.model.trim() }))
 +}
-+// ---- catalog automap ------------------------------------------------------
-+// The provider registry is already in memory (the same list the model picker uses), so
-+// snapping a loosely-typed name -> a real "provider/model" is free: no network, no tokens,
-+// no extra round-trip. A member written as "nemotron" or "qwen3.8" resolves to whatever
-+// this machine actually has instead of failing with "not configured".
-+type Catalog = Record<string, { models: Record<string, unknown> }>
-+const normId = (s: string) => String(s ?? "").toLowerCase().replace(/[^a-z0-9.]+/g, "")
-+function catalogIds(provs: Catalog): string[] {
-+  const out: string[] = []
-+  for (const [pid, info] of Object.entries(provs ?? {}))
-+    for (const mid of Object.keys(info?.models ?? {})) out.push(`${pid}/${mid}`)
-+  return out
-+}
-+// Score "pid/mid" against a loose query; -1 means no match. Shorter ids win ties so
-+// "qwen3.8" prefers qwen3.8-max over qwen3.8-flash-thinking-preview.
-+function scoreId(id: string, q: string): number {
-+  const mid = id.split("/").slice(1).join("/")
-+  const nq = normId(q)
-+  const nid = normId(id)
-+  const nmid = normId(mid)
-+  if (!nq) return -1
-+  // Version guard: every number written in the query must exist in the candidate.
-+  // This is what stops "fable99999" from silently becoming "claude-fable-5", or
-+  // "opus-9" from becoming "opus-5". A wrong version is a different model.
-+  const qNums = String(q).toLowerCase().match(/\d+(?:\.\d+)?/g) ?? []
-+  if (qNums.length) {
-+    const idNums = new Set(id.toLowerCase().match(/\d+(?:\.\d+)?/g) ?? [])
-+    if (qNums.some((x) => !idNums.has(x))) return -1
-+  }
-+  // Tiers are 100 apart and length is only a TIE-BREAKER inside a tier — subtracting the
-+  // raw length used to push a tier clean through the one below it (a substring hit scored
-+  // 600 - len < 600, i.e. under AUTOMAP_MIN), which silently made that whole tier dead and
-+  // rejected honest names like "fable" and "haiku-4-5".
-+  const tie = Math.min(nmid.length, 99) / 100
-+  if (nid === nq) return 1000
-+  if (nmid === nq) return 900
-+  if (nmid.startsWith(nq)) return 800 - tie
-+  if (nid.includes(nq) || nmid.includes(nq)) return 700 - tie
-+  const toks = String(q).toLowerCase().split(/[^a-z0-9.]+/).filter(Boolean)
-+  if (toks.length && toks.every((t) => nid.includes(normId(t)))) return 600 - tie
-+  return -1
-+}
-+// Only confident hits (exact / prefix / substring) are ever applied. Weaker matches are
-+// reported as suggestions so the user and the model can see them and choose — never
-+// substituted behind their back.
-+// = the substring tier's floor (tie-breaker is always < 1), so "substring or better".
-+// The all-tokens tier (600) deliberately falls below this and stays suggestion-only.
-+const AUTOMAP_MIN = 700 - 1
-+function rankIds(provs: Catalog, q: string): { id: string; score: number }[] {
-+  const out: { id: string; score: number }[] = []
-+  for (const id of catalogIds(provs)) {
-+    let s = scoreId(id, q)
-+    if (s < 0) continue
-+    if (id.endsWith("-free")) s += 25 // same model, no bill — wins ties
-+    out.push({ id, score: s })
-+  }
-+  return out.sort((a, b) => b.score - a.score)
-+}
-+// Build a usable roster straight from the registry. A council of near-identical siblings is
-+// worthless, so pick one model per family, free tiers first, with the current session model
-+// pinned at the front (it is provably reachable — it is answering right now).
-+function autoMembers(provs: Catalog, cur: string, n: number): Member[] {
-+  const family = (id: string) => {
-+    const [pid, ...rest] = id.split("/")
-+    return `${pid}/${rest.join("/").split(/[-.]/)[0]}`
-+  }
-+  const picked: Member[] = []
-+  const seen = new Set<string>()
-+  if (cur) {
-+    picked.push({ name: "current", model: cur })
-+    seen.add(family(cur))
-+  }
-+  const ids = catalogIds(provs)
-+    .slice()
-+    .sort((a, b) => Number(b.endsWith("-free")) - Number(a.endsWith("-free")) || a.localeCompare(b))
-+  for (const id of ids) {
-+    if (picked.length >= n) break
-+    const f = family(id)
-+    if (seen.has(f)) continue
-+    seen.add(f)
-+    picked.push({ name: `member${picked.length + 1}`, model: id })
-+  }
-+  return picked
-+}
 +function block(answers: Ans[]): string {
 +  return answers.map((a, i) => `### [${i + 1}] ${a.model}\n${a.text}`).join("\n\n")
 +}
@@ -887,49 +803,36 @@ index 000000000..519533aa2
 +        source = globalFile
 +      }
 +
-+      const warnings: string[] = []
-+      const cur = yield* provider.defaultModel().pipe(
-+        Effect.map((m) => `${m.providerID}/${m.modelID}`),
-+        Effect.catchCause(() => Effect.succeed("")),
-+      )
-+      const provs = yield* provider.list().pipe(Effect.catchCause(() => Effect.succeed({} as Catalog)))
-+
-+      // nothing configured -> build a real council from the registry instead of bailing.
-+      // Everything needed is already in memory, so this costs nothing and runs immediately.
++      // nothing configured -> seed global with the current model + print the path
 +      if (members.length === 0) {
-+        const auto = autoMembers(provs, cur, 3)
-+        if (auto.length >= 2) {
-+          const cfg: CouncilConfig = {
-+            selection: "manual",
-+            members: auto,
-+            chairman: cur || auto[0].model,
-+            defaultStrategy: "council",
-+            rounds: 2,
-+          }
-+          let wrote = ""
++        const cur = yield* provider.defaultModel().pipe(
++          Effect.map((m) => `${m.providerID}/${m.modelID}`),
++          Effect.catchCause(() => Effect.succeed("")),
++        )
++        let seeded = false
++        if (!existsSync(globalFile)) {
 +          try {
-+            writeConfig(globalFile, cfg)
-+            wrote = globalFile
++            writeConfig(globalFile, {
++              selection: "manual",
++              members: [{ name: "current", model: cur }],
++              chairman: cur,
++              defaultStrategy: "council",
++              rounds: 2,
++            })
++            seeded = true
 +          } catch {}
-+          members = auto
-+          source = wrote || "auto-built (in memory; config not writable)"
-+          warnings.push(
-+            `no council configured — auto-built from your models:\n${auto
-+              .map((m) => `  - ${m.name}: ${m.model}`)
-+              .join("\n")}${wrote ? `\nSaved: ${wrote}` : ""}`,
-+          )
-+        } else {
-+          const out = [
-+            "No council is configured, and fewer than two models are available to build one from.",
-+            `  ${globalFile}`,
-+            projectFile ? `Blank per-project override:\n  ${projectFile}` : "",
-+            cur ? `Only reachable model: ${cur}` : "No providers are configured — set up API keys first.",
-+            `Add two or more "provider/model" entries and a "chairman", then run /council again.`,
-+          ]
-+            .filter(Boolean)
-+            .join("\n")
-+          return { title: "council: not configured", output: out, metadata: { members: 0 } as CouncilMeta }
 +        }
++        const out = [
++          "No council is configured (it needs at least two models).",
++          seeded && cur ? `Seeded the global config with your current model (${cur}).` : "Global council config:",
++          `  ${globalFile}`,
++          projectFile ? `Blank per-project override:\n  ${projectFile}` : "",
++          `Add two or more "provider/model" entries and a "chairman", then run /council again.`,
++          `A one-model council is pointless — for a single model use the normal task/subagent flow.`,
++        ]
++          .filter(Boolean)
++          .join("\n")
++        return { title: "council: not configured", output: out, metadata: { members: 0 } as CouncilMeta }
 +      }
 +
 +      const strategy = normStrategy(args.strategy || projectCfg?.defaultStrategy || globalCfg?.defaultStrategy || "council")
@@ -938,53 +841,30 @@ index 000000000..519533aa2
 +      // Invalid entries are backfilled with the CURRENT session model — provably working, it is
 +      // answering right now — never dropped silently. Fewer than 2 distinct survivors -> fail loud
 +      // with a pick-list of models the user actually has configured.
++      const warnings: string[] = []
 +      {
++        const cur = yield* provider.defaultModel().pipe(
++          Effect.map((m) => `${m.providerID}/${m.modelID}`),
++          Effect.catchCause(() => Effect.succeed("")),
++        )
 +        const checked: Member[] = []
 +        const bad: string[] = []
-+        const mapped: string[] = []
 +        for (const m of members) {
 +          const pm = Provider.parseModel(m.model)
-+          let hint = ""
 +          const ok = yield* provider.getModel(pm.providerID, pm.modelID).pipe(
 +            Effect.map(() => true),
 +            Effect.catchCause((cause) => {
 +              const sq = Cause.squash(cause) as { suggestions?: string[] }
-+              if (Array.isArray(sq?.suggestions) && sq.suggestions.length)
-+                hint = ` (did you mean: ${sq.suggestions.slice(0, 3).join(", ")}?)`
++              const hint =
++                Array.isArray(sq?.suggestions) && sq.suggestions.length
++                  ? ` (did you mean: ${sq.suggestions.slice(0, 3).join(", ")}?)`
++                  : ""
++              bad.push(`  - ${m.name}: ${m.model}${hint}`)
 +              return Effect.succeed(false)
 +            }),
 +          )
-+          if (ok) {
-+            checked.push(m)
-+            continue
-+          }
-+          // automap: snap the loose name onto the nearest model this machine really has,
-+          // but only on a confident hit. Anything weaker is surfaced, not applied.
-+          const ranked = rankIds(provs, m.model)
-+          const top = ranked[0]
-+          if (top && top.score >= AUTOMAP_MIN && top.id !== m.model) {
-+            const hp = Provider.parseModel(top.id)
-+            const ok2 = yield* provider.getModel(hp.providerID, hp.modelID).pipe(
-+              Effect.map(() => true),
-+              Effect.catchCause(() => Effect.succeed(false)),
-+            )
-+            if (ok2) {
-+              mapped.push(`  - ${m.name}: ${m.model} -> ${top.id}`)
-+              checked.push({ name: m.name, model: top.id })
-+              continue
-+            }
-+          }
-+          const near = ranked.slice(0, 3).map((r) => r.id)
-+          bad.push(
-+            `  - ${m.name}: ${m.model}${hint}${
-+              near.length ? ` — nearest: ${near.join(", ")} (NOT applied, too different; name it exactly)` : ""
-+            }`,
-+          )
++          if (ok) checked.push(m)
 +        }
-+        if (mapped.length)
-+          warnings.push(
-+            `AUTOMAPPED ${mapped.length} — these names did not exist, snapped to nearest model. DOUBLE CHECK:\n${mapped.join("\n")}`,
-+          )
 +        if (bad.length) {
 +          if (cur && !checked.some((c) => c.model === cur)) {
 +            checked.push({ name: "current", model: cur })
@@ -997,13 +877,14 @@ index 000000000..519533aa2
 +        }
 +        members = checked
 +        if (members.length < (strategy === "router" ? 1 : 2)) {
-+          const all = catalogIds(provs)
-+          // free tiers first — they are the ones a user can actually run right now
-+          const avail = all
-+            .slice()
-+            .sort((a, b) => Number(b.endsWith("-free")) - Number(a.endsWith("-free")) || a.localeCompare(b))
-+            .slice(0, 12)
-+            .map((id) => `  - ${id}`)
++          const provs = yield* provider.list().pipe(Effect.catchCause(() => Effect.succeed({} as Record<string, { models: Record<string, unknown> }>)))
++          const avail: string[] = []
++          outer: for (const [pid, info] of Object.entries(provs)) {
++            for (const mid of Object.keys(info?.models ?? {})) {
++              avail.push(`  - ${pid}/${mid}`)
++              if (avail.length >= 12) break outer
++            }
++          }
 +          return {
 +            title: "council: invalid config",
 +            output: [
