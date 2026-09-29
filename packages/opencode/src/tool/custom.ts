@@ -732,6 +732,21 @@ function rankIds(provs: Catalog, q: string): { id: string; score: number }[] {
   }
   return out.sort((a, b) => b.score - a.score)
 }
+// The registry is a catalog, not a liveness check: getModel() happily resolves an id the
+// provider has since retired (e.g. opencode/nemotron-3-super-free), so validation passes and
+// the model only dies at generate time. Liveness cannot be known without spending a call, so
+// instead of guessing we keep ranked siblings ready and fail over to them on a real error.
+function familyOf(id: string): string {
+  const [pid, ...rest] = id.split("/")
+  return `${pid}/${rest.join("/").split(/[-.]/)[0]}`
+}
+function altIds(provs: Catalog, id: string, n: number): string[] {
+  const fam = familyOf(id)
+  return catalogIds(provs)
+    .filter((c) => c !== id && familyOf(c) === fam)
+    .sort((a, b) => Number(b.endsWith("-free")) - Number(a.endsWith("-free")) || a.localeCompare(b))
+    .slice(0, n)
+}
 // Build a usable roster straight from the registry. A council of near-identical siblings is
 // worthless, so pick one model per family, free tiers first, with the current session model
 // pinned at the front (it is provably reachable — it is answering right now).
@@ -824,11 +839,24 @@ export const CouncilTool = Tool.define(
     })
 
     // never-failing member answer — a failure becomes a visible marker instead of killing the council
-    const askSafe = (m: Member, system: string, user: string, temperature: number): Effect.Effect<Ans> =>
+    // A retired-but-catalogued model fails here, not at validation. Rather than returning a
+    // dead member as a "[failed]" marker that silently shrinks the council, walk the ranked
+    // siblings once each. The swap is reported in the answer's model label, never hidden.
+    const askSafe: (
+      m: Member,
+      system: string,
+      user: string,
+      temperature: number,
+      alts?: string[],
+    ) => Effect.Effect<Ans> = (m, system, user, temperature, alts = []) =>
       ask(m.model, system, user, temperature).pipe(
         Effect.map((text): Ans => ({ name: m.name, model: m.model, text })),
         Effect.catchCause((cause) =>
-          Effect.succeed({ name: m.name, model: m.model, text: `[failed: ${String(Cause.squash(cause)).slice(0, 100)}]` }),
+          alts.length
+            ? askSafe({ name: m.name, model: alts[0] }, system, user, temperature, alts.slice(1)).pipe(
+                Effect.map((a): Ans => (a.text.startsWith("[failed:") ? a : { ...a, model: `${a.model} (fell back from ${m.model})` })),
+              )
+            : Effect.succeed({ name: m.name, model: m.model, text: `[failed: ${String(Cause.squash(cause)).slice(0, 100)}]` }),
         ),
       )
 
@@ -1042,7 +1070,7 @@ export const CouncilTool = Tool.define(
       let answers: Ans[] = []
       if (["council", "compare", "moa", "consensus", "arena"].includes(strategy)) {
         answers = yield* Effect.all(
-          members.map((m) => askSafe(m, MEMBER_SYSTEM, question, 0.7)),
+          members.map((m) => askSafe(m, MEMBER_SYSTEM, question, 0.7, altIds(provs, m.model, 2))),
           { concurrency: 4 },
         )
       }
