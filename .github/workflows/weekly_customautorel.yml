@@ -317,20 +317,25 @@ jobs:
             # 0.0.0 (and that empty prerelease field is not even valid semver) is why the
             # server answers "OpenCode 1.18.0 or newer is required to use the free tier".
             # Pin the real upstream version so the gate sees a true release number.
-            local v="$OPENCODE_VERSION"
+            #
+            # NOTE: this runs under `set -euo pipefail`. Every read must survive an
+            # UNSET variable (-u), and every command substitution must not abort the
+            # job on a nonzero exit (-e / pipefail) -- the fallbacks below exist
+            # precisely for the cases where a command fails, so they must be reached.
+            local v="${OPENCODE_VERSION:-}"
 
             # 1) honour an explicit override, 2) else the upstream tree's own version
             if [ -z "$v" ]; then
               v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-                     packages/opencode/package.json 2>/dev/null | head -1)"
+                     packages/opencode/package.json 2>/dev/null | head -1 || true)"
             fi
 
             # 3) last resort: whatever upstream actually published
             case "$v" in
               ''|0.0.0*)
                 echo "package.json version unusable ('${v:-<empty>}'), asking npm..."
-                v="$(curl -fsSL --max-time 20 https://registry.npmjs.org/opencode-ai/latest \
-                     | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                v="$(curl -fsSL --max-time 20 https://registry.npmjs.org/opencode-ai/latest 2>/dev/null \
+                     | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)"
                 ;;
             esac
 
@@ -379,13 +384,13 @@ jobs:
             echo "Verifying the stamped version survived into the binary..."
             local bin
             bin="$(find packages/opencode/dist/opencode-linux-x64 -type f -name opencode \
-                   -perm -u+x 2>/dev/null | head -1)"
+                   -perm -u+x 2>/dev/null | head -1 || true)"
             if [ -z "$bin" ]; then
               echo "ERROR: could not locate the linux-x64 opencode binary to verify"
               return 1
             fi
             local reported
-            reported="$("$bin" --version 2>&1 | tr -d '\r')"
+            reported="$("$bin" --version 2>&1 | tr -d '\r' || true)"
             if ! printf '%s' "$reported" | grep -qF "$OPENCODE_VERSION"; then
               echo "ERROR: binary reports '$reported', expected it to contain $OPENCODE_VERSION"
               echo "A 0.0.0 build is locked out of the free tier -- refusing to release it."
