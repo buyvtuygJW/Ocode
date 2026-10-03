@@ -45,13 +45,17 @@ export function path() {
     if (Flag.OPENCODE_DB === ":memory:" || isAbsolute(Flag.OPENCODE_DB)) return Flag.OPENCODE_DB
     return join(Global.Path.data, Flag.OPENCODE_DB)
   }
+  // Sanitise first, then decide. A channel that sanitises to nothing must never reach the
+  // suffix branch -- that is what produced the orphaned `opencode-.db`.
+  const channel = InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^[-.]+|-+$/g, "")
   if (
-    ["latest", "beta", "prod"].includes(InstallationChannel) ||
+    !channel ||
+    ["latest", "beta", "prod", "local"].includes(channel) ||
     process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
     process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
   )
     return join(Global.Path.data, "opencode.db")
-  return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
+  return join(Global.Path.data, `opencode-${channel}.db`)
 }
 
 export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })

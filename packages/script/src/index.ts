@@ -27,7 +27,16 @@ const CHANNEL = await (async () => {
   if (env.OPENCODE_CHANNEL) return env.OPENCODE_CHANNEL
   if (env.OPENCODE_BUMP) return "latest"
   if (env.OPENCODE_VERSION && !env.OPENCODE_VERSION.startsWith("0.0.0-")) return "latest"
-  return await $`git branch --show-current`.text().then((x) => x.trim())
+  // `git branch --show-current` prints an empty line when HEAD is detached, and fails
+  // outright outside a work tree. Never let that become the channel: it is baked into the
+  // OPENCODE_CHANNEL build define and an empty channel yields artifacts like `opencode-.db`.
+  const branch = await $`git branch --show-current`
+    .nothrow()
+    .quiet()
+    .text()
+    .then((x) => x.trim())
+    .catch(() => "")
+  return branch || "local"
 })()
 const IS_PREVIEW = CHANNEL !== "latest"
 

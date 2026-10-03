@@ -1,0 +1,337 @@
+diff --git a/packages/core/src/flag/flag.ts b/packages/core/src/flag/flag.ts
+index a0eb78a..8838d44 100644
+--- a/packages/core/src/flag/flag.ts
++++ b/packages/core/src/flag/flag.ts
+@@ -20,7 +20,7 @@ export const Flag = {
+   OPENCODE_GIT_BASH_PATH: process.env["OPENCODE_GIT_BASH_PATH"],
+   OPENCODE_CONFIG: process.env["OPENCODE_CONFIG"],
+   OPENCODE_CONFIG_CONTENT: process.env["OPENCODE_CONFIG_CONTENT"],
+-  OPENCODE_DISABLE_AUTOUPDATE: truthy("OPENCODE_DISABLE_AUTOUPDATE"),
++  OPENCODE_DISABLE_AUTOUPDATE: true, // SANITIZE(#459): no auto update-check (github/chocolatey/opencode.ai)
+   OPENCODE_ALWAYS_NOTIFY_UPDATE: truthy("OPENCODE_ALWAYS_NOTIFY_UPDATE"),
+   OPENCODE_DISABLE_PRUNE: truthy("OPENCODE_DISABLE_PRUNE"),
+   OPENCODE_DISABLE_TERMINAL_TITLE: truthy("OPENCODE_DISABLE_TERMINAL_TITLE"),
+diff --git a/packages/core/src/observability/otlp.ts b/packages/core/src/observability/otlp.ts
+index dd99ebc..e336e0b 100644
+--- a/packages/core/src/observability/otlp.ts
++++ b/packages/core/src/observability/otlp.ts
+@@ -4,7 +4,7 @@ import { Flag } from "../flag/flag"
+ import { InstallationChannel, InstallationVersion } from "../installation/version"
+ import { runID } from "./shared"
+ 
+-const endpoint = Flag.OTEL_EXPORTER_OTLP_ENDPOINT
++const endpoint = undefined // SANITIZE(#459): force OTLP/telemetry off (no honeycomb)
+ 
+ const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
+   ? Flag.OTEL_EXPORTER_OTLP_HEADERS.split(",").reduce(
+diff --git a/packages/opencode/src/cli/logo.ts b/packages/opencode/src/cli/logo.ts
+index 9117d38..b86eef6 100644
+--- a/packages/opencode/src/cli/logo.ts
++++ b/packages/opencode/src/cli/logo.ts
+@@ -1 +1,8 @@
++import { logo as upstreamLogo } from "@opencode-ai/tui/logo"
++
+ export * from "@opencode-ai/tui/logo"
++
++export const logo = {
++  ...upstreamLogo,
++  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
++}
+diff --git a/packages/opencode/src/cli/ui.ts b/packages/opencode/src/cli/ui.ts
+index 6ad6495..e42e257 100644
+--- a/packages/opencode/src/cli/ui.ts
++++ b/packages/opencode/src/cli/ui.ts
+@@ -3,10 +3,10 @@ import { Schema } from "effect"
+ import { logo as glyphs } from "./logo"
+ 
+ const wordmark = [
+-  `⠀                                ▄     `,
+-  `█▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
+-  `█  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀`,
+-  `▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
++  `⠀█▀▀▀▀▀▀█               ▄     `,
++  ` ▀█    █▀  █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
++  `  ▀█__█▀   █    █  █ █  █ █▀▀▀`,
++  `█▄▄█  █▄▄█ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
+ ]
+ 
+ export class CancelledError extends Schema.TaggedErrorClass<CancelledError>()("UICancelledError", {}) {}
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index eb116f6..47b8c58 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -108,6 +108,70 @@ export interface Interface {
+   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
+ }
+ 
++//PATCH START to custom ROLE>
++import { existsSync, mkdirSync, readFileSync, writeFileSync /*, appendFileSync */ } from "fs"
++
++type RoleEvalConfig = {
++  usersystem: string
++  assistant_system: string
++}
++
++function loadRoleEvalConfig(projectRoot: string): RoleEvalConfig {
++  const root = path.resolve(projectRoot || process.cwd())
++  const file = process.env.OPENCODE_ROLE_FILE
++    ? path.resolve(process.env.OPENCODE_ROLE_FILE)
++    : path.join(root, ".opencode", "role.json")
++
++  const stock: RoleEvalConfig = {
++    usersystem: "",
++    assistant_system: "",
++  }
++
++  // const debugFile = path.join(root, ".opencode", "role-debug.log")
++
++  try {
++    mkdirSync(path.dirname(file), { recursive: true })
++    // appendFileSync(
++    //   debugFile,
++    //   [
++    //     `[${new Date().toISOString()}]`,
++    //     `cwd=${process.cwd()}`,
++    //     `projectRoot=${projectRoot}`,
++    //     `root=${root}`,
++    //     `file=${file}`,
++    //     `exists=${existsSync(file)}`,
++    //     "",
++    //   ].join("\n"),
++    //   "utf8",
++    // )
++
++    if (!existsSync(file)) {
++      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
++      // appendFileSync(debugFile, `created=${file}\n\n`, "utf8")
++      return stock
++    }
++
++    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleEvalConfig>
++
++    return {
++      usersystem: typeof parsed.usersystem === "string" ? parsed.usersystem : "",
++      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
++    }
++  } catch (err) {
++    // try {
++    //   appendFileSync(debugFile, `ERROR=${String(err)}\n\n`, "utf8")
++    // } catch {}
++    return stock
++  }
++}
++
++function stripIdentity(prompt: string) {
++  // beast.txt fuses identity with the "keep going until resolved" instruction in sentence one - leave it intact.
++  if (prompt.startsWith("You are opencode, an agent")) return prompt
++  return prompt.replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
++//PATCH END,P1.P2 is per user&assistant function edit to use var>roleEvalConfig.assistant etc.
++
+ export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+ 
+ const layer = Layer.effect(
+@@ -1261,17 +1325,30 @@ const layer = Layer.effect(
+               sys.mcp(agent, session.permission),
+               MessageV2.toModelMessagesEffect(msgs, model),
+             ])
++            // CUSTOM-ROLE-SYSTEM START
++            const roleCtx = yield* InstanceState.context
++            const roleRoot = roleCtx.worktree === "/" || roleCtx.worktree === "\\" ? roleCtx.directory : roleCtx.worktree
++            const persona = loadRoleEvalConfig(roleRoot).assistant_system
++            const roleAgent = persona
++              ? {
++                  ...agent,
++                  prompt: [persona, ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).map(stripIdentity)]
++                    .filter(Boolean)
++                    .join("\n"),
++                }
++              : agent
+             const system = [
+               ...env,
+               ...instructions,
+               ...(mcpInstructions ? [mcpInstructions] : []),
+               ...(skills ? [skills] : []),
+             ]
++            // CUSTOM-ROLE-SYSTEM END
+             const format = lastUser.format ?? { type: "text" as const }
+             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+             const result = yield* handle.process({
+               user: lastUser,
+-              agent,
++              agent: roleAgent,
+               permission: session.permission,
+               sessionID,
+               parentSessionID: session.parentID,
+diff --git a/packages/opencode/src/share/share-next.ts b/packages/opencode/src/share/share-next.ts
+index 60112e1..39bb3b4 100644
+--- a/packages/opencode/src/share/share-next.ts
++++ b/packages/opencode/src/share/share-next.ts
+@@ -20,7 +20,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { EventV2 } from "@opencode-ai/core/event"
+ 
+-const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
++const disabled = true // SANITIZE(#459): force sharing off (no opncd.ai/api.opencode.ai session content)
+ 
+ export type Api = {
+   create: string
+diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
+index a58a8cf..3ff2865 100644
+--- a/packages/tui/src/logo.ts
++++ b/packages/tui/src/logo.ts
+@@ -1,5 +1,5 @@
+ export const logo = {
+-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
++  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
+   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+ }
+ 
+diff --git a/packages/core/src/config/markdown.ts b/packages/core/src/config/markdown.ts
+index e1d74e6..b17a422 100644
+--- a/packages/core/src/config/markdown.ts
++++ b/packages/core/src/config/markdown.ts
+@@ -17,20 +17,90 @@ export function parseOption(content: string) {
+   }
+ }
+ 
+-// Other coding agents accept unquoted colons in frontmatter values. Retry
+-// those values as YAML block scalars so existing config files keep working.
++// Other coding agents (e.g. Claude Code) accept loose YAML in SKILL.md / agent
++// frontmatter that strict YAML rejects: unquoted colons in values, hyphenated
++// keys (allowed-tools), values wrapped across unindented lines, tab indentation,
++// and a leading BOM. On a parse failure we normalize the frontmatter into
++// equivalent valid YAML -- any value that needs escaping (contains a colon, a
++// YAML indicator, or spills onto following lines) becomes a literal `|-` block
++// scalar -- and retry. This runs ONLY after the strict parse has already failed,
++// so valid files are never touched. It is a superset of the original colon-only
++// rewrite: existing config files keep working.
+ export function sanitize(content: string) {
+-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
++  const stripped = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
++  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+   if (!match) return content
+   const frontmatter = match[1]
+-  const result = frontmatter.split(/\r?\n/).flatMap((line) => {
+-    if (line.trim().startsWith("#") || line.trim() === "" || /^\s+/.test(line)) return [line]
+-    const entry = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/)
+-    if (!entry) return [line]
+-    const value = entry[2].trim()
+-    if (value === "" || value === ">" || value === "|" || value.startsWith('"') || value.startsWith("'")) return [line]
+-    if (!value.includes(":")) return [line]
+-    return [`${entry[1]}: |-`, `  ${value}`]
+-  })
+-  return content.replace(frontmatter, () => result.join("\n"))
++
++  // top-level "key:" or "key: value" (hyphen/dot keys allowed; space after ":" optional)
++  const KEY = /^([A-Za-z0-9][\w.-]*)[ \t]*:(?:[ \t]*(.*))?$/
++  // leading chars that make a plain scalar ambiguous and need a block scalar
++  const INDICATOR = /^[!&*?@`%,[\]{}]/
++  // an intentional block-scalar header ("|", ">", "|-", ">2", ...) — leave alone
++  const BLOCK_HEADER = /^[|>][+-]?\d*$/
++  const isComment = (line: string) => /^\s*#/.test(line)
++
++  // tabs are illegal as YAML indentation -> spaces
++  const detab = (line: string) => {
++    const m = line.match(/^[ \t]+/)
++    return m ? m[0].replace(/\t/g, "  ") + line.slice(m[0].length) : line
++  }
++
++  const lines = frontmatter.split(/\r?\n/).map(detab)
++
++  const groups: { key: string; value: string; children: string[] }[] = []
++  const preface: string[] = []
++  let current: { key: string; value: string; children: string[] } | null = null
++  for (const line of lines) {
++    const entry = /^[ \t]/.test(line) || isComment(line) ? null : line.match(KEY)
++    if (entry) {
++      current = { key: entry[1], value: (entry[2] ?? "").trim(), children: [] }
++      groups.push(current)
++    } else if (current) {
++      current.children.push(line)
++    } else {
++      preface.push(line)
++    }
++  }
++
++  const needsBlock = (v: string) => v.includes(":") || INDICATOR.test(v) || / #/.test(v)
++
++  const out: string[] = [...preface]
++  for (const g of groups) {
++    // content lines that belong to this key's value (drop blanks and comments)
++    const body = g.children.filter((c) => c.trim() !== "" && !isComment(c))
++    const structured = g.children.some((c) => /^[ \t]+\S/.test(c) || /^\s*- /.test(c))
++    const quoted = g.value.startsWith('"') || g.value.startsWith("'")
++
++    // keep verbatim: a real block/list (empty value + indented block), an
++    // explicit block-scalar header, or a clean single-line quoted value
++    if ((g.value === "" && structured) || BLOCK_HEADER.test(g.value) || (quoted && body.length === 0)) {
++      out.push(g.value ? `${g.key}: ${g.value}` : `${g.key}:`)
++      for (const c of g.children) out.push(c)
++      continue
++    }
++
++    // empty value followed only by loose unindented text -> fold it in
++    if (g.value === "") {
++      if (body.length === 0) {
++        out.push(`${g.key}:`)
++        for (const c of g.children) out.push(c)
++      } else {
++        out.push(`${g.key}: |-`)
++        for (const c of body) out.push(`  ${c.trim()}`)
++      }
++      continue
++    }
++
++    // inline value: block-scalar it if it wraps onto more lines or needs escaping
++    if (body.length > 0 || needsBlock(g.value)) {
++      out.push(`${g.key}: |-`)
++      out.push(`  ${g.value}`)
++      for (const c of body) out.push(`  ${c.trim()}`)
++    } else {
++      out.push(`${g.key}: ${g.value}`)
++    }
++  }
++
++  return stripped.replace(frontmatter, () => out.join("\n"))
+ }
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+index 74e7812..8849677 100644
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -140,10 +140,15 @@ export const fromCatalogModel = (
+         })
+   const key = apiKey(resolved, credential)
+   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
++    // Default to store:false so OpenAI does not retain the Responses payload
++    // (zero-logging). An explicit store in provider options still wins.
++    const enforced = produce(resolved, (draft) => {
++      if (draft.request.body["store"] === undefined) draft.request.body["store"] = false
++    })
+     return Effect.succeed(
+-      withDefaults(resolved, OpenAIResponses.route)
++      withDefaults(enforced, OpenAIResponses.route)
+         .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
+-        .model({ id: resolved.api.id }),
++        .model({ id: enforced.api.id }),
+     )
+   }
+   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index 536a642..3f0a2ef 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -432,7 +432,12 @@ const layer = Layer.effect(
+           })
+         }
+ 
+-        return yield* Effect.promise(() => generateObject(params).then((r) => r.object))
++        return yield* Effect.promise(() =>
++          generateObject({
++            ...params,
++            providerOptions: ProviderTransform.providerOptions(resolved, { store: false }),
++          }).then((r) => r.object),
++        )
+       }),
+     })
+   }),
