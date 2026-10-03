@@ -1,0 +1,118 @@
+From: deltav7 fork
+Subject: [PATCH] tui: stop @opentui/core eating ctrl+a inside dialog filter inputs
+
+Fixes: ctrl+a in the model-selection dialog moves the cursor (visible as the accent
+       coloured cursor cell jumping to column 0) instead of opening the provider list.
+
+Upstream base: anomalyco/opencode @ f96e6aa6ed3f0a9c027da4eb7c4fba248426152b
+Verified against: @opentui/core@0.4.5 (bun cache copy on this box)
+
+ROOT CAUSE (all line numbers read from shipped code, not guessed)
+
+  1. packages/tui/src/config/keybind.ts:116
+         model_provider_list: keybind("ctrl+a", "Open provider list from model dialog")
+     -> command "model.dialog.provider" (keybind.ts:370)
+
+  2. packages/tui/src/ui/dialog-model.tsx registers that action; dialog-select.tsx:298
+     hands its bindings to the keymap via useBindings().
+
+  3. dialog-select.tsx:501 renders <input> = InputRenderable and focuses it (ref, :512).
+
+  4. packages/tui/src/keymap.tsx:175
+         function hasManagedTextareaFocus(renderer) {
+           const editor = renderer.currentFocusedEditor
+           return editor instanceof TextareaRenderable && !(editor instanceof InputRenderable)
+         }
+     gates registerManagedTextareaLayer (keymap.tsx:229).  With an InputRenderable
+     focused this is FALSE, so opencode's own "input.line.home" layer is NOT active and
+     is NOT the culprit.  (The second ctrl+a default, input_line_home at keybind.ts:170,
+     is a red herring.)
+
+  5. The real consumer is @opentui/core itself.  InputRenderable does not override
+     handleKeyPress, so it inherits TextareaRenderable's (index.bun.js:6528):
+
+         handleKeyPress(key) {
+           if (this.traits.suspend !== true) {
+             const action = getKeyBindingAction(this._keyBindingsMap, key)
+             if (action) {
+               const handler = this._actionHandlers.get(action)
+               if (handler) return handler()      // <-- consumed, returns true
+             }
+           }
+           ...
+           return false
+         }
+
+     and its table (defaultTextareaKeyBindings, index.bun.js:6370) contains
+
+         { name: "a", ctrl: true, action: "line-home" }
+
+     The editor runs before the keymap, consumes ctrl+a for line-home, and
+     "model.dialog.provider" is never dispatched.
+
+     So "the cause is upstream" was correct, but the collision is
+     opencode-keymap vs @opentui/core's hard-coded editor table - NOT a collision
+     between the two ctrl+a fields inside keybind.ts.
+
+WHY THE FIX IS SHAPED THIS WAY
+
+  Passing a filtered copy of the table does nothing: both the constructor
+  (index.bun.js:6461) and the setter (:6654) call
+      mergeKeyBindings(defaultTextareaKeyBindings, this._keyBindings)
+  so the defaults are always the base layer and an entry can never be deleted.
+  mergeKeyBindings (chunk-bun-tkm837n2.js:4332) keys on
+      `${name}:${ctrl}:${shift}:${meta}:${super}`
+  and lets the custom entry REPLACE the default one.  Replacing ctrl+a with an action
+  core has no handler for makes handleKeyPress fall through to `return false`, which is
+  exactly "unhandled" - the key then travels on to the keymap and the dialog action runs.
+
+  Scope: only DialogSelect's filter input.  The main prompt textarea is untouched, so
+  ctrl+a there still does input.line.home.  ctrl+shift+a, alt+a and cmd+a (select-all)
+  keep core's defaults - verified by running the predicate against the real table.
+  Inside the filter box, Home still reaches buffer-home (index.bun.js:6366).
+
+diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
+--- a/packages/tui/src/ui/dialog-select.tsx
++++ b/packages/tui/src/ui/dialog-select.tsx
+@@ -1,9 +1,10 @@
+ import {
+   InputRenderable,
+   RGBA,
+   ScrollBoxRenderable,
+   TextAttributes,
++  type KeyBinding,
+   type KeyEvent,
+   type Renderable,
+ } from "@opentui/core"
+ import type { Binding } from "@opentui/keymap"
+@@ -19,5 +20,21 @@
+ import { getScrollAcceleration } from "../util/scroll"
+ import { useTuiConfig } from "../config"
+ import { formatKeyBindings, useBindings, useKeymapSelector } from "../keymap"
+
++// @opentui/core's editors carry their own hard-coded key table
++// (defaultTextareaKeyBindings) and TextareaRenderable.handleKeyPress() consumes a match
++// before the keymap is ever consulted. ctrl+a is "line-home" in that table, so while
++// this filter input holds focus it swallowed any dialog action bound to ctrl+a - which
++// is what keybind.ts ships as `model_provider_list`, "Open provider list from model
++// dialog". Symptom: the cursor jumps to column 0 in the accent `cursorColor` and the
++// provider list never opens.
++//
++// mergeKeyBindings() keys entries on `name:ctrl:shift:meta:super` and lets a custom
++// entry replace the default, but never delete it - so we replace ctrl+a with an action
++// core has no handler for. handleKeyPress() then falls through and returns false, the
++// event continues to the keymap, and the dialog's own ctrl+a action runs. Other a-chords
++// (ctrl+shift+a, alt+a, cmd+a) keep core's defaults, and Home still does buffer-home.
++const FILTER_KEY_BINDINGS = [
++  { name: "a", ctrl: true, action: "opencode:pass-through" },
++] as unknown as KeyBinding[]
++
+ export interface DialogSelectProps<T> {
+@@ -506,6 +523,7 @@
+                   props.onFilter?.(e)
+                 })
+               }}
++              keyBindings={FILTER_KEY_BINDINGS}
+               focusedBackgroundColor={theme.backgroundPanel}
+               cursorColor={theme.primary}
+               focusedTextColor={theme.textMuted}
