@@ -15,6 +15,8 @@ import { InstanceState } from "@/effect/instance-state"
 import { Session } from "@/session/session"
 import { MessageID } from "@/session/schema"
 import type { TaskPromptOps } from "./task"
+import { Agent } from "../agent/agent"
+import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { generateText, type ModelMessage } from "ai"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, dirname } from "node:path"
@@ -825,6 +827,7 @@ export const CouncilTool = Tool.define(
   Effect.gen(function* () {
     const provider = yield* Provider.Service
     const sessions = yield* Session.Service
+    const agents = yield* Agent.Service
 
     // one-shot model call (mirrors Agent.generate); may fail into the error channel
     const askDirect = Effect.fn("CouncilTool.askDirect")(function* (model: string, system: string, user: string, temperature: number) {
@@ -857,19 +860,28 @@ export const CouncilTool = Tool.define(
       const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
       if (!ops) return yield* Effect.fail(new Error("no session transport in this context"))
       const pm = Provider.parseModel(model)
+      // Mirror TaskTool: resolve a real subagent and derive the child permission from
+      // the parent session. The old blanket deny made this a *primary* agent with
+      // everything refused, which is what free-tier gating keys off.
+      const subagent = yield* agents.get("general")
+      if (!subagent) return yield* Effect.fail(new Error("council: no 'general' subagent available"))
+      const parent = yield* sessions.get(ctx.sessionID)
       const child = yield* sessions.create({
         parentID: ctx.sessionID,
         title: `council: ${label} (${model})`,
-        agent: ctx.agent,
-        permission: [{ permission: "*", pattern: "*", action: "deny" }],
+        agent: subagent.name,
+        permission: deriveSubagentSessionPermission({
+          parentSessionPermission: parent.permission ?? [],
+          subagent,
+        }),
       })
       const result = yield* ops.prompt({
         messageID: MessageID.ascending(),
         sessionID: child.id,
         model: { providerID: pm.providerID, modelID: pm.modelID },
-        agent: ctx.agent,
+        agent: subagent.name,
         system,
-        parts: [{ type: "text", text: user }],
+        parts: yield* ops.resolvePromptParts(user),
       })
       if (result.info.role === "assistant" && result.info.error) {
         const message =
