@@ -22,4 +22,28 @@ describe("SkillPlugin.Plugin", () => {
       )
     }),
   )
+
+  it.effect("registers the built-in playwright-depth skill", () =>
+    Effect.gen(function* () {
+      const skill = yield* SkillV2.Service
+      yield* SkillPlugin.Plugin.effect(host({ skill: { ...skill, reload: skill.reload } }))
+
+      expect(yield* skill.list()).toContainEqual(
+        expect.objectContaining({
+          name: "playwright-depth",
+          description: expect.stringContaining("per-site memory"),
+        }),
+      )
+    }),
+  )
+
+  it.effect("resolves the playwright-depth cache path instead of shipping the placeholder", () =>
+    Effect.gen(function* () {
+      // Guards the real failure mode: a hardcoded authoring-machine path, or a
+      // {{CACHE_PATH}} token that never got substituted, silently shipping to users.
+      expect(SkillPlugin.PlaywrightDepthContent).not.toContain("{{CACHE_PATH}}")
+      expect(SkillPlugin.PlaywrightDepthContent).toContain(SkillPlugin.PlaywrightDepthCachePath)
+      expect(SkillPlugin.PlaywrightDepthCachePath).toContain("playwright-depth-cache.json")
+    }),
+  )
 })
