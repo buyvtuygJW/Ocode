@@ -589,12 +589,47 @@ jobs:
 
           BUILT_SHA="${{ steps.build.outputs.built_sha }}"
           SHORT_SHA="${BUILT_SHA:0:12}"
-          TAG="patched-opencode-${SHORT_SHA}"
+
+          # The tag must be a function of BOTH build inputs: the upstream tree AND the
+          # patch set. Keying it on the upstream SHA alone makes a patch-only rebuild
+          # collide with the live release -- gh then clobbers the assets while the tag
+          # (and its auto-generated source zip) stays pinned to the old commit, so two
+          # different binaries ship under one name with no way to tell them apart.
+          # Fingerprinting the patches yields a fresh tag when they change and a
+          # byte-identical tag when they do not, so reruns stay genuinely idempotent.
+          PATCH_DIR=""
+          for d in patches ../patches; do
+            [ -f "$d/FinalPERSONALIZE.patch" ] && { PATCH_DIR="$d"; break; }
+          done
+          if [ -z "$PATCH_DIR" ]; then
+            echo "ERROR: cannot locate patches/ to fingerprint the patch set"
+            exit 1
+          fi
+          FP="${RUNNER_TEMP:-/tmp}/patchset.fingerprint"
+          {
+            for p in FinalPERSONALIZE FinalPersonalizeR FinalPersonalizeS FinalPersonalizeX; do
+              if [ -f "$PATCH_DIR/$p.patch" ]; then
+                printf '%s %s\n' "$p" "$(sha256sum < "$PATCH_DIR/$p.patch" | cut -d' ' -f1)"
+              else
+                printf '%s absent\n' "$p"
+              fi
+            done
+            # a dropped optional patch produces a different binary -- fold that in too
+            printf 'transparency=%s science=%s rsi=%s\n' \
+              "${{ steps.build.outputs.transparency }}" \
+              "${{ steps.build.outputs.science }}" \
+              "${{ steps.build.outputs.rsi }}"
+          } > "$FP"
+          PATCHSET="$(sha256sum < "$FP" | cut -c1-8)"
+          echo "Patch-set fingerprint (-> p${PATCHSET}):"
+          sed 's/^/  /' "$FP"
+
+          TAG="patched-opencode-${SHORT_SHA}-p${PATCHSET}"
           WARN_SUFFIX=""
           if [ "${{ steps.build.outputs.transparency }}" != "on" ] || [ "${{ steps.build.outputs.science }}" != "on" ] || [ "${{ steps.build.outputs.rsi }}" != "on" ]; then
             WARN_SUFFIX=" -- !! OPTIONAL PATCH(ES) SKIPPED !!"
           fi
-          TITLE="Patched OpenCode ${SHORT_SHA}${WARN_SUFFIX}"
+          TITLE="Patched OpenCode ${SHORT_SHA} (patches ${PATCHSET})${WARN_SUFFIX}"
 
           echo "Creating/updating release:"
           echo "  tag=$TAG"
@@ -603,8 +638,10 @@ jobs:
           git config user.name "claudedbuildbot"
           git config user.email "claudedbuildbot@example.local"
 
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
-            echo "Tag already exists: $TAG"
+          # Same tag == same upstream + same patch set == same artifact, so an existing
+          # tag here is a true idempotent rerun and is deliberately left untouched.
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "Tag already exists (identical inputs): $TAG"
           else
             git tag "$TAG"
             git push origin "$TAG"
@@ -717,18 +754,57 @@ jobs:
             } >> "$NOTES_FILE"
           fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release exists; updating assets, title and notes."
-            gh release upload "$TAG" out/*.zip out/*.tar.gz out/SHA256SUMS.txt --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE"
+          # Publishing must not be a dead end. Under `set -e` a failed upload/edit
+          # (immutable releases, draft/published mismatch, token scope) would kill the
+          # job with the artifacts already built and nothing shipped. Fall back to a
+          # fresh tag rather than losing the build.
+          publish() {
+            local tag="$1"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release exists; updating assets, title and notes: $tag"
+              gh release upload "$tag" out/*.zip out/*.tar.gz out/SHA256SUMS.txt --clobber \
+                && gh release edit "$tag" --title "$TITLE" --notes-file "$NOTES_FILE"
+            else
+              echo "Creating release: $tag"
+              gh release create "$tag" \
+                out/*.zip \
+                out/*.tar.gz \
+                out/SHA256SUMS.txt \
+                --title "$TITLE" \
+                --notes-file "$NOTES_FILE"
+            fi
+          }
+
+          if publish "$TAG"; then
+            echo "Published: $TAG"
           else
-            echo "Creating release."
-            gh release create "$TAG" \
-              out/*.zip \
-              out/*.tar.gz \
-              out/SHA256SUMS.txt \
-              --title "$TITLE" \
-              --notes-file "$NOTES_FILE"
+            echo "::warning::publish to $TAG failed; falling back to a fresh tag"
+            # The notes have $TAG baked into the science-pack download URL, so they must
+            # be re-pointed at whichever tag we actually publish under -- otherwise the
+            # link 404s. Rewrite from a pristine copy each iteration, never in place.
+            cp "$NOTES_FILE" "$NOTES_FILE.orig"
+            PUBLISHED=""
+            for n in 2 3 4 5; do
+              ALT="${TAG}-r${n}"
+              if gh release view "$ALT" >/dev/null 2>&1; then
+                echo "  $ALT already taken, trying next"
+                continue
+              fi
+              if [ -z "$(git ls-remote --tags origin "refs/tags/$ALT")" ]; then
+                git tag "$ALT" && git push origin "$ALT" || true
+              fi
+              sed "s#/releases/download/${TAG}/#/releases/download/${ALT}/#g" \
+                "$NOTES_FILE.orig" > "$NOTES_FILE"
+              if publish "$ALT"; then
+                echo "::warning::published under fallback tag $ALT instead of $TAG"
+                PUBLISHED="$ALT"
+                break
+              fi
+            done
+            if [ -z "$PUBLISHED" ]; then
+              echo "ERROR: could not publish under $TAG or any -r2..-r5 fallback"
+              exit 1
+            fi
           fi
 
       - name: Sync patched upstream source to dev
