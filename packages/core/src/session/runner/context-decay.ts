@@ -37,8 +37,20 @@ export const CHAIN_NARRATION_FLOOR = 5
  */
 export const REEVAL_QUANTUM = 10
 
+/**
+ * Floor on what a replacement must actually free. The elision note alone runs ~115 chars and the archive path costs a
+ * marker plus a line in the index block, so a short tool output "collapses" into something *larger* than it was. Same
+ * reasoning as REEVAL_QUANTUM: under this margin, acting rewrites the cached prefix to make the request bigger, and
+ * doing nothing is strictly cheaper. Below it the body is left verbatim.
+ */
+export const MIN_DECAY_SAVING = 200
+
 /** Rough token estimate. Deliberately cheap - this gates trimming, not billing. */
 const tokens = (text: string) => Math.ceil(text.length / 4)
+
+/** Whether swapping `body` for `replacement` (plus any per-entry overhead it adds elsewhere) frees enough to be worth it. */
+const worthwhile = (body: string, replacement: string, overhead = 0) =>
+  body.length - replacement.length - overhead >= MIN_DECAY_SAVING
 
 // ------------------------------------------------------------------------------------------------- path probes
 
@@ -247,9 +259,9 @@ const stub = (tool: SessionMessage.AssistantTool, body: string) => {
 }
 
 /** An elided tool keeps outputPaths so the harness can refetch without a provider call. */
-const elide = (tool: SessionMessage.AssistantTool, body: string): SessionMessage.AssistantTool => {
+const elide = (tool: SessionMessage.AssistantTool, text: string): SessionMessage.AssistantTool => {
   if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
-  return { ...tool, state: { ...tool.state, content: [{ type: "text", text: stub(tool, body) }] } } as SessionMessage.AssistantTool
+  return { ...tool, state: { ...tool.state, content: [{ type: "text", text }] } } as SessionMessage.AssistantTool
 }
 
 /**
@@ -257,9 +269,11 @@ const elide = (tool: SessionMessage.AssistantTool, body: string): SessionMessage
  * per-tool would defeat the point. Content is never emptied outright: an empty tool result trips provider-side
  * tool_call/tool_result pairing checks.
  */
+const markerText = (ref: string) => `[archived — ref ${ref}]`
+
 const archivedMarker = (tool: SessionMessage.AssistantTool, ref: string): SessionMessage.AssistantTool => {
   if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
-  return { ...tool, state: { ...tool.state, content: [{ type: "text", text: `[archived — ref ${ref}]` }] } } as SessionMessage.AssistantTool
+  return { ...tool, state: { ...tool.state, content: [{ type: "text", text: markerText(ref) }] } } as SessionMessage.AssistantTool
 }
 
 export interface ArchiveEntry {
@@ -269,6 +283,10 @@ export interface ArchiveEntry {
   readonly name?: string
   readonly chars?: number
 }
+
+/** One entry's line in the index block. Shared with `indexBlock` so the cost model cannot drift from what is emitted. */
+const indexLine = (entry: ArchiveEntry) =>
+  entry.name ? `  ${entry.ref} — ${entry.name}, ${entry.chars} chars` : `  ${entry.ref}`
 
 export interface DecayResult {
   readonly messages: readonly SessionMessage.Message[]
@@ -311,13 +329,17 @@ export const decay = (messages: readonly SessionMessage.Message[], previous?: Co
       const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
       const ref = paths[0] ?? tool.id
       const label = labelled.has(tool.id)
+      const entry: ArchiveEntry = label ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref }
       const retire = () => {
-        archive.push(label ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref })
+        archive.push(entry)
         verdict.set(tool.id, archivedMarker(tool, ref))
       }
+      // Retiring is not free: the marker replaces the body *and* the tool buys a line in the index block. For a short
+      // output that total exceeds what it reclaims, so the body stays - cheaper on tokens and it keeps the thread whole.
+      const retires = worthwhile(body, markerText(ref), indexLine(entry).length + 1)
 
       if (archived || allowance === 0) {
-        retire()
+        if (retires) retire()
         continue
       }
 
@@ -329,8 +351,12 @@ export const decay = (messages: readonly SessionMessage.Message[], previous?: Co
       }
 
       // Overflow in the live task keeps a head/tail so the thread still reads; an older task is cold, so it goes to a ref.
-      if (rank === 0) verdict.set(tool.id, elide(tool, body))
-      else retire()
+      if (rank === 0) {
+        const stubbed = stub(tool, body)
+        if (worthwhile(body, stubbed)) verdict.set(tool.id, elide(tool, stubbed))
+        continue // the note would outweigh the body - leave it verbatim
+      }
+      if (retires) retire()
     }
   }
 
@@ -352,7 +378,7 @@ export const decay = (messages: readonly SessionMessage.Message[], previous?: Co
  */
 export const indexBlock = (archive: readonly ArchiveEntry[]) => {
   if (archive.length === 0) return undefined
-  const lines = archive.map((entry) => (entry.name ? `  ${entry.ref} — ${entry.name}, ${entry.chars} chars` : `  ${entry.ref}`))
+  const lines = archive.map(indexLine)
   return [
     `<archived-tool-output count="${archive.length}">`,
     "Tool output elided. Name any ref to have the harness reinject it locally.",
