@@ -45,10 +45,24 @@ const isTextVerbosity = (value: unknown): value is TextVerbosityValue =>
 
 const options = (request: LLMRequest) => request.providerOptions?.openai
 
+// Raw flag - `undefined` means the caller expressed no preference. Kept raw
+// because the Chat Completions API already defaults to not storing, and that
+// protocol is shared with many OpenAI-compatible vendors whose schemas may
+// reject an unknown field, so it only sends `store` when explicitly asked to.
 export const store = (request: LLMRequest): boolean | undefined => {
   const value = options(request)?.store
   return typeof value === "boolean" ? value : undefined
 }
+
+// Responses API retention default. Unlike Chat Completions, omitting `store`
+// there makes OpenAI retain the response object for 30 days, and Conversations
+// API items are worse still - they carry no TTL and persist until deleted. So
+// an unset flag has to resolve to false. Every Responses call site shares this
+// helper so request lowering and input lowering always agree on whether state
+// lives server-side; input lowering branches on `store === false` to strip
+// reasoning items that carry no encrypted state, and the two disagreeing would
+// make OpenAI reject those items.
+export const storeWithDefault = (request: LLMRequest): boolean => store(request) ?? false
 
 export const reasoningEffort = (request: LLMRequest): ReasoningEffort | undefined => {
   const value = options(request)?.reasoningEffort

@@ -347,7 +347,7 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
   const system: OpenAIResponsesInputItem[] =
     request.system.length === 0 ? [] : [{ role: "system", content: ProviderShared.joinText(request.system) }]
   const input: OpenAIResponsesInputItem[] = [...system]
-  const store = OpenAIOptions.store(request)
+  const store = OpenAIOptions.storeWithDefault(request)
 
   for (const message of request.messages) {
     if (message.role === "system") {
@@ -454,7 +454,7 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
 })
 
 const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (request: LLMRequest) {
-  const store = OpenAIOptions.store(request)
+  const store = OpenAIOptions.storeWithDefault(request)
   const promptCacheKey = OpenAIOptions.promptCacheKey(request)
   const effort = OpenAIOptions.reasoningEffort(request)
   if (effort && !OpenAIOptions.isReasoningEffort(effort))
@@ -466,7 +466,8 @@ const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (reques
   const serviceTier = OpenAIOptions.serviceTier(request)
   return {
     ...(instructions ? { instructions } : {}),
-    ...(store !== undefined ? { store } : {}),
+    // Always sent. `storeWithDefault` resolves an unset flag to false.
+    store,
     ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     ...(include ? { include } : {}),
     ...(effort || summary ? { reasoning: { effort, summary } } : {}),
@@ -969,7 +970,7 @@ export const protocol = Protocol.make({
       tools: ToolStream.empty<string>(),
       lifecycle: Lifecycle.initial(),
       reasoningItems: {},
-      store: OpenAIOptions.store(request),
+      store: OpenAIOptions.storeWithDefault(request),
     }),
     step,
     terminal: (event) => TERMINAL_TYPES.has(event.type),

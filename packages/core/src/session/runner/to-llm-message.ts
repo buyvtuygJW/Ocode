@@ -8,6 +8,7 @@ import {
   type ProviderMetadata,
 } from "@opencode-ai/llm"
 import { SessionMessage } from "../message"
+import { decay, indexBlock } from "./context-decay"
 import type { FileAttachment } from "../prompt"
 
 const media = (file: FileAttachment): ContentPart => ({
@@ -166,6 +167,15 @@ ${message.recent}
   }
 }
 
-/** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
-  messages.flatMap((message) => toLLMMessage(message, model))
+/**
+ * Translate projected V2 Session history into canonical @opencode-ai/llm context. Decay runs first, on Session messages
+ * rather than lowered ones, so it can see tool inputs/paths and rewrite a tool's own body in place. The retrieval index
+ * is appended last, never prepended: it grows every time something is archived, and a growing prefix would cold-cache
+ * the whole request on every turn.
+ */
+export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
+  const decayed = decay(messages)
+  const lowered = decayed.messages.flatMap((message) => toLLMMessage(message, model))
+  const index = indexBlock(decayed.archive)
+  return index === undefined ? lowered : [...lowered, Message.user(index)]
+}

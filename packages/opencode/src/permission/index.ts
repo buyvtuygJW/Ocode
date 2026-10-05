@@ -71,7 +71,14 @@ const layer = Layer.effect(
 
       for (const pattern of request.patterns) {
         const rule = evaluate(request.permission, pattern, ruleset, approved)
-        yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
+        // Fires once per pattern per tool call and echoes the raw command text, so at INFO it
+        // both floods the log and makes every grep of the log match its own command. Denials
+        // stay visible; allow/ask drop to DEBUG.
+        yield* (rule.action === "deny" ? Effect.logWarning : Effect.logDebug)("evaluated", {
+          permission: request.permission,
+          pattern,
+          action: rule,
+        })
         if (rule.action === "deny") {
           return yield* new PermissionV1.DeniedError({
             ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
