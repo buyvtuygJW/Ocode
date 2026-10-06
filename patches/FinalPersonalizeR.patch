@@ -23,7 +23,7 @@ new file mode 100644
 index 000000000..ef38c87bd 100644
 --- /dev/null
 +++ b/packages/opencode/src/tool/custom.ts
-@@ -0,0 +1,1336 @@
+@@ -0,0 +1,1327 @@
 +// ============================================================================
 +// PERSONALIZATION (FinalPersonalizeR) — SINGLE owned file.
 +// Everything for /distill, /schedule, /council lives HERE: tools, commands,
@@ -1100,25 +1100,16 @@ index 000000000..ef38c87bd 100644
 +          }
 +        }
 +        members = checked
-+        if (members.length < (strategy === "router" ? 1 : 2)) {
-+          const all = catalogIds(provs)
-+          // free tiers first — they are the ones a user can actually run right now
-+          const avail = all
-+            .slice()
-+            .sort((a, b) => Number(b.endsWith("-free")) - Number(a.endsWith("-free")) || a.localeCompare(b))
-+            .slice(0, 12)
-+            .map((id) => `  - ${id}`)
++        const need = strategy === "router" ? 1 : 2
++        if (members.length < need) {
++          // provs = provider.list() = connected providers only (opencode's own usable-model registry)
 +          return {
-+            title: "council: invalid config",
++            title: "council: pick models",
 +            output: [
-+              `Too few valid members after validation (${members.length}); a council needs two or more.`,
-+              bad.length ? `Invalid entries in ${source}:\n${bad.join("\n")}` : "",
-+              avail.length
-+                ? `Pick from the models you actually have configured, then edit ${source}:\n${avail.join("\n")}`
-+                : "No providers are configured — set up API keys first.",
-+            ]
-+              .filter(Boolean)
-+              .join("\n"),
++              `Only ${members.length} valid member(s); ${need} needed. Usable models on this machine:`,
++              catalogIds(provs).map((id) => `  - ${id}`).join("\n") || "  (none — no provider connected)",
++              `Pick ${need}+ from this list and set them in ${source === "inline" ? globalFile : source}, then re-run.`,
++            ].join("\n"),
 +            metadata: { members: members.length } as CouncilMeta,
 +          }
 +        }
