@@ -23,7 +23,7 @@ new file mode 100644
 index 000000000..ef38c87bd 100644
 --- /dev/null
 +++ b/packages/opencode/src/tool/custom.ts
-@@ -0,0 +1,1360 @@
+@@ -0,0 +1,1376 @@
 +// ============================================================================
 +// PERSONALIZATION (FinalPersonalizeR) — SINGLE owned file.
 +// Everything for /distill, /schedule, /council lives HERE: tools, commands,
@@ -31,7 +31,7 @@ index 000000000..ef38c87bd 100644
 +// RULE: upstream files get AT MOST one import line + one call line:
 +//   - tool/registry.ts:    import * as CustomTools from "./custom"  ->  ...(yield* CustomTools.builtin)
 +//   - command/index.ts:    import { customCommands } from "../tool/custom"  ->  Object.assign(commands, customCommands(hints))
-+// Adding a tool/command changes ONLY this file; the upstream hunks never grow.
++// Adding a tool/command changes ONLY this file; upstream hunks never grow.
 +// ============================================================================
 +import { Cause, Effect, Schema } from "effect"
 +import * as Tool from "./tool"
@@ -48,18 +48,18 @@ index 000000000..ef38c87bd 100644
 +import { join, dirname } from "node:path"
 +
 +// ---------- inlined tool descriptions + command templates ----------
-+const DESC_DISTILL = "Deterministically distill the CURRENT session into a reusable learned skill using the RSI (Recursive Self-Improvement) heuristic — NO LLM scoring. Reconstructs this session's tool trajectory, scores it 0-100 on Correctness/Efficiency/Coverage/Reproducibility, and only if it scores >= 75 writes a reusable skill to the global opencode skills dir (~/.config/opencode/skills/learned/<name>/SKILL.md), which opencode auto-discovers in future sessions. Run this at the end of a research session. Returns the score breakdown and either the saved skill path or the reason it was skipped.\n"
-+const DESC_SCHEDULE = "Manage deterministic qm-style background schedules (crons) — plain JSON in the global opencode config dir (schedules.json), NO LLM scoring, NO server. Actions: add (name + every: \"<N>m\"|\"<N>h\"|\"<N>d\"|\"daily@HH:MM\" + prompt [+ agent]) upserts a schedule; list shows all with next-run times; remove deletes by name; due lists the schedules whose time has come (execute each prompt, then call mark); mark records a completed run by name; export prints crontab/schtasks lines that run `opencode run \"<prompt>\"` so the OS scheduler executes them truly unattended. The built-in /schedule command runs everything that is due.\n"
-+const DESC_COUNCIL = "Convene a multi-model council: fan the same question to several models directly (bypasses the task tool's single-model limit) and combine their answers by strategy. See the `strategy` parameter for the seven modes and their aliases.\n\nMembers come from council.json — a per-project \".opencode/council.json\" overrides the global config dir. Resolution: the inline `members` argument, else the per-project file (a blank template is auto-created; entries with an empty \"model\" are skipped), else the global file.\n\nIf nothing is configured, the tool seeds the global council.json with your current model and prints its path. A council needs at least two models; with one, use the normal task/subagent flow.\n"
-+const PROMPT_DISTILL = "Call the `distill_session` tool now.\n\nIt deterministically — in code, with NO LLM scoring — reconstructs THIS session's tool\ntrajectory, scores it 0-100 on the RSI rubric (Correctness / Efficiency / Coverage /\nReproducibility), and only if it scores >= 75 saves a reusable learned skill under the global\nopencode skills dir, which opencode auto-discovers in future sessions.\n\nDo NOT score or reconstruct the session yourself. Just invoke `distill_session` and report its\noutput verbatim: the score breakdown, and either the saved skill path or the reason it was not\ndistilled.\n"
-+const PROMPT_SCHEDULE = "Call the `schedule_task` tool now with action=\"due\".\n\nFor EACH schedule it reports as due, in order:\n1. Execute that schedule's prompt as if the user had just typed it (delegate to its\n   agent via the task tool if one is set).\n2. When it finishes, call `schedule_task` with action=\"mark\" and that schedule's name\n   so the run is recorded.\n\nIf nothing is due, call `schedule_task` with action=\"list\" and report when the next\nschedule will fire.\n\nSchedules are deterministic qm-style crons — plain JSON, no server:\n- add:    schedule_task action=\"add\" name=\"inbox\" every=\"daily@09:00\" prompt=\"triage my inbox\"\n- remove: schedule_task action=\"remove\" name=\"inbox\"\n- export: schedule_task action=\"export\" prints crontab/schtasks lines so the OS runs\n  `opencode run \"<prompt>\"` unattended, without an open session.\n"
-+const PROMPT_COUNCIL = "Convene a council on this request via `council`.\n\n$ARGUMENTS\n\nPass user's question as `question`. If the user named model(s) or an agent count, pass exactly those as `members` (loose names ok — they auto-resolve); models the user did not ask for must not be pinged. Omit `members` only when none were named. If a strategy was named (council, compare, debate, moa, router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.\n\nRelay results as-is: synthesized/resolved answer for council/moa/debate; side-by-side for compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; chosen model for router.\n\nIf not configured, print returned file path and tell user to add two or more \"provider/model\" entries — do not invent models.\n"
++const DESC_DISTILL = "Deterministically distill CURRENT session into a reusable learned skill using RSI (Recursive Self-Improvement) heuristic — NO LLM scoring. Reconstructs this session's tool trajectory, scores it 0-100 on Correctness/Efficiency/Coverage/Reproducibility, and only if it scores >= 75 writes a reusable skill to global opencode skills dir (~/.config/opencode/skills/learned/<name>/SKILL.md), which opencode auto-discovers in future sessions. Run this at end of a research session. Returns score breakdown and either saved skill path or reason it was skipped.\n"
++const DESC_SCHEDULE = "Manage deterministic qm-style background schedules (crons) — plain JSON in global opencode config dir (schedules.json), NO LLM scoring, NO server. Actions: add (name + every: \"<N>m\"|\"<N>h\"|\"<N>d\"|\"daily@HH:MM\" + prompt [+ agent]) upserts a schedule; list shows all with next-run times; remove deletes by name; due lists schedules whose time has come (execute each prompt, then call mark); mark records a completed run by name; export prints crontab/schtasks lines that run `opencode run \"<prompt>\"` so OS scheduler executes them truly unattended. Built-in /schedule command runs everything that is due.\n"
++const DESC_COUNCIL = "Convene a multi-model council: fan same question to several models directly (bypasses task tool's single-model limit) and combine their answers by strategy. See `strategy` parameter for seven modes and their aliases.\n\nMembers come from council.json — a per-project \".opencode/council.json\" overrides global config dir. Resolution: inline `members` argument, else per-project file (a blank template is auto-created; entries with an empty \"model\" are skipped), else global file.\n\nIf nothing is configured, tool seeds global council.json with your current model and prints its path. A council needs at least two models; with one, use normal task/subagent flow.\n"
++const PROMPT_DISTILL = "Call `distill_session` tool now.\n\nIt deterministically — in code, with NO LLM scoring — reconstructs THIS session's tool\ntrajectory, scores it 0-100 on RSI rubric (Correctness / Efficiency / Coverage /\nReproducibility), and only if it scores >= 75 saves a reusable learned skill under global\nopencode skills dir, which opencode auto-discovers in future sessions.\n\nDo NOT score or reconstruct session yourself. Just invoke `distill_session` and report its\noutput verbatim: score breakdown, and either saved skill path or reason it was not\ndistilled.\n"
++const PROMPT_SCHEDULE = "Call `schedule_task` tool now with action=\"due\".\n\nFor EACH schedule it reports as due, in order:\n1. Execute that schedule's prompt as if user had just typed it (delegate to its\n   agent via task tool if one is set).\n2. When it finishes, call `schedule_task` with action=\"mark\" and that schedule's name\n   so run is recorded.\n\nIf nothing is due, call `schedule_task` with action=\"list\" and report when next\nschedule will fire.\n\nSchedules are deterministic qm-style crons — plain JSON, no server:\n- add:    schedule_task action=\"add\" name=\"inbox\" every=\"daily@09:00\" prompt=\"triage my inbox\"\n- remove: schedule_task action=\"remove\" name=\"inbox\"\n- export: schedule_task action=\"export\" prints crontab/schtasks lines so OS runs\n  `opencode run \"<prompt>\"` unattended, without an open session.\n"
++const PROMPT_COUNCIL = "Convene a council on this request via `council`.\n\n$ARGUMENTS\n\nPass user's question as `question`. If user named model(s) or an agent count, pass exactly those as `members` (loose names ok — they auto-resolve); models user did not ask for must not be pinged. Omit `members` only when none were named. If a strategy was named (council, compare, debate, moa, router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.\n\nRelay results as-is: synthesized/resolved answer for council/moa/debate; side-by-side for compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; chosen model for router.\n\nIf not configured, print returned file path and tell user to add two or more \"provider/model\" entries — do not invent models.\n"
 +
 +// ---------- distill_session tool ----------
 +// Deterministic RSI (Recursive Self-Improvement) distiller — ported as native code.
-+// Reconstructs the session trajectory from ctx.messages, scores it with a no-LLM
++// Reconstructs session trajectory from ctx.messages, scores it with a no-LLM
 +// heuristic (Correctness/Efficiency/Coverage/Reproducibility), and if it scores >= 75
-+// writes a reusable learned skill under the global opencode config skills dir, where
++// writes a reusable learned skill under global opencode config skills dir, where
 +// opencode auto-discovers it ({skill,skills}/**/SKILL.md) in future sessions.
 +
 +const THRESHOLD = 75
@@ -208,7 +208,7 @@ index 000000000..ef38c87bd 100644
 +
 +## Overview
 +
-+Automatically distilled from a high-scoring trajectory (score: ${t.score}/100) by the RSI
++Automatically distilled from a high-scoring trajectory (score: ${t.score}/100) by RSI
 +(Recursive Self-Improvement) loop. It captures a validated workflow pattern.
 +
 +## Origin
@@ -232,12 +232,12 @@ index 000000000..ef38c87bd 100644
 +
 +## When to Use This Skill
 +
-+Use when the question is similar to:
++Use when question is similar to:
 +> ${t.hypothesis}
 +
 +## Recommendations
 +
-+- Follow the tool sequence above as a starting template.
++- Follow tool sequence above as a starting template.
 +- Adapt parameters to your specific data and question.
 +- Validated for ${t.agent} workflows.
 +`
@@ -321,7 +321,7 @@ index 000000000..ef38c87bd 100644
 +// ---------- schedule_task tool ----------
 +// Deterministic qm-style background schedules ("crons and watches run work while
 +// nobody's watching") — ported as native code. NO LLM, NO server, NO Postgres.
-+// Schedules are plain JSON in the global opencode config dir; the built-in /schedule
++// Schedules are plain JSON in global opencode config dir; built-in /schedule
 +// command executes whatever is due inside a normal session, and `export` emits
 +// OS-scheduler lines (crontab / schtasks) that run `opencode run "<prompt>"` truly
 +// unattended, without an open session.
@@ -544,10 +544,10 @@ index 000000000..ef38c87bd 100644
 +    return {
 +      title: `schedule: exported ${tasks.length}`,
 +      output:
-+        "For truly unattended runs (no open session), register these with the OS scheduler.\n" +
++        "For truly unattended runs (no open session), register these with OS scheduler.\n" +
 +        "crontab (crontab -e):\n" +
 +        cron.join("\n") +
-+        "\nWindows (adjust /SC and /ST to the cadence):\n" +
++        "\nWindows (adjust /SC and /ST to cadence):\n" +
 +        win.join("\n"),
 +      count: tasks.length,
 +      due: dueCount(tasks, now),
@@ -593,14 +593,14 @@ index 000000000..ef38c87bd 100644
 +)
 +
 +// ---------- council tool ----------
-+// Multi-model council: fan the same question to N models directly (one provider call per
-+// member, so it is not bound to the task tool's single parent model) and combine the answers
-+// by strategy. Deterministic orchestration; the model calls are the only non-determinism.
-+// Members are plain council.json — a per-project ".opencode/council.json" overrides the global.
++// Multi-model council: fan same question to N models directly (one provider call per
++// member, so it is not bound to task tool's single parent model) and combine answers
++// by strategy. Deterministic orchestration; model calls are only non-determinism.
++// Members are plain council.json — a per-project ".opencode/council.json" overrides global.
 +
 +const COUNCIL_FILE = "council.json"
 +
-+// original open-swarm name + aiscouncil alias -> canonical (both trigger the same setup)
++// original open-swarm name + aiscouncil alias -> canonical (both trigger same setup)
 +const ALIASES: Record<string, string> = {
 +  fusion: "council",
 +  council: "council",
@@ -629,28 +629,28 @@ index 000000000..ef38c87bd 100644
 +export const CouncilParams = Schema.Struct({
 +  strategy: Schema.optional(Schema.String).annotate({
 +    description:
-+      "Deliberation strategy (canonical name or alias — both trigger the same setup):\n" +
-+      "- council (alias: fusion): every member answers, then the chairman synthesizes one definitive answer.\n" +
++      "Deliberation strategy (canonical name or alias — both trigger same setup):\n" +
++      "- council (alias: fusion): every member answers, then chairman synthesizes one definitive answer.\n" +
 +      "- compare: every member answers, shown side by side, no synthesis.\n" +
-+      "- debate (alias: roundtable): members argue over `rounds`, then the chairman resolves it.\n" +
-+      "- moa (alias: map): members propose, the chairman aggregates them (Mixture-of-Agents).\n" +
-+      "- router (aliases: orchestrator, smart-router): the chairman routes to the single best member, which answers.\n" +
++      "- debate (alias: roundtable): members argue over `rounds`, then chairman resolves it; debaters can read files named in the question.\n" +
++      "- moa (alias: map): members propose, chairman aggregates them (Mixture-of-Agents).\n" +
++      "- router (aliases: orchestrator, smart-router): chairman routes to single best member, which answers.\n" +
 +      "- consensus (alias: vote): members answer, then score each other; highest total wins (chairman breaks ties).\n" +
-+      "- arena: members answer side by side and the user picks the winner.\n" +
-+      "Omit to use the configured default strategy.",
++      "- arena: members answer side by side and user picks winner.\n" +
++      "Omit to use configured default strategy.",
 +  }),
 +  question: Schema.optional(Schema.String).annotate({
 +    description:
-+      "The question the council deliberates on. Omit to print the resolved configuration and member roster instead of convening.",
++      "Question council deliberates on. Omit to print resolved configuration and member roster instead of convening.",
 +  }),
 +  rounds: Schema.optional(Schema.Number).annotate({
 +    description: "Number of debate rounds (debate strategy only); clamped to 1-4, default 2.",
 +  }),
 +  members: Schema.optional(Schema.Array(Schema.String)).annotate({
 +    description:
-+      'Inline override of the council members for this call: an array of "provider/model" strings, e.g. ' +
++      'Inline override of council members for this call: an array of "provider/model" strings, e.g. ' +
 +      '["anthropic/claude-opus-4-8","openai/gpt-5","google/gemini-2.5-pro"]. When omitted, members are read from ' +
-+      '.opencode/council.json (per-project) or the global council.json.',
++      '.opencode/council.json (per-project) or global council.json.',
 +  }),
 +})
 +
@@ -671,9 +671,9 @@ index 000000000..ef38c87bd 100644
 +}
 +
 +const MEMBER_SYSTEM =
-+  "You are one member of an expert council. Answer the question directly, thoroughly and honestly. Do not mention the council."
++  "You are one member of an expert council. Answer question directly, thoroughly and honestly. Do not mention council."
 +const CHAIR_SYSTEM =
-+  "You are the chairman of an expert council. Judge and combine the members' answers rigorously and without bias."
++  "You are chairman of an expert council. Judge and combine members' answers rigorously and without bias."
 +// blank per-project stub: empty "model" => that entry is skipped, so a bare project file falls through to global
 +const TEMPLATE: CouncilConfig = {
 +  selection: "manual",
@@ -706,7 +706,7 @@ index 000000000..ef38c87bd 100644
 +    .map((m, i) => ({ name: String(m.name || `model${i + 1}`), model: m.model.trim() }))
 +}
 +// ---- catalog automap ------------------------------------------------------
-+// The provider registry is already in memory (the same list the model picker uses), so
++// Provider registry is already in memory (same list model picker uses), so
 +// snapping a loosely-typed name -> a real "provider/model" is free: no network, no tokens,
 +// no extra round-trip. A member written as "nemotron" or "qwen3.8" resolves to whatever
 +// this machine actually has instead of failing with "not configured".
@@ -726,7 +726,7 @@ index 000000000..ef38c87bd 100644
 +  const nid = normId(id)
 +  const nmid = normId(mid)
 +  if (!nq) return -1
-+  // Version guard: every number written in the query must exist in the candidate.
++  // Version guard: every number written in query must exist in candidate.
 +  // This is what stops "fable99999" from silently becoming "claude-fable-5", or
 +  // "opus-9" from becoming "opus-5". A wrong version is a different model.
 +  const qNums = String(q).toLowerCase().match(/\d+(?:\.\d+)?/g) ?? []
@@ -734,8 +734,8 @@ index 000000000..ef38c87bd 100644
 +    const idNums = new Set(id.toLowerCase().match(/\d+(?:\.\d+)?/g) ?? [])
 +    if (qNums.some((x) => !idNums.has(x))) return -1
 +  }
-+  // Tiers are 100 apart and length is only a TIE-BREAKER inside a tier — subtracting the
-+  // raw length used to push a tier clean through the one below it (a substring hit scored
++  // Tiers are 100 apart and length is only a TIE-BREAKER inside a tier — subtracting 
++  // raw length used to push a tier clean through one below it (a substring hit scored
 +  // 600 - len < 600, i.e. under AUTOMAP_MIN), which silently made that whole tier dead and
 +  // rejected honest names like "fable" and "haiku-4-5".
 +  const tie = Math.min(nmid.length, 99) / 100
@@ -748,10 +748,10 @@ index 000000000..ef38c87bd 100644
 +  return -1
 +}
 +// Only confident hits (exact / prefix / substring) are ever applied. Weaker matches are
-+// reported as suggestions so the user and the model can see them and choose — never
++// reported as suggestions so user and model can see them and choose — never
 +// substituted behind their back.
-+// = the substring tier's floor (tie-breaker is always < 1), so "substring or better".
-+// The all-tokens tier (600) deliberately falls below this and stays suggestion-only.
++// = substring tier's floor (tie-breaker is always < 1), so "substring or better".
++// All-tokens tier (600) deliberately falls below this and stays suggestion-only.
 +const AUTOMAP_MIN = 700 - 1
 +function rankIds(provs: Catalog, q: string): { id: string; score: number }[] {
 +  const out: { id: string; score: number }[] = []
@@ -763,9 +763,9 @@ index 000000000..ef38c87bd 100644
 +  }
 +  return out.sort((a, b) => b.score - a.score)
 +}
-+// The registry is a catalog, not a liveness check: getModel() happily resolves an id the
++// Registry is a catalog, not a liveness check: getModel() happily resolves an id 
 +// provider has since retired (e.g. opencode/nemotron-3-super-free), so validation passes and
-+// the model only dies at generate time. Liveness cannot be known without spending a call, so
++// model only dies at generate time. Liveness cannot be known without spending a call, so
 +// instead of guessing we keep ranked siblings ready and fail over to them on a real error.
 +function familyOf(id: string): string {
 +  const [pid, ...rest] = id.split("/")
@@ -778,13 +778,13 @@ index 000000000..ef38c87bd 100644
 +    .sort((a, b) => Number(b.endsWith("-free")) - Number(a.endsWith("-free")) || a.localeCompare(b))
 +    .slice(0, n)
 +}
-+// Build a roster straight from the registry, then drop stale generations: a variant
++// Build a roster straight from registry, then drop stale generations: a variant
 +// (gpt-*-pro, gpt-*-luna, ...) keeps only its newest version, and anything a whole
-+// major generation behind the series' newest is dropped too — unless it is a cheap
++// major generation behind series' newest is dropped too — unless it is a cheap
 +// workhorse tier (nano/mini/lite/flash/haiku), which stays (newest version of it).
-+// Nothing invented or hardcoded: all keys are derived from the ids themselves.
++// Nothing invented or hardcoded: all keys are derived from ids themselves.
 +const CHEAP_TIER = /nano|mini|lite|flash|haiku/
-+// Catalog lists everything the provider sells, not what this key can chat with.
++// Catalog lists everything provider sells, not what this key can chat with.
 +// Non-text endpoints (realtime/audio/image/embeddings/...) 404 on text generate.
 +const NON_CHAT = /realtime|audio|tts|whisper|transcri|embed|image|dall-?e|sora|moderation|computer-use|search-preview|rerank|vision-only/
 +function verOf(mid: string): number[] {
@@ -800,7 +800,7 @@ index 000000000..ef38c87bd 100644
 +function latestOnly(ids: string[], keep: Set<string>): string[] {
 +  // variant key: id with version numbers stripped ("openai/gpt-5.4-pro" -> "openai/gpt-pro")
 +  const vkey = (id: string) => id.toLowerCase().replace(/\d+(?:\.\d+)?/g, "").replace(/[-._ ]+/g, "-")
-+  // series key: everything before the first digit ("openai/gpt-", "anthropic/claude-haiku-")
++  // series key: everything before first digit ("openai/gpt-", "anthropic/claude-haiku-")
 +  const skey = (id: string) => id.toLowerCase().split(/\d/)[0]
 +  const best = new Map<string, string>() // variant -> newest id
 +  const gen = new Map<string, number>() // series -> newest major
@@ -841,7 +841,7 @@ index 000000000..ef38c87bd 100644
 +  return answers.map((a, i) => `### [${i + 1}] ${a.model}\n${a.text}`).join("\n\n")
 +}
 +// Chairman-facing rendering: numbered and anonymous. Never includes member names
-+// or model IDs, so the judge weighs content instead of brand.
++// or model IDs, so judge weighs content instead of brand.
 +function blindBlock(answers: Ans[]): string {
 +  return answers.map((a, i) => `### [${i + 1}]\n${a.text}`).join("\n\n")
 +}
@@ -888,7 +888,7 @@ index 000000000..ef38c87bd 100644
 +    const sessions = yield* Session.Service
 +    const agents = yield* Agent.Service
 +
-+    // one-shot model call (mirrors Agent.generate); may fail into the error channel
++    // one-shot model call (mirrors Agent.generate); may fail into error channel
 +    const askDirect = Effect.fn("CouncilTool.askDirect")(function* (model: string, system: string, user: string, temperature: number) {
 +      const pm = Provider.parseModel(model)
 +      const resolved = yield* provider.getModel(pm.providerID, pm.modelID)
@@ -904,23 +904,25 @@ index 000000000..ef38c87bd 100644
 +      return String(text ?? "").trim()
 +    })
 +
-+    // Same call, but routed through a real child session — the exact path a TUI subagent
-+    // takes. Origin-restricted models (the opencode free tier: "can only be used from
-+    // within the opencode TUI") refuse a raw SDK request yet accept session traffic.
-+    // Every tool is denied, so the member can only do what askDirect does: one question
-+    // in, one answer out. Temperature is the session/agent default here, not ours.
++    // Same call, but routed through a real child session — exact path a TUI subagent
++    // takes. Origin-restricted models (opencode free tier: "can only be used from
++    // within opencode TUI") refuse a raw SDK request yet accept session traffic.
++    // Members normally answer one-shot. With readFiles (debate) the child session
++    // is read-only: `read` allowed, every other tool denied, parent's
++    // external_directory rules kept so machine-local paths stay reachable.
 +    const askViaSession = Effect.fn("CouncilTool.askViaSession")(function* (
 +      ctx: Tool.Context,
 +      label: string,
 +      model: string,
 +      system: string,
 +      user: string,
++      readFiles?: boolean,
 +    ) {
 +      const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
 +      if (!ops) return yield* Effect.fail(new Error("no session transport in this context"))
 +      const pm = Provider.parseModel(model)
-+      // Mirror TaskTool: resolve a real subagent and derive the child permission from
-+      // the parent session. The old blanket deny made this a *primary* agent with
++      // Mirror TaskTool: resolve a real subagent and derive child permission from
++      // parent session. Old blanket deny made this a *primary* agent with
 +      // everything refused, which is what free-tier gating keys off.
 +      const subagent = yield* agents.get("general")
 +      if (!subagent) return yield* Effect.fail(new Error("council: no 'general' subagent available"))
@@ -929,10 +931,16 @@ index 000000000..ef38c87bd 100644
 +        parentID: ctx.sessionID,
 +        title: `council: ${label} (${model})`,
 +        agent: subagent.name,
-+        permission: deriveSubagentSessionPermission({
-+          parentSessionPermission: parent.permission ?? [],
-+          subagent,
-+        }),
++        permission: readFiles
++          ? [
++              { permission: "*", pattern: "*", action: "deny" as const },
++              ...(parent.permission ?? []).filter((r) => r.permission === "external_directory"),
++              { permission: "read", pattern: "*", action: "allow" as const },
++            ]
++          : deriveSubagentSessionPermission({
++              parentSessionPermission: parent.permission ?? [],
++              subagent,
++            }),
 +      })
 +      const result = yield* ops.prompt({
 +        messageID: MessageID.ascending(),
@@ -954,11 +962,14 @@ index 000000000..ef38c87bd 100644
 +      return text
 +    })
 +
-+    // Direct first — it is cheap and carries no agent preamble. Only when the provider
-+    // rejects it do we pay for the session route, so paid models behave exactly as before
-+    // and free-tier models stop being dead weight in the council.
-+    const ask = (ctx: Tool.Context, label: string, model: string, system: string, user: string, temperature: number) =>
-+      askDirect(model, system, user, temperature).pipe(
++    // Direct first — it is cheap and carries no agent preamble. Only when provider
++    // rejects it do we pay for session route, so paid models behave exactly as before
++    // and free-tier models stop being dead weight in council.
++    // readFiles must take the session route: tools only exist there.
++    const ask = (ctx: Tool.Context, label: string, model: string, system: string, user: string, temperature: number, readFiles?: boolean) =>
++      readFiles && ctx.extra?.promptOps
++        ? askViaSession(ctx, label, model, system, user, true)
++        : askDirect(model, system, user, temperature).pipe(
 +        Effect.catchCause((direct) =>
 +          ctx.extra?.promptOps
 +            ? askViaSession(ctx, label, model, system, user).pipe(
@@ -972,10 +983,10 @@ index 000000000..ef38c87bd 100644
 +        ),
 +      )
 +
-+    // never-failing member answer — a failure becomes a visible marker instead of killing the council
++    // never-failing member answer — a failure becomes a visible marker instead of killing council
 +    // A retired-but-catalogued model fails here, not at validation. Rather than returning a
-+    // dead member as a "[failed]" marker that silently shrinks the council, walk the ranked
-+    // siblings once each. The swap is reported in the answer's model label, never hidden.
++    // dead member as a "[failed]" marker that silently shrinks council, walk ranked
++    // siblings once each. Swap is reported in answer's model label, never hidden.
 +    const askSafe: (
 +      ctx: Tool.Context,
 +      m: Member,
@@ -983,12 +994,13 @@ index 000000000..ef38c87bd 100644
 +      user: string,
 +      temperature: number,
 +      alts?: string[],
-+    ) => Effect.Effect<Ans> = (ctx, m, system, user, temperature, alts = []) =>
-+      ask(ctx, m.name, m.model, system, user, temperature).pipe(
++      readFiles?: boolean,
++    ) => Effect.Effect<Ans> = (ctx, m, system, user, temperature, alts = [], readFiles) =>
++      ask(ctx, m.name, m.model, system, user, temperature, readFiles).pipe(
 +        Effect.map((text): Ans => ({ name: m.name, model: m.model, text })),
 +        Effect.catchCause((cause) =>
 +          alts.length
-+            ? askSafe(ctx, { name: m.name, model: alts[0] }, system, user, temperature, alts.slice(1)).pipe(
++            ? askSafe(ctx, { name: m.name, model: alts[0] }, system, user, temperature, alts.slice(1), readFiles).pipe(
 +                Effect.map((a): Ans => (a.text.startsWith("[failed:") ? a : { ...a, model: `${a.model} (fell back from ${m.model})` })),
 +              )
 +            : Effect.succeed({ name: m.name, model: m.model, text: `[failed: ${String(Cause.squash(cause)).slice(0, 100)}]` }),
@@ -1031,7 +1043,7 @@ index 000000000..ef38c87bd 100644
 +      )
 +      const provs = yield* provider.list().pipe(Effect.catchCause(() => Effect.succeed({} as Catalog)))
 +
-+      // nothing configured -> build a real council from the registry instead of bailing.
++      // nothing configured -> build a real council from registry instead of bailing.
 +      // Everything needed is already in memory, so this costs nothing and runs immediately.
 +      if (members.length === 0) {
 +        const auto = autoMembers(provs, cur)
@@ -1071,10 +1083,10 @@ index 000000000..ef38c87bd 100644
 +
 +      const strategy = normStrategy(args.strategy || projectCfg?.defaultStrategy || globalCfg?.defaultStrategy || "council")
 +
-+      // validate members against the live provider registry (same lookup ask() uses at runtime).
-+      // Invalid entries are backfilled with the CURRENT session model — provably working, it is
++      // validate members against live provider registry (same lookup ask() uses at runtime).
++      // Invalid entries are backfilled with CURRENT session model — provably working, it is
 +      // answering right now — never dropped silently. Fewer than 2 distinct survivors -> fail loud
-+      // with a pick-list of models the user actually has configured.
++      // with a pick-list of models user actually has configured.
 +      {
 +        const checked: Member[] = []
 +        const bad: string[] = []
@@ -1095,7 +1107,7 @@ index 000000000..ef38c87bd 100644
 +            checked.push(m)
 +            continue
 +          }
-+          // automap: snap the loose name onto the nearest model this machine really has,
++          // automap: snap loose name onto nearest model this machine really has,
 +          // but only on a confident hit. Anything weaker is surfaced, not applied.
 +          const ranked = rankIds(provs, m.model)
 +          const top = ranked[0]
@@ -1125,7 +1137,7 @@ index 000000000..ef38c87bd 100644
 +        if (bad.length) {
 +          if (cur && !checked.some((c) => c.model === cur)) {
 +            checked.push({ name: "current", model: cur })
-+            warnings.push(`${bad.length} invalid member(s) in ${source} — backfilled with the current model (${cur}):\n${bad.join("\n")}`)
++            warnings.push(`${bad.length} invalid member(s) in ${source} — backfilled with current model (${cur}):\n${bad.join("\n")}`)
 +          } else {
 +            warnings.push(
 +              `${bad.length} invalid member(s) in ${source} dropped (current model ${cur ? `${cur} already a member` : "unavailable"}):\n${bad.join("\n")}`,
@@ -1187,7 +1199,7 @@ index 000000000..ef38c87bd 100644
 +      if (members.length === 1 && strategy !== "router") {
 +        return {
 +          title: "council: only 1 model",
-+          output: warn + `Only one model is configured (${members[0].model}); a council needs two or more. Edit ${source}, or use the normal task/subagent flow.`,
++          output: warn + `Only one model is configured (${members[0].model}); a council needs two or more. Edit ${source}, or use normal task/subagent flow.`,
 +          metadata: { strategy, members: 1 } as CouncilMeta,
 +        }
 +      }
@@ -1208,11 +1220,11 @@ index 000000000..ef38c87bd 100644
 +      if (strategy === "compare") {
 +        output = `## Compare — ${members.length} models, no synthesis\n\n${block(answers)}`
 +      } else if (strategy === "arena") {
-+        output = `## Arena — you pick the winner\n\n${block(answers)}\n\nTell me which number you prefer and I'll treat it as the final answer.`
++        output = `## Arena — you pick winner\n\n${block(answers)}\n\nTell me which number you prefer and I'll treat it as final answer.`
 +      } else if (strategy === "council") {
 +        const final = yield* askChair(
 +          CHAIR_SYSTEM,
-+          `Question:\n${question}\n\nCouncil answers:\n\n${block(answers)}\n\nSynthesize one definitive answer: integrate the strongest points, resolve contradictions, correct errors. Output the final answer only.`,
++          `Question:\n${question}\n\nCouncil answers:\n\n${block(answers)}\n\nSynthesize one definitive answer: integrate strongest points, resolve contradictions, correct errors. Output final answer only.`,
 +          0.2,
 +          `[chairman synthesis unavailable]\n\n${block(answers)}`,
 +        )
@@ -1221,8 +1233,8 @@ index 000000000..ef38c87bd 100644
 +      } else if (strategy === "moa") {
 +        // Aggregator sees anonymous, unordered proposals - content over authorship.
 +        const final = yield* askChair(
-+          "You are the aggregator in a Mixture-of-Agents pipeline. The proposals are anonymous and unordered; judge them purely on merit and never speculate about who wrote which.",
-+          `Question:\n${question}\n\nProposed answers:\n\n${blindBlock(answers)}\n\nAggregate them into one higher-quality answer, keeping the best of each. Output the aggregated answer only.`,
++          "You are aggregator in a Mixture-of-Agents pipeline. Proposals are anonymous and unordered; judge them purely on merit and never speculate about who wrote which.",
++          `Question:\n${question}\n\nProposed answers:\n\n${blindBlock(answers)}\n\nAggregate them into one higher-quality answer, keeping best of each. Output aggregated answer only.`,
 +          0.3,
 +          `[aggregation unavailable]\n\n${block(answers)}`,
 +        )
@@ -1230,8 +1242,8 @@ index 000000000..ef38c87bd 100644
 +      } else if (strategy === "router") {
 +        const roster = members.map((m, i) => `[${i + 1}] ${m.name} (${m.model})`).join("\n")
 +        const picked = yield* askChair(
-+          "You are a routing controller that selects the single best model for a task.",
-+          `Question:\n${question}\n\nModels:\n${roster}\n\nReply with ONLY the number of the best model.`,
++          "You are a routing controller that selects single best model for a task.",
++          `Question:\n${question}\n\nModels:\n${roster}\n\nReply with ONLY number of best model.`,
 +          0,
 +          "1",
 +        )
@@ -1267,7 +1279,7 @@ index 000000000..ef38c87bd 100644
 +        else {
 +          const pick = yield* askChair(
 +            CHAIR_SYSTEM,
-+            `Question:\n${question}\n\nCandidates:\n\n${listing}\n\nReply with ONLY the number of the best answer.`,
++            `Question:\n${question}\n\nCandidates:\n\n${listing}\n\nReply with ONLY number of best answer.`,
 +            0,
 +            "1",
 +          )
@@ -1280,11 +1292,13 @@ index 000000000..ef38c87bd 100644
 +        output = `## Consensus vote\nWinner: [${idx + 1}] ${answers[idx].name}\n\n${answers[idx].text}\n\n---\n### Scoreboard\n${scoreboard}\n\n---\n### All answers\n\n${block(answers)}`
 +        title = `council: consensus -> ${answers[idx].name}`
 +      } else {
-+        // debate
++        // debate — members get read-only file access so user can hand both sides a file
++        const debater =
++          "You are a debater on an expert panel. If the question references file paths, read them with the `read` tool before arguing."
 +        const transcript: { label: string; text: string }[] = []
 +        let current = yield* Effect.all(
 +          members.map((m) =>
-+            askSafe(ctx, m, "You are a debater on an expert panel.", `Question:\n${question}\n\nGive your opening position.`, 0.7),
++            askSafe(ctx, m, debater, `Question:\n${question}\n\nGive your opening position.`, 0.7, [], true),
 +          ),
 +          { concurrency: 4 },
 +        )
@@ -1296,12 +1310,14 @@ index 000000000..ef38c87bd 100644
 +              askSafe(
 +                ctx,
 +                m,
-+                "You are a debater on an expert panel.",
++                debater,
 +                `Question:\n${question}\n\nOther members said:\n${prev
 +                  .filter((_, j) => j !== i)
 +                  .map((o) => `- ${o.name}: ${o.text}`)
 +                  .join("\n\n")}\n\nRebut, defend or refine your position (round ${r}).`,
 +                0.6,
++                [],
++                true,
 +              ),
 +            ),
 +            { concurrency: 4 },
@@ -1309,10 +1325,10 @@ index 000000000..ef38c87bd 100644
 +          current.forEach((a) => transcript.push({ label: `${a.name} (r${r})`, text: a.text }))
 +        }
 +        const final = yield* askChair(
-+          "You are the moderator resolving a debate.",
++          "You are moderator resolving a debate.",
 +          `Question:\n${question}\n\nTranscript:\n\n${transcript
 +            .map((t) => `### ${t.label}\n${t.text}`)
-+            .join("\n\n")}\n\nResolve the debate into the single best-supported answer.`,
++            .join("\n\n")}\n\nResolve debate into single best-supported answer.`,
 +          0.2,
 +          "[moderator resolution unavailable]",
 +        )
@@ -1334,9 +1350,9 @@ index 000000000..ef38c87bd 100644
 +)
 +
 +// ---------- registry hook payload (tools) ----------
-+// Personalization tools compiled into the binary (distill / schedule / council).
-+// Isolated in ONE owned file so the upstream registry.ts patch stays a fixed
-+// 2-line delta -- adding a tool changes only this file, never the registry hunk.
++// Personalization tools compiled into binary (distill / schedule / council).
++// Isolated in ONE owned file so upstream registry.ts patch stays a fixed
++// 2-line delta -- adding a tool changes only this file, never registry hunk.
 +export const builtin = Effect.gen(function* () {
 +  const distilltool = yield* DistillTool
 +  const scheduletool = yield* ScheduleTool
@@ -1346,10 +1362,10 @@ index 000000000..ef38c87bd 100644
 +
 +// ---------- command hook payload (/distill /schedule /council) ----------
 +// Personalization commands (/distill, /schedule, /council). Isolated in ONE
-+// owned file so the upstream command/index.ts patch stays a fixed 2-line delta;
-+// adding a command changes only this list, never the index.ts hunk.
++// owned file so upstream command/index.ts patch stays a fixed 2-line delta;
++// adding a command changes only this list, never index.ts hunk.
 +// ONE-LINE call site in index.ts: `Object.assign(commands, customCommands(hints))`.
-+// Loop + object shape live HERE (owned file) so the upstream hunk is a single line
++// Loop + object shape live HERE (owned file) so upstream hunk is a single line
 +// that upstream edits can never half-break.
 +export function customCommands(hints: (template: string) => string[]) {
 +  const out: Record<
@@ -1415,10 +1431,41 @@ index e000d6ca49..5d7d658970 100644
 -      ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
 +      // opencode-hosted free tier rejects delegated traffic: a child session's request is
 +      // byte-identical to a root session's except for this header, so omit it for opencode
-+      // providers. Subagent/council children then pass the same origin check the TUI does.
++      // providers. Subagent/council children then pass same origin check TUI does.
 +      ...(input.parentSessionID && !input.model.providerID.startsWith("opencode")
 +        ? { "x-parent-session-id": input.parentSessionID }
 +        : {}),
        ...input.model.headers,
        ...headers,
      },
+diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
+index d8ca640cf..e0a68f102 100644
+--- a/packages/opencode/src/tool/task.ts
++++ b/packages/opencode/src/tool/task.ts
+@@ -48,7 +48,8 @@ const BaseParameterFields = {
+     description:
+       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+   }),
+   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
++  model: Schema.optional(Schema.String).annotate({ description: 'Pin this task to one "provider/model" pair (e.g. "openai/gpt6-luna"); omit to use the agent default' }),
+ }
+ 
+ const BaseParameters = Schema.Struct(BaseParameterFields)
+@@ -178,7 +178,7 @@
+       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+       const variant = msg.info.variant
+ 
+-      const model = next.model ?? {
++      const model = (params.model ? { providerID: params.model.split("/")[0], modelID: params.model.split("/").slice(1).join("/") } : next.model) ?? {
+         modelID: msg.info.modelID,
+         providerID: msg.info.providerID,
+       }
+@@ -206,7 +206,7 @@
+             modelID: model.modelID,
+             providerID: model.providerID,
+           },
+-          variant: next.model ? undefined : variant,
++          variant: params.model || next.model ? undefined : variant,
+           agent: next.name,
+           parts,
+         })
