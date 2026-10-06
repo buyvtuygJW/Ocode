@@ -1,0 +1,1114 @@
+diff --git a/packages/core/src/flag/flag.ts b/packages/core/src/flag/flag.ts
+index a0eb78a..8838d44 100644
+--- a/packages/core/src/flag/flag.ts
++++ b/packages/core/src/flag/flag.ts
+@@ -20,7 +20,7 @@ export const Flag = {
+   OPENCODE_GIT_BASH_PATH: process.env["OPENCODE_GIT_BASH_PATH"],
+   OPENCODE_CONFIG: process.env["OPENCODE_CONFIG"],
+   OPENCODE_CONFIG_CONTENT: process.env["OPENCODE_CONFIG_CONTENT"],
+-  OPENCODE_DISABLE_AUTOUPDATE: truthy("OPENCODE_DISABLE_AUTOUPDATE"),
++  OPENCODE_DISABLE_AUTOUPDATE: true, // SANITIZE(#459): no auto update-check (github/chocolatey/opencode.ai)
+   OPENCODE_ALWAYS_NOTIFY_UPDATE: truthy("OPENCODE_ALWAYS_NOTIFY_UPDATE"),
+   OPENCODE_DISABLE_PRUNE: truthy("OPENCODE_DISABLE_PRUNE"),
+   OPENCODE_DISABLE_TERMINAL_TITLE: truthy("OPENCODE_DISABLE_TERMINAL_TITLE"),
+diff --git a/packages/core/src/observability/otlp.ts b/packages/core/src/observability/otlp.ts
+index dd99ebc..e336e0b 100644
+--- a/packages/core/src/observability/otlp.ts
++++ b/packages/core/src/observability/otlp.ts
+@@ -4,7 +4,7 @@ import { Flag } from "../flag/flag"
+ import { InstallationChannel, InstallationVersion } from "../installation/version"
+ import { runID } from "./shared"
+ 
+-const endpoint = Flag.OTEL_EXPORTER_OTLP_ENDPOINT
++const endpoint = undefined // SANITIZE(#459): force OTLP/telemetry off (no honeycomb)
+ 
+ const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
+   ? Flag.OTEL_EXPORTER_OTLP_HEADERS.split(",").reduce(
+diff --git a/packages/opencode/src/cli/logo.ts b/packages/opencode/src/cli/logo.ts
+index 9117d38..b86eef6 100644
+--- a/packages/opencode/src/cli/logo.ts
++++ b/packages/opencode/src/cli/logo.ts
+@@ -1 +1,8 @@
++import { logo as upstreamLogo } from "@opencode-ai/tui/logo"
++
+ export * from "@opencode-ai/tui/logo"
++
++export const logo = {
++  ...upstreamLogo,
++  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
++}
+diff --git a/packages/opencode/src/cli/ui.ts b/packages/opencode/src/cli/ui.ts
+index 6ad6495..e42e257 100644
+--- a/packages/opencode/src/cli/ui.ts
++++ b/packages/opencode/src/cli/ui.ts
+@@ -3,10 +3,10 @@ import { Schema } from "effect"
+ import { logo as glyphs } from "./logo"
+ 
+ const wordmark = [
+-  `⠀                                ▄     `,
+-  `█▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
+-  `█  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀`,
+-  `▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
++  `⠀█▀▀▀▀▀▀█               ▄     `,
++  ` ▀█    █▀  █▀▀▀ █▀▀█ █▀▀█ █▀▀█`,
++  `  ▀█__█▀   █    █  █ █  █ █▀▀▀`,
++  `█▄▄█  █▄▄█ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀`,
+ ]
+ 
+ export class CancelledError extends Schema.TaggedErrorClass<CancelledError>()("UICancelledError", {}) {}
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index eb116f6..47b8c58 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -108,6 +108,70 @@ export interface Interface {
+   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
+ }
+ 
++//PATCH START to custom ROLE>
++import { existsSync, mkdirSync, readFileSync, writeFileSync /*, appendFileSync */ } from "fs"
++
++type RoleEvalConfig = {
++  usersystem: string
++  assistant_system: string
++}
++
++function loadRoleEvalConfig(projectRoot: string): RoleEvalConfig {
++  const root = path.resolve(projectRoot || process.cwd())
++  const file = process.env.OPENCODE_ROLE_FILE
++    ? path.resolve(process.env.OPENCODE_ROLE_FILE)
++    : path.join(root, ".opencode", "role.json")
++
++  const stock: RoleEvalConfig = {
++    usersystem: "",
++    assistant_system: "",
++  }
++
++  // const debugFile = path.join(root, ".opencode", "role-debug.log")
++
++  try {
++    mkdirSync(path.dirname(file), { recursive: true })
++    // appendFileSync(
++    //   debugFile,
++    //   [
++    //     `[${new Date().toISOString()}]`,
++    //     `cwd=${process.cwd()}`,
++    //     `projectRoot=${projectRoot}`,
++    //     `root=${root}`,
++    //     `file=${file}`,
++    //     `exists=${existsSync(file)}`,
++    //     "",
++    //   ].join("\n"),
++    //   "utf8",
++    // )
++
++    if (!existsSync(file)) {
++      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
++      // appendFileSync(debugFile, `created=${file}\n\n`, "utf8")
++      return stock
++    }
++
++    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleEvalConfig>
++
++    return {
++      usersystem: typeof parsed.usersystem === "string" ? parsed.usersystem : "",
++      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
++    }
++  } catch (err) {
++    // try {
++    //   appendFileSync(debugFile, `ERROR=${String(err)}\n\n`, "utf8")
++    // } catch {}
++    return stock
++  }
++}
++
++function stripIdentity(prompt: string) {
++  // beast.txt fuses identity with the "keep going until resolved" instruction in sentence one - leave it intact.
++  if (prompt.startsWith("You are opencode, an agent")) return prompt
++  return prompt.replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
++//PATCH END,P1.P2 is per user&assistant function edit to use var>roleEvalConfig.assistant etc.
++
+ export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+ 
+ const layer = Layer.effect(
+@@ -1261,17 +1325,30 @@ const layer = Layer.effect(
+               sys.mcp(agent, session.permission),
+               MessageV2.toModelMessagesEffect(msgs, model),
+             ])
++            // CUSTOM-ROLE-SYSTEM START
++            const roleCtx = yield* InstanceState.context
++            const roleRoot = roleCtx.worktree === "/" || roleCtx.worktree === "\\" ? roleCtx.directory : roleCtx.worktree
++            const persona = loadRoleEvalConfig(roleRoot).assistant_system
++            const roleAgent = persona
++              ? {
++                  ...agent,
++                  prompt: [persona, ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).map(stripIdentity)]
++                    .filter(Boolean)
++                    .join("\n"),
++                }
++              : agent
+             const system = [
+               ...env,
+               ...instructions,
+               ...(mcpInstructions ? [mcpInstructions] : []),
+               ...(skills ? [skills] : []),
+             ]
++            // CUSTOM-ROLE-SYSTEM END
+             const format = lastUser.format ?? { type: "text" as const }
+             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+             const result = yield* handle.process({
+               user: lastUser,
+-              agent,
++              agent: roleAgent,
+               permission: session.permission,
+               sessionID,
+               parentSessionID: session.parentID,
+diff --git a/packages/opencode/src/share/share-next.ts b/packages/opencode/src/share/share-next.ts
+index 60112e1..39bb3b4 100644
+--- a/packages/opencode/src/share/share-next.ts
++++ b/packages/opencode/src/share/share-next.ts
+@@ -20,7 +20,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { EventV2 } from "@opencode-ai/core/event"
+ 
+-const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
++const disabled = true // SANITIZE(#459): force sharing off (no opncd.ai/api.opencode.ai session content)
+ 
+ export type Api = {
+   create: string
+diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
+index a58a8cf..3ff2865 100644
+--- a/packages/tui/src/logo.ts
++++ b/packages/tui/src/logo.ts
+@@ -1,5 +1,5 @@
+ export const logo = {
+-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
++  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
+   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+ }
+ 
+diff --git a/packages/core/src/config/markdown.ts b/packages/core/src/config/markdown.ts
+index e1d74e6..b17a422 100644
+--- a/packages/core/src/config/markdown.ts
++++ b/packages/core/src/config/markdown.ts
+@@ -17,20 +17,90 @@ export function parseOption(content: string) {
+   }
+ }
+ 
+-// Other coding agents accept unquoted colons in frontmatter values. Retry
+-// those values as YAML block scalars so existing config files keep working.
++// Other coding agents (e.g. Claude Code) accept loose YAML in SKILL.md / agent
++// frontmatter that strict YAML rejects: unquoted colons in values, hyphenated
++// keys (allowed-tools), values wrapped across unindented lines, tab indentation,
++// and a leading BOM. On a parse failure we normalize the frontmatter into
++// equivalent valid YAML -- any value that needs escaping (contains a colon, a
++// YAML indicator, or spills onto following lines) becomes a literal `|-` block
++// scalar -- and retry. This runs ONLY after the strict parse has already failed,
++// so valid files are never touched. It is a superset of the original colon-only
++// rewrite: existing config files keep working.
+ export function sanitize(content: string) {
+-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
++  const stripped = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
++  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+   if (!match) return content
+   const frontmatter = match[1]
+-  const result = frontmatter.split(/\r?\n/).flatMap((line) => {
+-    if (line.trim().startsWith("#") || line.trim() === "" || /^\s+/.test(line)) return [line]
+-    const entry = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/)
+-    if (!entry) return [line]
+-    const value = entry[2].trim()
+-    if (value === "" || value === ">" || value === "|" || value.startsWith('"') || value.startsWith("'")) return [line]
+-    if (!value.includes(":")) return [line]
+-    return [`${entry[1]}: |-`, `  ${value}`]
+-  })
+-  return content.replace(frontmatter, () => result.join("\n"))
++
++  // top-level "key:" or "key: value" (hyphen/dot keys allowed; space after ":" optional)
++  const KEY = /^([A-Za-z0-9][\w.-]*)[ \t]*:(?:[ \t]*(.*))?$/
++  // leading chars that make a plain scalar ambiguous and need a block scalar
++  const INDICATOR = /^[!&*?@`%,[\]{}]/
++  // an intentional block-scalar header ("|", ">", "|-", ">2", ...) — leave alone
++  const BLOCK_HEADER = /^[|>][+-]?\d*$/
++  const isComment = (line: string) => /^\s*#/.test(line)
++
++  // tabs are illegal as YAML indentation -> spaces
++  const detab = (line: string) => {
++    const m = line.match(/^[ \t]+/)
++    return m ? m[0].replace(/\t/g, "  ") + line.slice(m[0].length) : line
++  }
++
++  const lines = frontmatter.split(/\r?\n/).map(detab)
++
++  const groups: { key: string; value: string; children: string[] }[] = []
++  const preface: string[] = []
++  let current: { key: string; value: string; children: string[] } | null = null
++  for (const line of lines) {
++    const entry = /^[ \t]/.test(line) || isComment(line) ? null : line.match(KEY)
++    if (entry) {
++      current = { key: entry[1], value: (entry[2] ?? "").trim(), children: [] }
++      groups.push(current)
++    } else if (current) {
++      current.children.push(line)
++    } else {
++      preface.push(line)
++    }
++  }
++
++  const needsBlock = (v: string) => v.includes(":") || INDICATOR.test(v) || / #/.test(v)
++
++  const out: string[] = [...preface]
++  for (const g of groups) {
++    // content lines that belong to this key's value (drop blanks and comments)
++    const body = g.children.filter((c) => c.trim() !== "" && !isComment(c))
++    const structured = g.children.some((c) => /^[ \t]+\S/.test(c) || /^\s*- /.test(c))
++    const quoted = g.value.startsWith('"') || g.value.startsWith("'")
++
++    // keep verbatim: a real block/list (empty value + indented block), an
++    // explicit block-scalar header, or a clean single-line quoted value
++    if ((g.value === "" && structured) || BLOCK_HEADER.test(g.value) || (quoted && body.length === 0)) {
++      out.push(g.value ? `${g.key}: ${g.value}` : `${g.key}:`)
++      for (const c of g.children) out.push(c)
++      continue
++    }
++
++    // empty value followed only by loose unindented text -> fold it in
++    if (g.value === "") {
++      if (body.length === 0) {
++        out.push(`${g.key}:`)
++        for (const c of g.children) out.push(c)
++      } else {
++        out.push(`${g.key}: |-`)
++        for (const c of body) out.push(`  ${c.trim()}`)
++      }
++      continue
++    }
++
++    // inline value: block-scalar it if it wraps onto more lines or needs escaping
++    if (body.length > 0 || needsBlock(g.value)) {
++      out.push(`${g.key}: |-`)
++      out.push(`  ${g.value}`)
++      for (const c of body) out.push(`  ${c.trim()}`)
++    } else {
++      out.push(`${g.key}: ${g.value}`)
++    }
++  }
++
++  return stripped.replace(frontmatter, () => out.join("\n"))
+ }
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+index 74e7812..8849677 100644
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -140,10 +140,15 @@ export const fromCatalogModel = (
+         })
+   const key = apiKey(resolved, credential)
+   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
++    // Default to store:false so OpenAI does not retain the Responses payload
++    // (zero-logging). An explicit store in provider options still wins.
++    const enforced = produce(resolved, (draft) => {
++      if (draft.request.body["store"] === undefined) draft.request.body["store"] = false
++    })
+     return Effect.succeed(
+-      withDefaults(resolved, OpenAIResponses.route)
++      withDefaults(enforced, OpenAIResponses.route)
+         .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
+-        .model({ id: resolved.api.id }),
++        .model({ id: enforced.api.id }),
+     )
+   }
+   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index 536a642..3f0a2ef 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -432,7 +432,12 @@ const layer = Layer.effect(
+           })
+         }
+ 
+-        return yield* Effect.promise(() => generateObject(params).then((r) => r.object))
++        return yield* Effect.promise(() =>
++          generateObject({
++            ...params,
++            providerOptions: ProviderTransform.providerOptions(resolved, { store: false }),
++          }).then((r) => r.object),
++        )
+       }),
+     })
+   }),
+diff --git a/packages/core/src/database/database.ts b/packages/core/src/database/database.ts
+index d61adf047e..8db2ac2603 100644
+--- a/packages/core/src/database/database.ts
++++ b/packages/core/src/database/database.ts
+@@ -45,13 +45,17 @@ export function path() {
+     if (Flag.OPENCODE_DB === ":memory:" || isAbsolute(Flag.OPENCODE_DB)) return Flag.OPENCODE_DB
+     return join(Global.Path.data, Flag.OPENCODE_DB)
+   }
++  // Sanitise first, then decide. A channel that sanitises to nothing must never reach the
++  // suffix branch -- that is what produced the orphaned `opencode-.db`.
++  const channel = InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^[-.]+|-+$/g, "")
+   if (
+-    ["latest", "beta", "prod"].includes(InstallationChannel) ||
++    !channel ||
++    ["latest", "beta", "prod", "local"].includes(channel) ||
+     process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
+     process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
+   )
+     return join(Global.Path.data, "opencode.db")
+-  return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
++  return join(Global.Path.data, `opencode-${channel}.db`)
+ }
+ 
+ export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })
+diff --git a/packages/core/src/installation/version.ts b/packages/core/src/installation/version.ts
+index 25d9cd99aa..331bbfa58d 100644
+--- a/packages/core/src/installation/version.ts
++++ b/packages/core/src/installation/version.ts
+@@ -3,6 +3,15 @@ declare global {
+   const OPENCODE_CHANNEL: string
+ }
+ 
+-export const InstallationVersion = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : "local"
+-export const InstallationChannel = typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : "local"
++// A build define can be present but empty (a build from a detached HEAD leaves
++// OPENCODE_CHANNEL as ''). `typeof x === "string"` accepts that, so an empty channel used
++// to leak downstream and produce things like `opencode-.db`, a bogus `opencode-ai/<empty>`
++// npm dist-tag on upgrade, and InstallationLocal === false for a local build.
++// Guard on content, not just type. `typeof` on an undeclared global is still safe here.
++function resolve(value: string | undefined) {
++  return value?.trim() ? value.trim() : "local"
++}
++
++export const InstallationVersion = resolve(typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : undefined)
++export const InstallationChannel = resolve(typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : undefined)
+ export const InstallationLocal = InstallationChannel === "local"
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 2bd0e51715..59e47ed287 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -52,6 +52,48 @@ function truncateToolOutput(text: string, maxChars?: number) {
+   return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+ }
+ 
++// Stale tool-body trimming. Tool *inputs* are replayed verbatim to the model on every later
++// request for the life of a session: tool output has SessionCompaction.prune, but nothing
++// ever trimmed input, so one large `bash` command body is re-billed every single turn.
++// This is a request-time projection only -- it never mutates the stored part, so storage,
++// the TUI and the log keep the full text. Tune here; this is the only place it is defined.
++const STALE_TURNS = 3
++const STALE_TOOLS = new Set(["bash"])
++const STALE_INPUT_MAX_CHARS = 200
++const STALE_OUTPUT_MAX_CHARS = 2_000
++
++/** ids of messages older than the most recent STALE_TURNS user turns */
++function staleMessageIDs(messages: WithParts[]) {
++  const stale = new Set<string>()
++  const users: number[] = []
++  for (let i = 0; i < messages.length; i++) if (messages[i].info.role === "user") users.push(i)
++  if (users.length <= STALE_TURNS) return stale
++  for (let i = 0; i < users[users.length - STALE_TURNS]; i++) stale.add(messages[i].info.id)
++  return stale
++}
++
++function isStale(stale: Set<string>, msg: WithParts, tool: string) {
++  return stale.has(msg.info.id) && STALE_TOOLS.has(tool)
++}
++
++function staleToolInput<T>(stale: Set<string>, msg: WithParts, part: { tool: string; state: { input: T } }): T {
++  const value = part.state.input
++  if (!isStale(stale, msg, part.tool)) return value
++  if (!value || typeof value !== "object" || Array.isArray(value)) return value
++  const command = (value as Record<string, unknown>)["command"]
++  if (typeof command !== "string" || command.length <= STALE_INPUT_MAX_CHARS) return value
++  const omitted = command.length - STALE_INPUT_MAX_CHARS
++  return {
++    ...(value as Record<string, unknown>),
++    command: `${command.slice(0, STALE_INPUT_MAX_CHARS)}\n[older turn: omitted ${omitted} chars of command body]`,
++  } as T
++}
++
++function staleOutputMaxChars(stale: Set<string>, msg: WithParts, tool: string, configured?: number) {
++  if (!isStale(stale, msg, tool)) return configured
++  return Math.min(STALE_OUTPUT_MAX_CHARS, configured ?? STALE_OUTPUT_MAX_CHARS)
++}
++
+ export const Event = {
+   Updated: SessionV1.Event.MessageUpdated,
+   Removed: SessionV1.Event.MessageRemoved,
+@@ -135,6 +177,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+ ) {
+   const result: UIMessage[] = []
+   const toolNames = new Set<string>()
++  const staleIDs = staleMessageIDs(input)
+   // Track media from tool results that need to be injected as user messages
+   // for providers that don't support that media type in tool results.
+   //
+@@ -296,7 +339,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+           if (part.state.status === "completed") {
+             const outputText = part.state.time.compacted
+               ? "[Old tool result content cleared]"
+-              : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
++              : truncateToolOutput(part.state.output, staleOutputMaxChars(staleIDs, msg, part.tool, options?.toolOutputMaxChars))
+             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+ 
+             // For providers that don't support media in tool results, extract media files
+@@ -320,7 +363,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+               type: ("tool-" + part.tool) as `tool-${string}`,
+               state: "output-available",
+               toolCallId: part.callID,
+-              input: part.state.input,
++              input: staleToolInput(staleIDs, msg, part),
+               output,
+               ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+@@ -333,7 +376,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+                 type: ("tool-" + part.tool) as `tool-${string}`,
+                 state: "output-available",
+                 toolCallId: part.callID,
+-                input: part.state.input,
++                input: staleToolInput(staleIDs, msg, part),
+                 output,
+                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+@@ -343,7 +386,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+                 type: ("tool-" + part.tool) as `tool-${string}`,
+                 state: "output-error",
+                 toolCallId: part.callID,
+-                input: part.state.input,
++                input: staleToolInput(staleIDs, msg, part),
+                 errorText: part.state.error,
+                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+@@ -357,7 +400,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+               type: ("tool-" + part.tool) as `tool-${string}`,
+               state: "output-error",
+               toolCallId: part.callID,
+-              input: part.state.input,
++              input: staleToolInput(staleIDs, msg, part),
+               errorText: "[Tool execution was interrupted]",
+               ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+diff --git a/packages/script/src/index.ts b/packages/script/src/index.ts
+index d148ce0d2b..7751f0c246 100644
+--- a/packages/script/src/index.ts
++++ b/packages/script/src/index.ts
+@@ -27,7 +27,16 @@ const CHANNEL = await (async () => {
+   if (env.OPENCODE_CHANNEL) return env.OPENCODE_CHANNEL
+   if (env.OPENCODE_BUMP) return "latest"
+   if (env.OPENCODE_VERSION && !env.OPENCODE_VERSION.startsWith("0.0.0-")) return "latest"
+-  return await $`git branch --show-current`.text().then((x) => x.trim())
++  // `git branch --show-current` prints an empty line when HEAD is detached, and fails
++  // outright outside a work tree. Never let that become the channel: it is baked into the
++  // OPENCODE_CHANNEL build define and an empty channel yields artifacts like `opencode-.db`.
++  const branch = await $`git branch --show-current`
++    .nothrow()
++    .quiet()
++    .text()
++    .then((x) => x.trim())
++    .catch(() => "")
++  return branch || "local"
+ })()
+ const IS_PREVIEW = CHANNEL !== "latest"
+ 
+diff --git a/packages/core/src/plugin/skill.ts b/packages/core/src/plugin/skill.ts
+index ea723dd89d..0cd51054c5 100644
+--- a/packages/core/src/plugin/skill.ts
++++ b/packages/core/src/plugin/skill.ts
+@@ -2,14 +2,25 @@
+ 
+ export * as SkillPlugin from "./skill"
+ 
++import path from "path"
+ import { define } from "./internal"
+ import { Effect } from "effect"
+ import { AbsolutePath } from "../schema"
+ import { SkillV2 } from "../skill"
++import { Global } from "../global"
+ import customizeOpencodeContent from "./skill/customize-opencode.md" with { type: "text" }
++import playwrightDepthContent from "./skill/playwright-depth.md" with { type: "text" }
+ 
+ export const CustomizeOpencodeContent = customizeOpencodeContent
+ 
++// Resolved at import time rather than written into the markdown, so the cache path is
++// correct on every platform instead of whichever machine authored the file.
++export const PlaywrightDepthCachePath = path.join(Global.Path.state, "playwright-depth-cache.json")
++export const PlaywrightDepthContent = playwrightDepthContent.replaceAll("{{CACHE_PATH}}", PlaywrightDepthCachePath)
++
++export const PLAYWRIGHT_DEPTH_DESCRIPTION =
++  "Use when taking Playwright or browser MCP snapshots: picks snapshot depth from per-site memory instead of defaulting to full depth."
++
+ export const Plugin = define({
+   id: "skill",
+   effect: Effect.fn(function* (ctx) {
+@@ -26,6 +37,17 @@ export const Plugin = define({
+           }),
+         }),
+       )
++      draft.source(
++        SkillV2.EmbeddedSource.make({
++          type: "embedded",
++          skill: SkillV2.Info.make({
++            name: "playwright-depth",
++            description: PLAYWRIGHT_DEPTH_DESCRIPTION,
++            location: AbsolutePath.make("/builtin/playwright-depth.md"),
++            content: PlaywrightDepthContent,
++          }),
++        }),
++      )
+     })
+   }),
+ })
+diff --git a/packages/core/src/plugin/skill/playwright-depth.md b/packages/core/src/plugin/skill/playwright-depth.md
+new file mode 100644
+index 0000000000..379dc1864c
+--- /dev/null
++++ b/packages/core/src/plugin/skill/playwright-depth.md
+@@ -0,0 +1,60 @@
++# Playwright snapshot depth
++
++A full-depth `browser_snapshot` on a busy page is the most expensive single call in a
++browser session. Depth-limit it, and remember the depth that worked per site so the
++second visit is cheap.
++
++## Observed cost (one busy docs page)
++
++| call | tokens |
++|---|---|
++| `browser_navigate` | ~80 — returns a snapshot **file link**, not the tree |
++| `browser_snapshot` full depth | **~8,676** — worst case |
++| `browser_snapshot` depth=3 | ~600 — 14x cheaper |
++| `browser_take_screenshot` | ~969, inline PNG — quiet, looks harmless, is not |
++| `browser_network_requests` / `browser_console_messages` | 10–20 — bulk suppressed |
++
++Full depth costs roughly **14x** depth=3. One careless snapshot is worth fourteen
++careful ones. Treat these as the right order of magnitude, not a guarantee.
++
++## Memory file
++
++`{{CACHE_PATH}}`
++
++```json
++{ "example.com": { "depth": 3, "anchor": "main", "hits": 2, "updated": "2026-10-04" } }
++```
++
++Keyed by hostname only — no scheme, no path. `anchor` records the container the useful
++content sat under, so the next visit can go straight there. Create the file with `{}`
++if it does not exist.
++
++## Protocol
++
++1. **Before** the first snapshot of a hostname, read the memory file.
++2. **Hit** → snapshot at the stored depth. State the five-word hint, verbatim:
++   `cached depth=N, escalate if missing`
++3. **Miss** → start at `depth=3`. Never open above 3 on a first visit.
++   Hint: `no cache, starting depth=3`
++4. **Escalate only on failure**, one step at a time: 3 → 5 → full. "Failure" means the
++   node you actually need is absent — not that the tree merely looks small.
++5. **Write back** the depth that worked, incrementing `hits`. A site that genuinely
++   needed full depth is worth recording too: that is a real finding, not a failure.
++6. Prefer the file link `browser_navigate` already returned over re-snapshotting.
++   Prefer `browser_console_messages` / `browser_network_requests` over a screenshot
++   when you only need to know *state*.
++
++## Do not
++
++- **Do not truncate, cap, or post-process snapshot output.** Depth is the only lever
++  here. A capped snapshot silently drops the node you were looking for and costs a
++  retry, which is worse than the tokens it saved.
++- Do not write a cache entry for a site you have not actually snapshotted. An invented
++  depth is worse than no entry, because the next run will trust it.
++- Do not escalate straight from 3 to full. The 5 step resolves most misses.
++
++## If `depth` is rejected
++
++Tool names and parameters follow `@playwright/mcp`. If your server's `browser_snapshot`
++exposes no `depth` parameter, narrow by `ref`/selector to the subtree you need instead
++and record that selector as `anchor` — the memory protocol above is unchanged.
+diff --git a/packages/core/test/plugin/skill.test.ts b/packages/core/test/plugin/skill.test.ts
+index 61bee856b9..a545aa693c 100644
+--- a/packages/core/test/plugin/skill.test.ts
++++ b/packages/core/test/plugin/skill.test.ts
+@@ -22,4 +22,28 @@ describe("SkillPlugin.Plugin", () => {
+       )
+     }),
+   )
++
++  it.effect("registers the built-in playwright-depth skill", () =>
++    Effect.gen(function* () {
++      const skill = yield* SkillV2.Service
++      yield* SkillPlugin.Plugin.effect(host({ skill: { ...skill, reload: skill.reload } }))
++
++      expect(yield* skill.list()).toContainEqual(
++        expect.objectContaining({
++          name: "playwright-depth",
++          description: expect.stringContaining("per-site memory"),
++        }),
++      )
++    }),
++  )
++
++  it.effect("resolves the playwright-depth cache path instead of shipping the placeholder", () =>
++    Effect.gen(function* () {
++      // Guards the real failure mode: a hardcoded authoring-machine path, or a
++      // {{CACHE_PATH}} token that never got substituted, silently shipping to users.
++      expect(SkillPlugin.PlaywrightDepthContent).not.toContain("{{CACHE_PATH}}")
++      expect(SkillPlugin.PlaywrightDepthContent).toContain(SkillPlugin.PlaywrightDepthCachePath)
++      expect(SkillPlugin.PlaywrightDepthCachePath).toContain("playwright-depth-cache.json")
++    }),
++  )
+ })
+diff --git a/packages/opencode/src/skill/index.ts b/packages/opencode/src/skill/index.ts
+index 5a04ec2139..3c67f3873c 100644
+--- a/packages/opencode/src/skill/index.ts
++++ b/packages/opencode/src/skill/index.ts
+@@ -34,6 +34,13 @@ const CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION =
+   "Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself."
+ const CUSTOMIZE_OPENCODE_SKILL_BODY = SkillPlugin.CustomizeOpencodeContent
+ 
++// Built-in skill that ships with opencode. A full-depth browser snapshot is the most
++// expensive single call in a browser session, and the model has no way to know a
++// cheaper depth already worked on this host. This skill gives it a per-site memory.
++const PLAYWRIGHT_DEPTH_SKILL_NAME = "playwright-depth"
++const PLAYWRIGHT_DEPTH_SKILL_DESCRIPTION = SkillPlugin.PLAYWRIGHT_DEPTH_DESCRIPTION
++const PLAYWRIGHT_DEPTH_SKILL_BODY = SkillPlugin.PlaywrightDepthContent
++
+ export const Info = Schema.Struct({
+   name: Schema.String,
+   description: Schema.optional(Schema.String),
+@@ -281,6 +288,12 @@ const layer = Layer.effect(
+           location: "<built-in>",
+           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
+         }
++        s.skills[PLAYWRIGHT_DEPTH_SKILL_NAME] = {
++          name: PLAYWRIGHT_DEPTH_SKILL_NAME,
++          description: PLAYWRIGHT_DEPTH_SKILL_DESCRIPTION,
++          location: "<built-in>",
++          content: PLAYWRIGHT_DEPTH_SKILL_BODY,
++        }
+         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
+         return s
+       }),
+diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
+new file mode 100644
+index 0000000000..b3bbbfca4c
+--- /dev/null
++++ b/packages/core/src/session/runner/context-decay.ts
+@@ -0,0 +1,388 @@
++import { SessionMessage } from "../message"
++
++/**
++ * Relevance-segmented context decay. Replaces fixed-budget compaction with a policy keyed on *which task you are on*:
++ * the live task gets the big budget - including, especially, when it only just started - the task before it keeps a
++ * small shared pot in case we bounce back, and everything older collapses to a retrieval ref. So a boundary cuts both
++ * ways at once: it shrinks everything behind it and hands the fresh task a full budget.
++ *
++ * Tool output decays hard. Message text never decays; it is the reasoning thread, it is cheap, and losing it is what
++ * makes agents repeat themselves. It is also why archived tools need no label - the chat around the call already says
++ * what it did.
++ */
++
++// ---------------------------------------------------------------------------------------------------- tunables
++
++/** Tool-output budget for the task we are on now. */
++export const BUDGET_LIVE_TASK = 20_000
++/** Shared pot for the task immediately before this one, in case we bounce back. */
++export const BUDGET_PRIOR_TASK = 2_000
++/** Turns compared either side of a candidate boundary. */
++export const TASK_WINDOW = 3
++/** Drift at or above which a new task provably began. */
++export const TASK_DRIFT_THRESHOLD = 0.6
++/** Share of drift owed to file paths; the remainder is vocabulary. */
++export const PATH_WEIGHT = 0.6
++/** Turns after which everything collapses into the single index block. */
++export const ARCHIVE_AFTER_TURNS = 20
++/** Head/tail retained when stubbing live-task output that overflowed. */
++export const STUB_HEAD_CHARS = 400
++export const STUB_TAIL_CHARS = 200
++/** Consecutive tool calls with no reasoning between them that force a label. */
++export const CHAIN_NARRATION_FLOOR = 5
++/**
++ * Re-evaluation quantum. Every drifting input is rounded down to a multiple of this, so the decision can only change
++ * every N turns (or on a provable task switch). Without it the archive frontier advances one turn at a time, every turn
++ * rewrites a different slice of the prefix, and the prompt cache misses forever - paying more than doing nothing at all.
++ */
++export const REEVAL_QUANTUM = 10
++
++/**
++ * Floor on what a replacement must actually free. The elision note alone runs ~115 chars and the archive path costs a
++ * marker plus a line in the index block, so a short tool output "collapses" into something *larger* than it was. Same
++ * reasoning as REEVAL_QUANTUM: under this margin, acting rewrites the cached prefix to make the request bigger, and
++ * doing nothing is strictly cheaper. Below it the body is left verbatim.
++ */
++export const MIN_DECAY_SAVING = 200
++
++/** Rough token estimate. Deliberately cheap - this gates trimming, not billing. */
++const tokens = (text: string) => Math.ceil(text.length / 4)
++
++/** Whether swapping `body` for `replacement` (plus any per-entry overhead it adds elsewhere) frees enough to be worth it. */
++const worthwhile = (body: string, replacement: string, overhead = 0) =>
++  body.length - replacement.length - overhead >= MIN_DECAY_SAVING
++
++// ------------------------------------------------------------------------------------------------- path probes
++
++const ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\/)[^\s]*$/
++
++/** Pull absolute filesystem paths out of arbitrary tool input JSON. */
++export const absolutePaths = (input: unknown, found: string[] = []): string[] => {
++  if (typeof input === "string") {
++    if (ABSOLUTE.test(input)) found.push(input.replaceAll("\\", "/"))
++    return found
++  }
++  if (Array.isArray(input)) {
++    for (const item of input) absolutePaths(item, found)
++    return found
++  }
++  if (input && typeof input === "object") {
++    for (const value of Object.values(input)) absolutePaths(value, found)
++  }
++  return found
++}
++
++const segments = (path: string) => path.split("/").filter(Boolean)
++
++/**
++ * Depth of the deepest shared ancestor. Two paths on the same drive but in unrelated trees (`D:/tmp/a` vs
++ * `D:/Prog/Actdev/...`) share only the drive, which is depth 1 - a provable project boundary with no filesystem access.
++ */
++export const commonAncestorDepth = (left: string, right: string) => {
++  const a = segments(left)
++  const b = segments(right)
++  let depth = 0
++  while (depth < a.length && depth < b.length && a[depth]!.toLowerCase() === b[depth]!.toLowerCase()) depth++
++  return depth
++}
++
++/** Paths are in the same project when they agree beyond the drive/filesystem root. */
++const sameProject = (left: readonly string[], right: readonly string[]) => {
++  if (left.length === 0 || right.length === 0) return true // no evidence is not evidence of change
++  return left.some((l) => right.some((r) => commonAncestorDepth(l, r) > 1))
++}
++
++// ----------------------------------------------------------------------------------------------------- keywords
++
++const WORD = /[a-z][a-z0-9_]{2,}/g
++
++/** Filler that survives every topic switch and would mask real drift. */
++const STOPWORD = new Set(
++  `the and for you this that with not are was but have has from then than into out off now just like what why how when
++   where which who will can should would could does done need want file files code line lines run running use used
++   using add added fix fixed make made get got look looks next also only same still very much more most here there`
++    .split(/\s+/)
++    .filter(Boolean),
++)
++
++/** Content words of a turn. Short words and filler carry no topic signal. */
++export const keywords = (text: string): ReadonlySet<string> =>
++  new Set((text.match(WORD) ?? []).filter((word) => word.length >= 4 && !STOPWORD.has(word)))
++
++// -------------------------------------------------------------------------------------------------------- turns
++
++interface Turn {
++  readonly message: SessionMessage.Message
++  readonly tools: readonly SessionMessage.AssistantTool[]
++  readonly paths: readonly string[]
++  readonly text: string
++  readonly words: ReadonlySet<string>
++}
++
++const toolsOf = (message: SessionMessage.Message): SessionMessage.AssistantTool[] => {
++  if (message.role !== "assistant") return []
++  return message.content.filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++}
++
++const textOf = (message: SessionMessage.Message) =>
++  message.content
++    .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
++    .join(" ")
++    .toLowerCase()
++
++const toTurn = (message: SessionMessage.Message): Turn => {
++  const tools = toolsOf(message)
++  const text = textOf(message)
++  const paths = tools.flatMap((tool) => absolutePaths(tool.state.status === "pending" ? {} : tool.state.input))
++  return { message, tools, paths, text, words: keywords(text) }
++}
++
++// ------------------------------------------------------------------------------------------------ task boundaries
++
++interface Window {
++  readonly paths: readonly string[]
++  readonly pathSet: ReadonlySet<string>
++  readonly words: ReadonlySet<string>
++}
++
++const windowOf = (turns: readonly Turn[]): Window => {
++  const paths = turns.flatMap((turn) => [...turn.paths])
++  return { paths, pathSet: new Set(paths), words: new Set(turns.flatMap((turn) => [...turn.words])) }
++}
++
++/** 1 - overlap coefficient. Zero when either side offers no evidence. */
++const overlapDrift = (left: ReadonlySet<string>, right: ReadonlySet<string>) => {
++  if (left.size === 0 || right.size === 0) return 0
++  const shared = [...right].filter((item) => left.has(item)).length
++  return 1 - shared / Math.min(left.size, right.size)
++}
++
++/**
++ * How far the work moved between two windows: 0 same task, 1 unrelated. Progressive on purpose - a repo change is a hard
++ * 1 and needs no judgement, everything else is a blend of which files are touched and which words are used, so moving
++ * from auth work to log trimming *inside one repo* scores high without anyone maintaining a list of magic keywords.
++ */
++export const drift = (prior: Window, live: Window): number => {
++  if (!sameProject(prior.paths, live.paths)) return 1
++  const paths = overlapDrift(prior.pathSet, live.pathSet)
++  const words = overlapDrift(prior.words, live.words)
++  return paths * PATH_WEIGHT + words * (1 - PATH_WEIGHT)
++}
++
++/**
++ * Indices where a new task provably began, oldest first. A boundary needs a full window on both sides, so the newest
++ * turns cannot mint one until the evidence exists - which is also what stops the newest turn from re-cutting the prefix
++ * and missing the prompt cache every turn.
++ */
++export const taskBoundaries = (turns: readonly Turn[]): readonly number[] => {
++  const marks: number[] = []
++  for (let index = TASK_WINDOW; index + TASK_WINDOW <= turns.length; index++) {
++    const last = marks[marks.length - 1]
++    if (last !== undefined && index - last < TASK_WINDOW) continue
++    if (drift(windowOf(turns.slice(index - TASK_WINDOW, index)), windowOf(turns.slice(index, index + TASK_WINDOW))) >= TASK_DRIFT_THRESHOLD)
++      marks.push(index)
++  }
++  return marks
++}
++
++/** 0 for the task we are on, 1 for the one before it, and so on back. */
++export const taskRank = (index: number, marks: readonly number[]) => marks.filter((mark) => mark > index).length
++
++/**
++ * Budget as a function of rank - the whole policy in three lines. Rank 0 is the live task and is never penalised for
++ * being new; rank 2 and older hold no verbatim output at all, they are a ref you can pull back on demand.
++ */
++export const taskBudget = (rank: number) => {
++  if (rank === 0) return BUDGET_LIVE_TASK
++  if (rank === 1) return BUDGET_PRIOR_TASK
++  return 0
++}
++
++/**
++ * Tools inside an unnarrated chain: CHAIN_NARRATION_FLOOR or more consecutive calls with no reasoning text between
++ * them. Everywhere else the surrounding chat already says what the call did, so the archive carries a bare ref and pays
++ * ~10 tokens instead of a redundant label.
++ */
++export const unnarrated = (turns: readonly Turn[]): ReadonlySet<string> => {
++  const marked = new Set<string>()
++  let run: string[] = []
++  const flush = () => {
++    if (run.length >= CHAIN_NARRATION_FLOOR) for (const id of run) marked.add(id)
++    run = []
++  }
++  for (const turn of turns) {
++    if (turn.text.trim().length > 0) flush()
++    for (const tool of turn.tools) run.push(tool.id)
++  }
++  flush()
++  return marked
++}
++
++/**
++ * Everything that can change what the decayed prefix looks like, reduced to three ints. Equal key => byte-identical
++ * output => skip the work and keep the provider cache hot. This is the loop-breaker: the expensive decision is made on
++ * a boundary, not on every turn.
++ */
++export interface ContextKey {
++  /** Count of provable task boundaries seen. Monotonic. */
++  readonly segment: number
++  /** Archive frontier, quantized so it steps rather than slides. */
++  readonly frontier: number
++  /** First turn of the live task. */
++  readonly live: number
++}
++
++const quantize = (value: number) => Math.max(0, Math.floor(value / REEVAL_QUANTUM) * REEVAL_QUANTUM)
++
++export const contextKey = (turns: readonly Turn[]): ContextKey => {
++  const marks = taskBoundaries(turns)
++  return { segment: marks.length, frontier: quantize(turns.length - ARCHIVE_AFTER_TURNS), live: marks[marks.length - 1] ?? 0 }
++}
++
++export const sameKey = (left: ContextKey | undefined, right: ContextKey) =>
++  left !== undefined && left.segment === right.segment && left.frontier === right.frontier && left.live === right.live
++
++// -------------------------------------------------------------------------------------------------------- decay
++
++const contentText = (tool: SessionMessage.AssistantTool) => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return ""
++  return tool.state.content.map((part) => ("text" in part && typeof part.text === "string" ? part.text : "")).join("\n")
++}
++
++const stub = (tool: SessionMessage.AssistantTool, body: string) => {
++  const head = body.slice(0, STUB_HEAD_CHARS)
++  const tail = body.length > STUB_HEAD_CHARS + STUB_TAIL_CHARS ? body.slice(-STUB_TAIL_CHARS) : ""
++  const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
++  const handle = paths[0] ?? tool.id
++  const note = `\n…[${tool.name} output elided — ${body.length} chars. ref ${handle} — name it and the harness reinjects it locally]…\n`
++  return [head, note, tail].join("")
++}
++
++/** An elided tool keeps outputPaths so the harness can refetch without a provider call. */
++const elide = (tool: SessionMessage.AssistantTool, text: string): SessionMessage.AssistantTool => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
++  return { ...tool, state: { ...tool.state, content: [{ type: "text", text }] } } as SessionMessage.AssistantTool
++}
++
++/**
++ * Superseded/old output collapses to a bare ref - the consolidated index block carries the detail, so repeating it
++ * per-tool would defeat the point. Content is never emptied outright: an empty tool result trips provider-side
++ * tool_call/tool_result pairing checks.
++ */
++const markerText = (ref: string) => `[archived — ref ${ref}]`
++
++const archivedMarker = (tool: SessionMessage.AssistantTool, ref: string): SessionMessage.AssistantTool => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
++  return { ...tool, state: { ...tool.state, content: [{ type: "text", text: markerText(ref) }] } } as SessionMessage.AssistantTool
++}
++
++export interface ArchiveEntry {
++  readonly id: string
++  readonly ref: string
++  /** Carried only for unnarrated chains; elsewhere the chat is the label. */
++  readonly name?: string
++  readonly chars?: number
++}
++
++/** One entry's line in the index block. Shared with `indexBlock` so the cost model cannot drift from what is emitted. */
++const indexLine = (entry: ArchiveEntry) =>
++  entry.name ? `  ${entry.ref} — ${entry.name}, ${entry.chars} chars` : `  ${entry.ref}`
++
++export interface DecayResult {
++  readonly messages: readonly SessionMessage.Message[]
++  readonly archive: readonly ArchiveEntry[]
++  readonly key: ContextKey
++  /** False when the short-circuit fired and the prefix was left byte-identical. */
++  readonly rewritten: boolean
++}
++
++/**
++ * Decay a projected history immediately before it is lowered to provider messages. Pure and synchronous: no filesystem,
++ * no git, no Effect, so it can sit inside `toLLMMessages` without changing its signature.
++ */
++export const decay = (messages: readonly SessionMessage.Message[], previous?: ContextKey): DecayResult => {
++  const turns = messages.map(toTurn)
++  const key = contextKey(turns)
++
++  // Loop-breaker. Nothing affecting the lowered bytes changed, so hand back the same references and let the cache hit.
++  if (sameKey(previous, key)) return { messages, archive: [], key, rewritten: false }
++
++  const marks = taskBoundaries(turns)
++  const labelled = unnarrated(turns)
++  const archiveBefore = key.frontier
++  const archive: ArchiveEntry[] = []
++
++  // Decide every tool's fate newest-first so the freshest output claims budget first, then rebuild in original order.
++  const verdict = new Map<string, SessionMessage.AssistantTool>()
++  const spent = new Map<number, number>()
++
++  for (let index = turns.length - 1; index >= 0; index--) {
++    const turn = turns[index]!
++    const rank = taskRank(index, marks)
++    const allowance = taskBudget(rank)
++    const archived = index < archiveBefore
++
++    for (const tool of turn.tools) {
++      const body = contentText(tool)
++      if (body.length === 0) continue
++
++      const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
++      const ref = paths[0] ?? tool.id
++      const label = labelled.has(tool.id)
++      const entry: ArchiveEntry = label ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref }
++      const retire = () => {
++        archive.push(entry)
++        verdict.set(tool.id, archivedMarker(tool, ref))
++      }
++      // Retiring is not free: the marker replaces the body *and* the tool buys a line in the index block. For a short
++      // output that total exceeds what it reclaims, so the body stays - cheaper on tokens and it keeps the thread whole.
++      const retires = worthwhile(body, markerText(ref), indexLine(entry).length + 1)
++
++      if (archived || allowance === 0) {
++        if (retires) retire()
++        continue
++      }
++
++      const cost = tokens(body)
++      const used = spent.get(rank) ?? 0
++      if (used + cost <= allowance) {
++        spent.set(rank, used + cost)
++        continue // keep verbatim
++      }
++
++      // Overflow in the live task keeps a head/tail so the thread still reads; an older task is cold, so it goes to a ref.
++      if (rank === 0) {
++        const stubbed = stub(tool, body)
++        if (worthwhile(body, stubbed)) verdict.set(tool.id, elide(tool, stubbed))
++        continue // the note would outweigh the body - leave it verbatim
++      }
++      if (retires) retire()
++    }
++  }
++
++  archive.reverse() // filled newest-first; present it oldest-first like the transcript
++
++  const next = messages.map((message) => {
++    if (message.role !== "assistant") return message
++    if (!message.content.some((item) => item.type === "tool" && verdict.has(item.id))) return message
++    const content = message.content.map((item) => (item.type === "tool" && verdict.has(item.id) ? verdict.get(item.id)! : item))
++    return { ...message, content } as SessionMessage.Message
++  })
++
++  return { messages: next, archive, key, rewritten: true }
++}
++
++/**
++ * Single consolidated block standing in for everything archived. Bare refs: the chat above each call already says what
++ * it was for, and a label per entry would cost more than the entries it describes.
++ */
++export const indexBlock = (archive: readonly ArchiveEntry[]) => {
++  if (archive.length === 0) return undefined
++  const lines = archive.map(indexLine)
++  return [
++    `<archived-tool-output count="${archive.length}">`,
++    "Tool output elided. Name any ref to have the harness reinject it locally.",
++    ...lines,
++    "</archived-tool-output>",
++  ].join("\n")
++}
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+index b2b1af5d30..844341a3a6 100644
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -8,6 +8,7 @@ import {
+   type ProviderMetadata,
+ } from "@opencode-ai/llm"
+ import { SessionMessage } from "../message"
++import { decay, indexBlock } from "./context-decay"
+ import type { FileAttachment } from "../prompt"
+ 
+ const media = (file: FileAttachment): ContentPart => ({
+@@ -166,6 +167,15 @@ ${message.recent}
+   }
+ }
+ 
+-/** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
+-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
+-  messages.flatMap((message) => toLLMMessage(message, model))
++/**
++ * Translate projected V2 Session history into canonical @opencode-ai/llm context. Decay runs first, on Session messages
++ * rather than lowered ones, so it can see tool inputs/paths and rewrite a tool's own body in place. The retrieval index
++ * is appended last, never prepended: it grows every time something is archived, and a growing prefix would cold-cache
++ * the whole request on every turn.
++ */
++export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
++  const decayed = decay(messages)
++  const lowered = decayed.messages.flatMap((message) => toLLMMessage(message, model))
++  const index = indexBlock(decayed.archive)
++  return index === undefined ? lowered : [...lowered, Message.user(index)]
++}
