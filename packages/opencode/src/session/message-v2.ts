@@ -52,6 +52,48 @@ function truncateToolOutput(text: string, maxChars?: number) {
   return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
 }
 
+// Stale tool-body trimming. Tool *inputs* are replayed verbatim to the model on every later
+// request for the life of a session: tool output has SessionCompaction.prune, but nothing
+// ever trimmed input, so one large `bash` command body is re-billed every single turn.
+// This is a request-time projection only -- it never mutates the stored part, so storage,
+// the TUI and the log keep the full text. Tune here; this is the only place it is defined.
+const STALE_TURNS = 3
+const STALE_TOOLS = new Set(["bash"])
+const STALE_INPUT_MAX_CHARS = 200
+const STALE_OUTPUT_MAX_CHARS = 2_000
+
+/** ids of messages older than the most recent STALE_TURNS user turns */
+function staleMessageIDs(messages: WithParts[]) {
+  const stale = new Set<string>()
+  const users: number[] = []
+  for (let i = 0; i < messages.length; i++) if (messages[i].info.role === "user") users.push(i)
+  if (users.length <= STALE_TURNS) return stale
+  for (let i = 0; i < users[users.length - STALE_TURNS]; i++) stale.add(messages[i].info.id)
+  return stale
+}
+
+function isStale(stale: Set<string>, msg: WithParts, tool: string) {
+  return stale.has(msg.info.id) && STALE_TOOLS.has(tool)
+}
+
+function staleToolInput<T>(stale: Set<string>, msg: WithParts, part: { tool: string; state: { input: T } }): T {
+  const value = part.state.input
+  if (!isStale(stale, msg, part.tool)) return value
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value
+  const command = (value as Record<string, unknown>)["command"]
+  if (typeof command !== "string" || command.length <= STALE_INPUT_MAX_CHARS) return value
+  const omitted = command.length - STALE_INPUT_MAX_CHARS
+  return {
+    ...(value as Record<string, unknown>),
+    command: `${command.slice(0, STALE_INPUT_MAX_CHARS)}\n[older turn: omitted ${omitted} chars of command body]`,
+  } as T
+}
+
+function staleOutputMaxChars(stale: Set<string>, msg: WithParts, tool: string, configured?: number) {
+  if (!isStale(stale, msg, tool)) return configured
+  return Math.min(STALE_OUTPUT_MAX_CHARS, configured ?? STALE_OUTPUT_MAX_CHARS)
+}
+
 export const Event = {
   Updated: SessionV1.Event.MessageUpdated,
   Removed: SessionV1.Event.MessageRemoved,
@@ -135,6 +177,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
+  const staleIDs = staleMessageIDs(input)
   // Track media from tool results that need to be injected as user messages
   // for providers that don't support that media type in tool results.
   //
@@ -296,7 +339,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
               ? "[Old tool result content cleared]"
-              : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
+              : truncateToolOutput(part.state.output, staleOutputMaxChars(staleIDs, msg, part.tool, options?.toolOutputMaxChars))
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
             // For providers that don't support media in tool results, extract media files
@@ -320,7 +363,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               type: ("tool-" + part.tool) as `tool-${string}`,
               state: "output-available",
               toolCallId: part.callID,
-              input: part.state.input,
+              input: staleToolInput(staleIDs, msg, part),
               output,
               ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
@@ -333,7 +376,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-available",
                 toolCallId: part.callID,
-                input: part.state.input,
+                input: staleToolInput(staleIDs, msg, part),
                 output,
                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
@@ -343,7 +386,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
                 toolCallId: part.callID,
-                input: part.state.input,
+                input: staleToolInput(staleIDs, msg, part),
                 errorText: part.state.error,
                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
@@ -357,7 +400,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               type: ("tool-" + part.tool) as `tool-${string}`,
               state: "output-error",
               toolCallId: part.callID,
-              input: part.state.input,
+              input: staleToolInput(staleIDs, msg, part),
               errorText: "[Tool execution was interrupted]",
               ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),

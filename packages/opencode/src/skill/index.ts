@@ -34,6 +34,13 @@ const CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION =
   "Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself."
 const CUSTOMIZE_OPENCODE_SKILL_BODY = SkillPlugin.CustomizeOpencodeContent
 
+// Built-in skill that ships with opencode. A full-depth browser snapshot is the most
+// expensive single call in a browser session, and the model has no way to know a
+// cheaper depth already worked on this host. This skill gives it a per-site memory.
+const PLAYWRIGHT_DEPTH_SKILL_NAME = "playwright-depth"
+const PLAYWRIGHT_DEPTH_SKILL_DESCRIPTION = SkillPlugin.PLAYWRIGHT_DEPTH_DESCRIPTION
+const PLAYWRIGHT_DEPTH_SKILL_BODY = SkillPlugin.PlaywrightDepthContent
+
 export const Info = Schema.Struct({
   name: Schema.String,
   description: Schema.optional(Schema.String),
@@ -280,6 +287,12 @@ const layer = Layer.effect(
           description: CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION,
           location: "<built-in>",
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
+        }
+        s.skills[PLAYWRIGHT_DEPTH_SKILL_NAME] = {
+          name: PLAYWRIGHT_DEPTH_SKILL_NAME,
+          description: PLAYWRIGHT_DEPTH_SKILL_DESCRIPTION,
+          location: "<built-in>",
+          content: PLAYWRIGHT_DEPTH_SKILL_BODY,
         }
         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s
