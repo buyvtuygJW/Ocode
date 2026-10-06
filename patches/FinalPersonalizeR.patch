@@ -23,7 +23,7 @@ new file mode 100644
 index 000000000..ef38c87bd 100644
 --- /dev/null
 +++ b/packages/opencode/src/tool/custom.ts
-@@ -0,0 +1,1356 @@
+@@ -0,0 +1,1360 @@
 +// ============================================================================
 +// PERSONALIZATION (FinalPersonalizeR) — SINGLE owned file.
 +// Everything for /distill, /schedule, /council lives HERE: tools, commands,
@@ -53,7 +53,7 @@ index 000000000..ef38c87bd 100644
 +const DESC_COUNCIL = "Convene a multi-model council: fan the same question to several models directly (bypasses the task tool's single-model limit) and combine their answers by strategy. See the `strategy` parameter for the seven modes and their aliases.\n\nMembers come from council.json — a per-project \".opencode/council.json\" overrides the global config dir. Resolution: the inline `members` argument, else the per-project file (a blank template is auto-created; entries with an empty \"model\" are skipped), else the global file.\n\nIf nothing is configured, the tool seeds the global council.json with your current model and prints its path. A council needs at least two models; with one, use the normal task/subagent flow.\n"
 +const PROMPT_DISTILL = "Call the `distill_session` tool now.\n\nIt deterministically — in code, with NO LLM scoring — reconstructs THIS session's tool\ntrajectory, scores it 0-100 on the RSI rubric (Correctness / Efficiency / Coverage /\nReproducibility), and only if it scores >= 75 saves a reusable learned skill under the global\nopencode skills dir, which opencode auto-discovers in future sessions.\n\nDo NOT score or reconstruct the session yourself. Just invoke `distill_session` and report its\noutput verbatim: the score breakdown, and either the saved skill path or the reason it was not\ndistilled.\n"
 +const PROMPT_SCHEDULE = "Call the `schedule_task` tool now with action=\"due\".\n\nFor EACH schedule it reports as due, in order:\n1. Execute that schedule's prompt as if the user had just typed it (delegate to its\n   agent via the task tool if one is set).\n2. When it finishes, call `schedule_task` with action=\"mark\" and that schedule's name\n   so the run is recorded.\n\nIf nothing is due, call `schedule_task` with action=\"list\" and report when the next\nschedule will fire.\n\nSchedules are deterministic qm-style crons — plain JSON, no server:\n- add:    schedule_task action=\"add\" name=\"inbox\" every=\"daily@09:00\" prompt=\"triage my inbox\"\n- remove: schedule_task action=\"remove\" name=\"inbox\"\n- export: schedule_task action=\"export\" prints crontab/schtasks lines so the OS runs\n  `opencode run \"<prompt>\"` unattended, without an open session.\n"
-+const PROMPT_COUNCIL = "Convene a council on this request via `council`.\n\n$ARGUMENTS\n\nPass user's question as `question`. If a strategy was named (council, compare, debate, moa, router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.\n\nRelay results as-is: synthesized/resolved answer for council/moa/debate; side-by-side for compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; chosen model for router.\n\nIf not configured, print returned file path and tell user to add two or more \"provider/model\" entries — do not invent models.\n"
++const PROMPT_COUNCIL = "Convene a council on this request via `council`.\n\n$ARGUMENTS\n\nPass user's question as `question`. If the user named model(s) or an agent count, pass exactly those as `members` (loose names ok — they auto-resolve); models the user did not ask for must not be pinged. Omit `members` only when none were named. If a strategy was named (council, compare, debate, moa, router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.\n\nRelay results as-is: synthesized/resolved answer for council/moa/debate; side-by-side for compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; chosen model for router.\n\nIf not configured, print returned file path and tell user to add two or more \"provider/model\" entries — do not invent models.\n"
 +
 +// ---------- distill_session tool ----------
 +// Deterministic RSI (Recursive Self-Improvement) distiller — ported as native code.
@@ -784,6 +784,9 @@ index 000000000..ef38c87bd 100644
 +// workhorse tier (nano/mini/lite/flash/haiku), which stays (newest version of it).
 +// Nothing invented or hardcoded: all keys are derived from the ids themselves.
 +const CHEAP_TIER = /nano|mini|lite|flash|haiku/
++// Catalog lists everything the provider sells, not what this key can chat with.
++// Non-text endpoints (realtime/audio/image/embeddings/...) 404 on text generate.
++const NON_CHAT = /realtime|audio|tts|whisper|transcri|embed|image|dall-?e|sora|moderation|computer-use|search-preview|rerank|vision-only/
 +function verOf(mid: string): number[] {
 +  return (mid.match(/\d+(?:\.\d+)?/g) ?? []).map(Number)
 +}
@@ -826,7 +829,8 @@ index 000000000..ef38c87bd 100644
 +    picked.push({ name: "current", model: cur })
 +    seen.add(cur)
 +  }
-+  for (const id of latestOnly(catalogIds(provs), seen).sort((a, b) => a.localeCompare(b))) {
++  const chatIds = catalogIds(provs).filter((id) => !NON_CHAT.test(id.toLowerCase()))
++  for (const id of latestOnly(chatIds, seen).sort((a, b) => a.localeCompare(b))) {
 +    if (seen.has(id)) continue
 +    seen.add(id)
 +    picked.push({ name: `member${picked.length + 1}`, model: id })
