@@ -200,7 +200,12 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             "X-Session-Id": input.sessionID,
             "User-Agent": USER_AGENT,
           }),
-      ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+      // opencode-hosted free tier rejects delegated traffic: a child session's request is
+      // byte-identical to a root session's except for this header, so omit it for opencode
+      // providers. Subagent/council children then pass same origin check TUI does.
+      ...(input.parentSessionID && !input.model.providerID.startsWith("opencode")
+        ? { "x-parent-session-id": input.parentSessionID }
+        : {}),
       ...input.model.headers,
       ...headers,
     },

@@ -49,6 +49,7 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  model: Schema.optional(Schema.String).annotate({ description: 'Pin this task to one "provider/model" pair (e.g. "openai/gpt6-luna"); omit to use the agent default' }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -178,7 +179,7 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
+      const model = (params.model ? { providerID: params.model.split("/")[0], modelID: params.model.split("/").slice(1).join("/") } : next.model) ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
@@ -206,7 +207,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: params.model || next.model ? undefined : variant,
           agent: next.name,
           parts,
         })
