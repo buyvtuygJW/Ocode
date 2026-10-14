@@ -336,10 +336,111 @@ index 536a642..3f0a2ef 100644
      })
    }),
 diff --git a/packages/core/src/database/database.ts b/packages/core/src/database/database.ts
-index d61adf047e..8db2ac2603 100644
+index d61adf0..3392592 100644
 --- a/packages/core/src/database/database.ts
 +++ b/packages/core/src/database/database.ts
-@@ -45,13 +45,17 @@ export function path() {
+@@ -5,6 +5,7 @@ import { layer as sqliteLayer } from "#sqlite"
+ import { Context, Effect, Layer } from "effect"
+ import { Global } from "../global"
+ import { Flag } from "../flag/flag"
++import { closeSync, openSync, statSync, unlinkSync } from "node:fs"
+ import { isAbsolute, join } from "path"
+ import { DatabaseMigration } from "./migration"
+ import { InstallationChannel } from "../installation/version"
+@@ -19,25 +20,77 @@ export interface Interface {
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
+ 
+-const layer = Layer.effect(
+-  Service,
+-  Effect.gen(function* () {
+-    const db = yield* makeDatabase
++const layer = (guard?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>) =>
++  Layer.effect(
++    Service,
++    Effect.gen(function* () {
++      const db = yield* makeDatabase
+ 
+-    yield* db.run("PRAGMA journal_mode = WAL")
+-    yield* db.run("PRAGMA synchronous = NORMAL")
+-    yield* db.run("PRAGMA busy_timeout = 5000")
+-    yield* db.run("PRAGMA cache_size = -64000")
+-    yield* db.run("PRAGMA foreign_keys = ON")
+-    yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
+-    yield* DatabaseMigration.apply(db)
++      const bootstrap = Effect.gen(function* () {
++        yield* db.run("PRAGMA journal_mode = WAL")
++        yield* db.run("PRAGMA synchronous = NORMAL")
++        yield* db.run("PRAGMA busy_timeout = 5000")
++        yield* db.run("PRAGMA cache_size = -64000")
++        yield* db.run("PRAGMA foreign_keys = ON")
++        yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
++        yield* DatabaseMigration.apply(db)
++      })
++      yield* (guard ? guard(bootstrap) : bootstrap)
+ 
+-    return { db }
+-  }).pipe(Effect.orDie),
+-)
++      return { db }
++    }).pipe(Effect.orDie),
++  )
++
++// Two instances launched in the same second race first-boot setup of a shared
++// database file: `PRAGMA journal_mode = WAL` runs before busy_timeout is set, and
++// the migration's first write after a shared read snapshot fails with SQLITE_BUSY
++// immediately (a snapshot upgrade is not retried by busy_timeout). The loser then
++// dies -- or, in the TUI, hangs as an unrendered pane. busy_timeout and in-process
++// fiber locks cannot serialize two PROCESSES, so first-boot setup is guarded with
++// an exclusive lockfile next to the database.
++const BOOT_LOCK_STALE_MS = 60_000
++const BOOT_LOCK_WAIT_MS = 120_000
++
++async function acquireBootLock(lockfile: string) {
++  const started = Date.now()
++  for (;;) {
++    try {
++      return openSync(lockfile, "wx", 0o600)
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
++    }
++    try {
++      // A holder that crashed before unlinking leaves the lockfile behind: steal it
++      // once stale. On Windows the unlink fails while a live holder keeps the file
++      // open, which is exactly the keep-waiting case.
++      if (Date.now() - statSync(lockfile).mtimeMs > BOOT_LOCK_STALE_MS) unlinkSync(lockfile)
++    } catch {}
++    if (Date.now() - started > BOOT_LOCK_WAIT_MS)
++      throw new Error(`timed out waiting for database bootstrap lock: ${lockfile}`)
++    await new Promise((resolve) => setTimeout(resolve, 100 + Math.floor(Math.random() * 150)))
++  }
++}
++
++const withBootLock =
++  (lockfile: string) =>
++  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => acquireBootLock(lockfile)),
++      () => effect,
++      (fd) =>
++        Effect.sync(() => {
++          try {
++            closeSync(fd)
++          } catch {}
++          try {
++            unlinkSync(lockfile)
++          } catch {}
++        }),
++    )
+ 
+ export function layerFromPath(filename: string) {
+-  return layer.pipe(Layer.provide(sqliteLayer({ filename })))
++  const guarded = filename === ":memory:" ? layer() : layer(withBootLock(`${filename}.boot.lock`))
++  return guarded.pipe(Layer.provide(sqliteLayer({ filename })))
+ }
+ 
+ export function path() {
+@@ -45,13 +98,17 @@ export function path() {
      if (Flag.OPENCODE_DB === ":memory:" || isAbsolute(Flag.OPENCODE_DB)) return Flag.OPENCODE_DB
      return join(Global.Path.data, Flag.OPENCODE_DB)
    }
