@@ -1,0 +1,160 @@
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 88939ebc8..621ffb019 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -474,7 +474,7 @@ function App() {
+   const toast = useToast()
+   const updater = useUpdateNotification()
+   const theme = useTheme()
+-  const { mode, supports, setMode, locked, lock, unlock, afterPaint } = useThemes()
++  const { mode, supports, setMode, locked, lock, unlock, afterPaint, toggleTransparent } = useThemes()
+   const data = useData()
+   const location = useLocation()
+   const exit = useExit()
+@@ -929,6 +929,14 @@ function App() {
+           dialog.replace(() => <DialogMcp />)
+         },
+       },
++      {
++        name: "theme.transparent",
++        title: "Toggle transparency",
++        category: "System",
++        run: () => {
++          toggleTransparent()
++        },
++      },
+       {
+         name: "agent.cycle",
+         title: "Agent cycle",
+diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme.tsx
+index 4802bacee..5a3166249 100644
+--- a/packages/tui/src/context/theme.tsx
++++ b/packages/tui/src/context/theme.tsx
+@@ -1,4 +1,4 @@
+-import { CliRenderEvents, SyntaxStyle, type TerminalColors } from "@opentui/core"
++import { CliRenderEvents, RGBA, SyntaxStyle, type TerminalColors } from "@opentui/core"
+ import { useRenderer } from "@opentui/solid"
+ import {
+   generateSyntax,
+@@ -81,6 +81,7 @@ type State = {
+   lock: "dark" | "light" | undefined
+   active: string
+   ready: boolean
++  transparent: boolean
+ }
+ 
+ type Themes = {
+@@ -96,6 +97,8 @@ type Themes = {
+   locked: Accessor<boolean>
+   lock(): void
+   unlock(): void
++  transparent: Accessor<boolean>
++  toggleTransparent(): void
+   setMode(mode?: "dark" | "light", persist?: boolean): boolean
+   set(theme: string): boolean
+   afterPaint(): void
+@@ -114,6 +117,7 @@ const [store, setStore] = createStore<State>({
+   lock: undefined,
+   active: "opencode",
+   ready: false,
++  transparent: false,
+ })
+ const [themeSources, setThemeSources] = createSignal(allThemes())
+ 
+@@ -127,12 +131,15 @@ const themeContext = createSimpleContext({
+     const config = configState.data
+     const themes = props.source
+     const cache = useStorageOptional()?.store<{ colors?: TerminalColors }>("system-theme", { initial: {} })
++    // CUSTOM-TRANSPARENCY: persisted toggle, session-scoped store survives restarts via tui storage.
++    const transparency = useStorageOptional()?.store<{ on?: boolean }>("theme-transparent", { initial: {} })
+ 
+     setStore(
+       produce((draft) => {
+         const lock = config.theme?.mode === "dark" || config.theme?.mode === "light" ? config.theme.mode : undefined
+         const mode = lock ?? renderer.themeMode ?? props.mode
+         draft.mode = mode
++        draft.transparent = transparency?.[0].on === true
+         draft.lock = lock
+         draft.active = config.theme?.name ?? "opencode"
+         draft.ready = false
+@@ -301,7 +308,15 @@ const themeContext = createSimpleContext({
+     })
+     const modes = () => selected().modes
+     const mode = () => selected().mode
+-    const tokens = () => selected().theme
++    const baseTokens = () => selected().theme
++    // CUSTOM-TRANSPARENCY: when toggled on, force the resolved base background fully
++    // transparent so the terminal background shows through everywhere it is painted.
++    const TRANSPARENT = RGBA.fromInts(0, 0, 0, 0)
++    const tokens = createMemo(() =>
++      store.transparent
++        ? { ...baseTokens(), background: { ...baseTokens().background, base: TRANSPARENT } }
++        : baseTokens(),
++    )
+     tokens()
+     themePerformance.set("Init", `${(performance.now() - initStarted).toFixed(2)} ms`)
+     const current = createComponentTheme(tokens)
+@@ -345,6 +360,14 @@ const themeContext = createSimpleContext({
+       get ready() {
+         return store.ready
+       },
++      transparent: () => store.transparent,
++      toggleTransparent() {
++        const next = !store.transparent
++        setStore("transparent", next)
++        void transparency?.[1]((draft) => {
++          draft.on = next
++        }).catch(() => {})
++      },
+     }
+     return {
+       current,
+diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
+index 6b1652035..0bd481907 100644
+--- a/packages/tui/src/ui/dialog-select.tsx
++++ b/packages/tui/src/ui/dialog-select.tsx
+@@ -1,4 +1,11 @@
+-import { CliRenderEvents, InputRenderable, RGBA, ScrollBoxRenderable, TextAttributes } from "@opentui/core"
++import {
++  CliRenderEvents,
++  InputRenderable,
++  RGBA,
++  ScrollBoxRenderable,
++  TextAttributes,
++  type KeyBinding,
++} from "@opentui/core"
+ import { Keymap, type KeymapCommand } from "../context/keymap"
+ import { useTheme } from "../context/theme"
+ import { entries, filter, flatMap, groupBy, pipe } from "remeda"
+@@ -13,6 +20,23 @@ import { getScrollAcceleration } from "../util/scroll"
+ import { useConfig } from "../config"
+ import { moveSelection, reconcileSelection } from "./select-controller"
+ 
++// @opentui/core's editors carry their own hard-coded key table
++// (defaultTextareaKeyBindings) and TextareaRenderable.handleKeyPress() consumes a match
++// before the keymap is ever consulted. ctrl+a is "line-home" in that table, so while
++// this filter input holds focus it swallowed any dialog action bound to ctrl+a - which
++// is what keybind.ts ships as `model.dialog.provider`, "Open provider list from model
++// dialog". Symptom: the cursor jumps to column 0 in the accent `cursorColor` and the
++// provider list never opens.
++//
++// mergeKeyBindings() keys entries on `name:ctrl:shift:meta:super` and lets a custom
++// entry replace the default, but never delete it - so we replace ctrl+a with an action
++// core has no handler for. handleKeyPress() then falls through and returns false, the
++// event continues to the keymap, and the dialog's own ctrl+a action runs. Other a-chords
++// (ctrl+shift+a, alt+a, cmd+a) keep core's defaults, and Home still does buffer-home.
++const FILTER_KEY_BINDINGS = [
++  { name: "a", ctrl: true, action: "opencode:pass-through" },
++] as unknown as KeyBinding[]
++
+ export interface DialogSelectProps<T> {
+   title: string
+   titleView?: JSX.Element
+@@ -692,6 +716,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+                   props.onFilter?.(e)
+                 })
+               }}
++              keyBindings={FILTER_KEY_BINDINGS}
+               focusedBackgroundColor={theme.background.formfield.focused}
+               cursorColor={theme.text.formfield.focused}
+               cursorStyle={config.cursor}

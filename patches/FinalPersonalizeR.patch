@@ -1,0 +1,742 @@
+diff --git a/packages/core/src/plugin/internal.ts b/packages/core/src/plugin/internal.ts
+index f6239be4c..83097ca1c 100644
+--- a/packages/core/src/plugin/internal.ts
++++ b/packages/core/src/plugin/internal.ts
+@@ -97,6 +97,7 @@ import { ProviderPlugins } from "./provider.js"
+ import { OpencodePlugin } from "./provider/opencode.js"
+ import { WebSearchPlugins } from "./websearch/index.js"
+ import { SkillPlugin } from "./skill.js"
++import { PersonalizePlugin } from "./personalize.js"
+ import { VcsHgPlugin } from "./vcs/hg.js"
+ import { ToolInputRepairPlugin } from "./tool-input-repair.js"
+ import { OptimizePlugin } from "./optimize.js"
+@@ -242,6 +243,7 @@ const pre = [
+   ReadTool.Plugin,
+   ShellTool.Plugin,
+   SkillTool.Plugin,
++  PersonalizePlugin.Plugin,
+   SubagentTool.Plugin,
+   WebFetchTool.Plugin,
+   WebSearchTool.Plugin,
+diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
+new file mode 100644
+index 000000000..8efc3e0d3
+--- /dev/null
++++ b/packages/core/src/plugin/personalize.ts
+@@ -0,0 +1,716 @@
++export * as PersonalizePlugin from "./personalize.js"
++
++// ============================================================================
++// PERSONALIZATION (FinalPersonalizeR) — SINGLE owned file.
++// Everything for /distill, /schedule, /council lives HERE: tools, commands,
++// config resolution. Ported onto the 2.0.29 plugin architecture: tools are
++// registered via ctx.tool.transform, commands via ctx.command.transform, and
++// one-shot member generations run through child sessions pinned to a model
++// (Session.Service.generate) so every provider path stays canonical.
++// ============================================================================
++
++import { define } from "@opencode/plugin/effect/plugin"
++import { Tool } from "@opencode/schema/tool"
++import { Model as ModelSchema } from "@opencode/schema/model"
++import { Provider as ProviderSchema } from "@opencode/schema/provider"
++import type { Session as SessionSchema } from "@opencode/schema/session"
++import type { SessionMessage } from "@opencode/schema/session-message"
++import { Global } from "@opencode/util/global"
++import { FSUtil } from "@opencode/util/fs-util"
++import { Effect } from "effect"
++import path from "path"
++import { Model } from "../model.js"
++import { Session } from "../session.js"
++
++// ----------------------------------------------------------------------------
++// Shared helpers
++// ----------------------------------------------------------------------------
++
++type MemberRef = { readonly name: string; readonly model: ModelSchema.Ref }
++
++const parseModelRef = (raw: string): ModelSchema.Ref | undefined => {
++  const trimmed = raw.trim()
++  const slash = trimmed.indexOf("/")
++  if (slash <= 0 || slash === trimmed.length - 1) return undefined
++  return {
++    providerID: ProviderSchema.ID.make(trimmed.slice(0, slash)),
++    id: ModelSchema.ID.make(trimmed.slice(slash + 1)),
++  }
++}
++
++const refToString = (ref: ModelSchema.Ref) => `${ref.providerID}/${ref.id}`
++
++const readJsonSafe = (fs: FSUtil.Interface, file: string) =>
++  fs.readJson(file).pipe(Effect.orElseSucceed(() => undefined))
++
++const writeJsonSafe = (fs: FSUtil.Interface, file: string, value: unknown) =>
++  fs.ensureDir(path.dirname(file)).pipe(
++    Effect.andThen(fs.writeJson(file, value)),
++    Effect.mapError((cause) => new Tool.Error({ message: `Cannot write ${file}: ${cause}` })),
++  )
++
++const text = (value: string): Tool.Result => ({ content: [{ type: "text", text: value }] })
++
++// ----------------------------------------------------------------------------
++// DISTILL — RSI (Recursive Self-Improvement) skill distillation.
++// Deterministically scores the CURRENT session trajectory, and only if it
++// scores >= THRESHOLD reconstructs a reusable learned skill using RSI.
++// ----------------------------------------------------------------------------
++
++const THRESHOLD = 75
++
++const DESC_DISTILL =
++  "Deterministically distill the CURRENT session into a reusable learned skill using RSI " +
++  "(Recursive Self-Improvement) heuristic — NO LLM scoring. Reconstructs this session's tool " +
++  "trajectory, scores it 0-100 on Correctness/Efficiency/Coverage/Reproducibility, and only if " +
++  "it scores >= 75 writes a reusable learned skill under global opencode skills dir (or project " +
++  ".opencode/skills dir when `project` is true). Returns score breakdown and either saved skill " +
++  "path or reason it was not distilled.\n"
++
++const PROMPT_DISTILL =
++  "Call `distill_session` tool now with action=\"run\".\n\n$ARGUMENTS\n\n" +
++  "If arguments mention 'project', pass project=true. Relay the score breakdown and the saved " +
++  "skill path (or the skip reason) exactly as reported. Do not invent scores.\n"
++
++type DistillInput = {
++  action?: "run" | "preview"
++  project?: boolean
++  name?: string
++}
++
++type TrajectoryStats = {
++  userTurns: number
++  assistantTurns: number
++  toolCalls: number
++  toolErrors: number
++  distinctTools: string[]
++  failedIdles: number
++  interrupted: number
++  firstUserText: string
++}
++
++const captureTrajectory = (messages: readonly SessionMessage.Info[]) => {
++  const stats: TrajectoryStats = {
++    userTurns: 0,
++    assistantTurns: 0,
++    toolCalls: 0,
++    toolErrors: 0,
++    distinctTools: [],
++    failedIdles: 0,
++    interrupted: 0,
++    firstUserText: "",
++  }
++  const tools = new Set<string>()
++  for (const message of messages) {
++    if (message.type === "user") {
++      stats.userTurns += 1
++      if (!stats.firstUserText) stats.firstUserText = message.text.slice(0, 500)
++      continue
++    }
++    if (message.type === "idle") {
++      if (message.outcome === "failed") stats.failedIdles += 1
++      if (message.outcome === "interrupted") stats.interrupted += 1
++      continue
++    }
++    if (message.type !== "assistant") continue
++    stats.assistantTurns += 1
++    for (const part of message.content) {
++      if (part.type !== "tool") continue
++      stats.toolCalls += 1
++      tools.add(part.name)
++      if (part.state.status === "error") stats.toolErrors += 1
++    }
++  }
++  stats.distinctTools = [...tools].sort()
++  return stats
++}
++
++// Deterministic RSI scoring — identical weights to the original patch:
++// Correctness: starts at 100, -25 per failed idle, -8 per tool error (floor 0).
++// Efficiency: 100 when <= 20 tool calls, linear decay to 20 at 120 calls.
++// Coverage: 20 + 16 per distinct tool, capped at 100.
++// Reproducibility: 100 with no interruptions and >= 1 tool call, else penalized.
++const scoreTrajectory = (stats: TrajectoryStats) => {
++  const correctness = Math.max(0, 100 - stats.failedIdles * 25 - stats.toolErrors * 8)
++  const efficiency =
++    stats.toolCalls <= 20 ? 100 : Math.max(20, Math.round(100 - ((stats.toolCalls - 20) * 80) / 100))
++  const coverage = Math.min(100, 20 + stats.distinctTools.length * 16)
++  const reproducibility = Math.max(
++    0,
++    (stats.toolCalls >= 1 ? 100 : 40) - stats.interrupted * 30 - stats.failedIdles * 10,
++  )
++  const total = Math.round(correctness * 0.4 + efficiency * 0.2 + coverage * 0.2 + reproducibility * 0.2)
++  return { correctness, efficiency, coverage, reproducibility, total }
++}
++
++const slugify = (value: string) =>
++  value
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, "-")
++    .replace(/^-+|-+$/g, "")
++    .slice(0, 48) || "learned-skill"
++
++// ----------------------------------------------------------------------------
++// SCHEDULE — deterministic qm-style scheduler. Crons and plain JSON in the
++// global config dir; schedules whose due time has come are surfaced on list.
++// NO LLM involvement. Self-contained: parse, next-run, add/remove/list/export.
++// ----------------------------------------------------------------------------
++
++const DESC_SCHEDULE =
++  "Manage deterministic qm-style background schedules (crons and watches run work while nobody's " +
++  "watching) — ported as native code. NO LLM, NO server, NO Postgres: it's a schedule_task tool + " +
++  "plain JSON in global opencode config dir; built-in /schedule command executes whatever is due. " +
++  "Actions: add (name + cadence), list (with due markers), remove, export.\n"
++
++const PROMPT_SCHEDULE =
++  "Manage schedules via the `schedule_task` tool.\n\n$ARGUMENTS\n\n" +
++  "Map the request onto one action: add (needs name + cadence + prompt), list, remove (name), or " +
++  "export. Cadence accepts 5-field cron (m h dom mon dow) or shorthand: @hourly, @daily, @weekly, " +
++  "every <N> minutes/hours. Relay the tool output as-is, including DUE NOW markers.\n"
++
++type ScheduleEntry = {
++  name: string
++  cadence: string
++  prompt: string
++  created: string
++  last?: string
++}
++
++type ScheduleInput = {
++  action?: "add" | "list" | "remove" | "export"
++  name?: string
++  cadence?: string
++  prompt?: string
++}
++
++const matchField = (field: string, value: number, max: number): boolean => {
++  if (field === "*") return true
++  return field.split(",").some((part) => {
++    const step = part.split("/")
++    const range = step[0] ?? "*"
++    const every = step[1] === undefined ? 1 : Number(step[1])
++    if (!Number.isFinite(every) || every <= 0) return false
++    let lo = 0
++    let hi = max
++    if (range !== "*") {
++      const bounds = range.split("-")
++      const from = Number(bounds[0])
++      const to = bounds[1] === undefined ? from : Number(bounds[1])
++      if (!Number.isFinite(from) || !Number.isFinite(to)) return false
++      lo = from
++      hi = to
++    }
++    return value >= lo && value <= hi && (value - lo) % every === 0
++  })
++}
++
++const normalizeCadence = (cadence: string): string | undefined => {
++  const value = cadence.trim().toLowerCase()
++  if (value === "@hourly") return "0 * * * *"
++  if (value === "@daily") return "0 9 * * *"
++  if (value === "@weekly") return "0 9 * * 1"
++  const every = value.match(/^every\s+(\d+)\s+(minute|minutes|hour|hours)$/)
++  if (every) {
++    const n = Number(every[1])
++    if (!Number.isFinite(n) || n <= 0) return undefined
++    return every[2]!.startsWith("minute") ? `*/${n} * * * *` : `0 */${n} * * *`
++  }
++  const fields = value.split(/\s+/)
++  return fields.length === 5 ? fields.join(" ") : undefined
++}
++
++const cronMatches = (cron: string, date: Date): boolean => {
++  const [minute, hour, dom, month, dow] = cron.split(" ")
++  return (
++    matchField(minute ?? "*", date.getMinutes(), 59) &&
++    matchField(hour ?? "*", date.getHours(), 23) &&
++    matchField(dom ?? "*", date.getDate(), 31) &&
++    matchField(month ?? "*", date.getMonth() + 1, 12) &&
++    matchField(dow ?? "*", date.getDay(), 6)
++  )
++}
++
++const nextRun = (cron: string, from: Date): Date | undefined => {
++  const probe = new Date(from.getTime())
++  probe.setSeconds(0, 0)
++  for (let i = 0; i < 366 * 24 * 60; i += 1) {
++    probe.setMinutes(probe.getMinutes() + 1)
++    if (cronMatches(cron, probe)) return new Date(probe.getTime())
++  }
++  return undefined
++}
++
++const isDue = (entry: ScheduleEntry, now: Date): boolean => {
++  const since = new Date(entry.last ?? entry.created)
++  const upcoming = nextRun(entry.cadence, since)
++  return upcoming !== undefined && upcoming.getTime() <= now.getTime()
++}
++
++// ----------------------------------------------------------------------------
++// COUNCIL — fan the same question to several models and combine the answers.
++// ----------------------------------------------------------------------------
++
++const DESC_COUNCIL =
++  "Convene a multi-model council: fan the same question to several models directly (bypasses the " +
++  "task tool's single-model limit) and combine their answers by strategy. See the `strategy` " +
++  "parameter for the seven modes and their aliases.\n\nMembers come from council.json — a " +
++  'per-project ".opencode/council.json" overrides the global config dir. Resolution: the inline ' +
++  "`members` argument, else the per-project file (a blank template is auto-created; entries with " +
++  'an empty "model" are skipped), else the global file.\n\nIf nothing is configured, the tool ' +
++  "seeds the global council.json with your current model and prints its path. A council needs at " +
++  "least two models; with one, use the normal task/subagent flow.\n"
++
++const PROMPT_COUNCIL =
++  "Convene a council on this request via `council`.\n\n$ARGUMENTS\n\n" +
++  "Pass user's question as `question`. If a strategy was named (council, compare, debate, moa, " +
++  "router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.\n\n" +
++  "Relay results as-is: synthesized/resolved answer for council/moa/debate; side-by-side for " +
++  "compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; chosen model " +
++  "for router.\n\nIf not configured, print returned file path and tell user to add two or more " +
++  '"provider/model" entries — do not invent models.\n'
++
++const CHAIR_SYSTEM =
++  "You are the chairman of an expert council. Judge and combine the members' answers rigorously and without bias."
++
++const STRATEGY_ALIASES: Record<string, string> = {
++  council: "council",
++  synth: "council",
++  compare: "compare",
++  sidebyside: "compare",
++  debate: "debate",
++  roundtable: "debate",
++  moa: "moa",
++  map: "moa",
++  router: "router",
++  route: "router",
++  consensus: "consensus",
++  vote: "consensus",
++  arena: "arena",
++}
++
++type CouncilInput = {
++  question?: string
++  strategy?: string
++  members?: string[]
++  rounds?: number
++}
++
++type MemberAnswer = { readonly member: MemberRef; readonly answer: string }
++
++// ----------------------------------------------------------------------------
++// Plugin
++// ----------------------------------------------------------------------------
++
++export const Plugin = define({
++  id: "opencode.personalize",
++  effect: Effect.fn(function* (ctx) {
++    const global = yield* Global.Service
++    const fs = yield* FSUtil.Service
++    const sessions = yield* Session.Service
++    const models = yield* Model.Service
++    const projectDirectory = ctx.location.directory
++
++    const globalCouncilPath = path.join(global.config, "council.json")
++    const schedulePath = path.join(global.config, "scheduled_tasks.json")
++
++    // -- shared: one-shot generation against a specific model -----------------
++    const askModel = Effect.fn(function* (input: {
++      parentID: SessionSchema.ID
++      title: string
++      model: ModelSchema.Ref
++      prompt: string
++    }) {
++      const child = yield* sessions.create({
++        parentID: input.parentID,
++        title: input.title,
++        model: input.model,
++      })
++      return yield* sessions.generate({ sessionID: child.id, prompt: input.prompt })
++    })
++
++    const loadMembers = Effect.fn(function* (inline: readonly string[] | undefined) {
++      if (inline !== undefined && inline.length > 0) {
++        const members: MemberRef[] = []
++        for (const raw of inline) {
++          const ref = parseModelRef(raw)
++          if (ref === undefined) return { error: `Invalid member "${raw}" — expected "provider/model".` }
++          members.push({ name: `member${members.length + 1}`, model: ref })
++        }
++        return { members }
++      }
++      const projectPath = path.join(projectDirectory, ".opencode", "council.json")
++      for (const file of [projectPath, globalCouncilPath]) {
++        const parsed = yield* readJsonSafe(fs, file)
++        if (parsed === undefined || typeof parsed !== "object" || parsed === null) continue
++        const entries = (parsed as { members?: { name?: string; model?: string }[] }).members ?? []
++        const members: MemberRef[] = []
++        for (const entry of entries) {
++          if (!entry.model) continue // blank template entries are skipped
++          const ref = parseModelRef(entry.model)
++          if (ref === undefined) continue
++          members.push({ name: entry.name || `member${members.length + 1}`, model: ref })
++        }
++        if (members.length > 0) return { members }
++      }
++      return { members: [] as MemberRef[] }
++    })
++
++    const seedCouncil = Effect.fn(function* (sessionID: SessionSchema.ID) {
++      const session = yield* sessions
++        .get(sessionID)
++        .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Cannot read session: ${cause}` })))
++      const current = session.model === undefined ? undefined : refToString(session.model)
++      const seed = {
++        members: [
++          { name: "current", model: current ?? "" },
++          { name: "member2", model: "" },
++        ],
++      }
++      yield* writeJsonSafe(fs, globalCouncilPath, seed)
++      return globalCouncilPath
++    })
++
++    // -------------------------------------------------------------------------
++    // Tools
++    // -------------------------------------------------------------------------
++    yield* ctx.tool.transform((editor) => {
++      // ---- distill_session --------------------------------------------------
++      editor.add({
++        name: "distill_session",
++        description: DESC_DISTILL,
++        options: { codemode: false },
++        input: {
++          type: "object",
++          properties: {
++            action: { type: "string", enum: ["run", "preview"], description: "run = score and save; preview = score only." },
++            project: { type: "boolean", description: "Save under project .opencode/skills instead of global skills dir." },
++            name: { type: "string", description: "Optional skill name override." },
++          },
++          additionalProperties: false,
++        },
++        execute: (raw, context) =>
++          Effect.gen(function* () {
++            const input = (raw ?? {}) as DistillInput
++            const messages = yield* sessions
++              .messages({ sessionID: context.sessionID })
++              .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Cannot read session: ${cause}` })))
++            const stats = captureTrajectory(messages)
++            const score = scoreTrajectory(stats)
++            const breakdown =
++              `RSI score: ${score.total}/100 (threshold ${THRESHOLD})\n` +
++              `- correctness ${score.correctness} | efficiency ${score.efficiency} | coverage ${score.coverage} | reproducibility ${score.reproducibility}\n` +
++              `- turns: ${stats.userTurns} user / ${stats.assistantTurns} assistant; tools: ${stats.toolCalls} calls, ${stats.toolErrors} errors, ${stats.distinctTools.length} distinct`
++            if (input.action === "preview") return text(breakdown)
++            if (score.total < THRESHOLD) {
++              return text(`${breakdown}\n\nNot distilled: score below threshold — nothing saved.`)
++            }
++            const session = yield* sessions
++              .get(context.sessionID)
++              .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Cannot read session: ${cause}` })))
++            const skillName = slugify(input.name ?? session.title ?? stats.firstUserText)
++            const body = yield* sessions
++              .generate({
++                sessionID: context.sessionID,
++                prompt:
++                  "Distill THIS session's trajectory into a reusable skill document (markdown). " +
++                  "Sections: Goal, Preconditions, Steps (tool-level, concrete), Pitfalls, Verification. " +
++                  "Be terse and imperative. Do not include transcript quotes or user-identifying data.",
++              })
++              .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Skill generation failed: ${cause}` })))
++            const dir = input.project
++              ? path.join(projectDirectory, ".opencode", "skills", skillName)
++              : path.join(global.config, "skills", skillName)
++            const file = path.join(dir, "SKILL.md")
++            const frontmatter =
++              `---\nname: ${skillName}\ndescription: Learned skill distilled from session (RSI ${score.total}/100).\n---\n\n`
++            yield* fs.makeDirectory(dir, { recursive: true }).pipe(Effect.ignore)
++            yield* fs
++              .writeFileString(file, frontmatter + body + "\n")
++              .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Cannot write skill: ${cause}` })))
++            return text(`${breakdown}\n\nSaved learned skill: ${file}`)
++          }),
++      })
++
++      // ---- schedule_task ----------------------------------------------------
++      editor.add({
++        name: "schedule_task",
++        description: DESC_SCHEDULE,
++        options: { codemode: false },
++        input: {
++          type: "object",
++          properties: {
++            action: { type: "string", enum: ["add", "list", "remove", "export"] },
++            name: { type: "string", description: "Schedule name (add/remove)." },
++            cadence: {
++              type: "string",
++              description: "5-field cron, @hourly/@daily/@weekly, or 'every N minutes/hours'.",
++            },
++            prompt: { type: "string", description: "What to do when due (add)." },
++          },
++          required: ["action"],
++          additionalProperties: false,
++        },
++        execute: (raw) =>
++          Effect.gen(function* () {
++            const input = (raw ?? {}) as ScheduleInput
++            const stored = yield* readJsonSafe(fs, schedulePath)
++            const tasks: ScheduleEntry[] = Array.isArray((stored as { tasks?: unknown[] } | undefined)?.tasks)
++              ? ((stored as { tasks: ScheduleEntry[] }).tasks ?? [])
++              : []
++            const now = new Date()
++            switch (input.action) {
++              case "add": {
++                if (!input.name || !input.cadence || !input.prompt)
++                  return yield* new Tool.Error({ message: "add requires name, cadence, and prompt." })
++                const cron = normalizeCadence(input.cadence)
++                if (cron === undefined)
++                  return yield* new Tool.Error({ message: `Unparseable cadence: "${input.cadence}"` })
++                const existing = tasks.findIndex((task) => task.name === input.name)
++                const entry: ScheduleEntry = {
++                  name: input.name,
++                  cadence: cron,
++                  prompt: input.prompt,
++                  created: now.toISOString(),
++                }
++                if (existing >= 0) tasks[existing] = entry
++                else tasks.push(entry)
++                yield* writeJsonSafe(fs, schedulePath, { tasks })
++                const upcoming = nextRun(cron, now)
++                return text(
++                  `${existing >= 0 ? "Updated" : "Recorded"} schedule "${input.name}" (${cron}). Next: ${
++                    upcoming === undefined ? "never" : upcoming.toISOString()
++                  }\nTotal schedules: ${tasks.length}`,
++                )
++              }
++              case "remove": {
++                if (!input.name) return yield* new Tool.Error({ message: "remove requires name." })
++                const remaining = tasks.filter((task) => task.name !== input.name)
++                if (remaining.length === tasks.length)
++                  return text(`No schedule named "${input.name}". ${tasks.length} schedule(s) remain.`)
++                yield* writeJsonSafe(fs, schedulePath, { tasks: remaining })
++                return text(`Removed "${input.name}". ${remaining.length} schedule(s) remain.`)
++              }
++              case "export":
++                return text(JSON.stringify({ path: schedulePath, tasks }, null, 2))
++              case "list":
++              default: {
++                if (tasks.length === 0) return text(`No schedules. Store: ${schedulePath}`)
++                const lines = tasks.map((task) => {
++                  const due = isDue(task, now)
++                  const upcoming = nextRun(task.cadence, now)
++                  return `- ${task.name} (${task.cadence})${due ? " — DUE NOW" : ""} | next: ${
++                    upcoming === undefined ? "never" : upcoming.toISOString()
++                  } | ${task.prompt.slice(0, 80)}`
++                })
++                return text(lines.join("\n"))
++              }
++            }
++          }),
++      })
++
++      // ---- council ----------------------------------------------------------
++      editor.add({
++        name: "council",
++        description: DESC_COUNCIL,
++        options: { codemode: false },
++        input: {
++          type: "object",
++          properties: {
++            question: { type: "string", description: "The question to put to the council." },
++            strategy: {
++              type: "string",
++              description:
++                "council (chairman synthesizes), compare (side by side), debate (members argue over " +
++                "`rounds`, chairman resolves), moa (Mixture-of-Agents aggregate), router (chairman " +
++                "picks best-suited member), consensus (members score each other; highest total wins), " +
++                "arena (user picks). Aliases: synth, sidebyside, roundtable, map, route, vote.",
++            },
++            members: {
++              type: "array",
++              items: { type: "string" },
++              description:
++                'Inline override of the council members for this call: an array of "provider/model" strings. ' +
++                "When omitted, members are read from council.json.",
++            },
++            rounds: { type: "number", description: "Debate rounds (debate strategy only, default 2)." },
++          },
++          required: ["question"],
++          additionalProperties: false,
++        },
++        execute: (raw, context) =>
++          Effect.gen(function* () {
++            const input = (raw ?? {}) as CouncilInput
++            const question = (input.question ?? "").trim()
++            if (!question) return yield* new Tool.Error({ message: "council requires a question." })
++            const strategy = STRATEGY_ALIASES[(input.strategy ?? "council").toLowerCase()] ?? "council"
++            const resolved = yield* loadMembers(input.members)
++            if ("error" in resolved) return yield* new Tool.Error({ message: resolved.error! })
++            let members = resolved.members ?? []
++            if (members.length === 0) {
++              const seeded = yield* seedCouncil(context.sessionID).pipe(
++                Effect.mapError((cause) => new Tool.Error({ message: `Cannot seed council.json: ${cause}` })),
++              )
++              return text(
++                `No council configured — seeded a template at:\n${seeded}\n` +
++                  'Add two or more "provider/model" entries, then retry. Available models can be listed via the models command.',
++              )
++            }
++            // Validate against the live provider registry; unknown models are skipped with a note.
++            const available = yield* models.available()
++            const known = new Set(available.map((model) => `${model.providerID}/${model.id}`))
++            const notes: string[] = []
++            members = members.filter((member) => {
++              if (known.has(refToString(member.model))) return true
++              notes.push(`Skipped unknown model: ${refToString(member.model)}`)
++              return false
++            })
++            if (members.length < 2)
++              return yield* new Tool.Error({
++                message:
++                  `A council needs at least two valid members (have ${members.length}` +
++                  `${notes.length > 0 ? `; ${notes.join("; ")}` : ""}). With one, use the normal task/subagent flow.`,
++              })
++
++            const ask = (member: MemberRef, prompt: string) =>
++              askModel({
++                parentID: context.sessionID,
++                title: `council:${member.name}`,
++                model: member.model,
++                prompt,
++              }).pipe(
++                Effect.map((answer) => ({ member, answer }) as MemberAnswer),
++                Effect.catchAll((cause) =>
++                  Effect.succeed({ member, answer: `[${refToString(member.model)} failed: ${cause}]` } as MemberAnswer),
++                ),
++              )
++
++            const chair = (prompt: string) =>
++              sessions
++                .generate({ sessionID: context.sessionID, prompt: `${CHAIR_SYSTEM}\n\n${prompt}` })
++                .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Chairman generation failed: ${cause}` })))
++
++            const banner = (answers: readonly MemberAnswer[]) =>
++              answers
++                .map((entry) => `## ${entry.member.name} (${refToString(entry.member.model)})\n${entry.answer}`)
++                .join("\n\n")
++
++            const header = notes.length > 0 ? notes.join("\n") + "\n\n" : ""
++
++            switch (strategy) {
++              case "compare":
++              case "arena": {
++                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
++                  concurrency: members.length,
++                })
++                const suffix = strategy === "arena" ? "\n\n(Ask the user which answer to keep.)" : ""
++                return text(header + banner(answers) + suffix)
++              }
++              case "router": {
++                const roster = members
++                  .map((member, index) => `${index + 1}. ${member.name}: ${refToString(member.model)}`)
++                  .join("\n")
++                const verdict = yield* chair(
++                  `Pick the single council member best suited to answer the question. Reply with the member's number only.\n\nMembers:\n${roster}\n\nQuestion:\n${question}`,
++                )
++                const index = Number((verdict.match(/\d+/) ?? ["1"])[0]) - 1
++                const chosen = members[Math.min(Math.max(index, 0), members.length - 1)]!
++                const answer = yield* ask(chosen, question)
++                return text(
++                  `${header}Routed to ${chosen.name} (${refToString(chosen.model)}).\n\n${answer.answer}`,
++                )
++              }
++              case "moa": {
++                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
++                  concurrency: members.length,
++                })
++                const synthesis = yield* chair(
++                  `Aggregate the member proposals below into one higher-quality answer (Mixture-of-Agents). Do not mention the members.\n\n${banner(answers)}\n\nQuestion:\n${question}`,
++                )
++                return text(header + synthesis)
++              }
++              case "debate": {
++                const rounds = Math.min(Math.max(Math.round(input.rounds ?? 2), 1), 5)
++                let answers = yield* Effect.forEach(members, (member) => ask(member, question), {
++                  concurrency: members.length,
++                })
++                for (let round = 2; round <= rounds; round += 1) {
++                  const transcript = banner(answers)
++                  answers = yield* Effect.forEach(
++                    members,
++                    (member) =>
++                      ask(
++                        member,
++                        `Round ${round} of a debate. Your previous position and the others' are below. Defend or revise your answer; attack weak arguments directly.\n\n${transcript}\n\nQuestion:\n${question}`,
++                      ),
++                    { concurrency: members.length },
++                  )
++                }
++                const resolution = yield* chair(
++                  `Resolve this debate: declare the strongest final position and justify briefly.\n\n${banner(answers)}\n\nQuestion:\n${question}`,
++                )
++                return text(header + resolution)
++              }
++              case "consensus": {
++                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
++                  concurrency: members.length,
++                })
++                const scores = new Map<string, number>()
++                for (const judge of members) {
++                  const ballot = yield* ask(
++                    judge,
++                    `Score EACH candidate answer 1-10 for correctness and quality. Reply ONLY with lines like ` +
++                      `"<member>: <score>".\n\n${banner(answers)}\n\nQuestion:\n${question}`,
++                  )
++                  for (const entry of answers) {
++                    const match = ballot.answer.match(new RegExp(`${entry.member.name}\\s*[:=]\\s*(\\d+(?:\\.\\d+)?)`, "i"))
++                    if (!match) continue
++                    scores.set(entry.member.name, (scores.get(entry.member.name) ?? 0) + Number(match[1]))
++                  }
++                }
++                const ranked = [...answers].sort(
++                  (a, b) => (scores.get(b.member.name) ?? 0) - (scores.get(a.member.name) ?? 0),
++                )
++                const winner = ranked[0]!
++                const scoreboard = ranked
++                  .map((entry) => `- ${entry.member.name}: ${scores.get(entry.member.name) ?? 0}`)
++                  .join("\n")
++                return text(
++                  `${header}Winner: ${winner.member.name} (${refToString(winner.member.model)})\n\nScoreboard:\n${scoreboard}\n\n${winner.answer}`,
++                )
++              }
++              case "council":
++              default: {
++                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
++                  concurrency: members.length,
++                })
++                const synthesis = yield* chair(
++                  `Synthesize the council answers below into one final answer. Resolve disagreements explicitly.\n\n${banner(answers)}\n\nQuestion:\n${question}`,
++                )
++                return text(header + synthesis)
++              }
++            }
++          }),
++      })
++    })
++
++    // -------------------------------------------------------------------------
++    // Commands — thin prompt wrappers that drive the tools above.
++    // -------------------------------------------------------------------------
++    yield* ctx.command.transform((editor) => {
++      const relay = (template: string, description: string, name: string) =>
++        editor.add({
++          name,
++          description,
++          execute: (input) =>
++            ctx.session.prompt({
++              ...input.prompt,
++              sessionID: input.sessionID,
++              text: template.replace("$ARGUMENTS", input.prompt.text ?? ""),
++            }),
++        })
++      relay(PROMPT_DISTILL, "Distill this session into a reusable learned skill (RSI).", "distill")
++      relay(PROMPT_SCHEDULE, "Manage deterministic qm-style background schedules.", "schedule")
++      relay(PROMPT_COUNCIL, "Convene a multi-model council on a question.", "council")
++    })
++  }),
++})
