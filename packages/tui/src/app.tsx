@@ -474,7 +474,7 @@ function App() {
   const toast = useToast()
   const updater = useUpdateNotification()
   const theme = useTheme()
-  const { mode, supports, setMode, locked, lock, unlock, afterPaint } = useThemes()
+  const { mode, supports, setMode, locked, lock, unlock, afterPaint, toggleTransparent } = useThemes()
   const data = useData()
   const location = useLocation()
   const exit = useExit()
@@ -927,6 +927,14 @@ function App() {
         slash: { name: "mcps" },
         run: () => {
           dialog.replace(() => <DialogMcp />)
+        },
+      },
+      {
+        name: "theme.transparent",
+        title: "Toggle transparency",
+        category: "System",
+        run: () => {
+          toggleTransparent()
         },
       },
       {
