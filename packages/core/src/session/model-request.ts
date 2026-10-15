@@ -97,6 +97,59 @@ export const outputLimit = (
   return Math.min(requested, Math.max(OUTPUT_TOKEN_MIN, room))
 }
 
+//PATCH START to custom ROLE>
+// 2.0.29 re-anchor: the old request.ts:60 (`input.agent.prompt ? [...] : SystemPrompt.provider(model)`)
+// became `input.agent.system ? ... : SessionSystemPrompt.make(...)` below — the single read-site for the
+// lead system prompt, shared by runner/llm.ts, generate.ts and compaction.ts. Persona LEADS and the stock
+// identity opener is stripped; empty persona => byte-identical stock behavior. role.json root: the old
+// InstanceState.context worktree is not threaded into this pure helper, so we use OPENCODE_ROLE_FILE,
+// else <cwd>/.opencode/role.json (server cwd is the project directory).
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { dirname, join, resolve as resolvePath } from "node:path"
+
+type RoleEvalConfig = {
+  usersystem: string
+  assistant_system: string
+}
+
+function loadRoleEvalConfig(): RoleEvalConfig {
+  const file = process.env.OPENCODE_ROLE_FILE
+    ? resolvePath(process.env.OPENCODE_ROLE_FILE)
+    : join(process.cwd(), ".opencode", "role.json")
+
+  const stock: RoleEvalConfig = {
+    usersystem: "",
+    assistant_system: "",
+  }
+
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    if (!existsSync(file)) {
+      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
+      return stock
+    }
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleEvalConfig>
+    return {
+      usersystem: typeof parsed.usersystem === "string" ? parsed.usersystem : "",
+      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
+    }
+  } catch {
+    return stock
+  }
+}
+
+function stripIdentity(prompt: string) {
+  // beast.txt fused identity with the "keep going until resolved" instruction in sentence one - leave it intact.
+  if (prompt.startsWith("You are opencode, an agent")) return prompt
+  // 2.0.29 stock opener (runner/prompt/system.txt): "You are an AI agent running in OpenCode, a coding agent
+  // harness." — identity-only sentence; instruction starts at sentence two ("Help the user accomplish...").
+  // trinity.txt ("You are opencode, an interactive CLI tool...") is caught by the generic rule below.
+  return prompt
+    .replace(/^You are an AI agent running in OpenCode,[^.]*\.\s*/, "")
+    .replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
+}
+//PATCH END,P1.P2 is the CUSTOM-ROLE-SYSTEM block inside baseTranscript.
+
 export const baseTranscript = (input: {
   readonly agent: Agent.Info
   readonly model: SessionRunnerModel.Resolved
@@ -105,14 +158,18 @@ export const baseTranscript = (input: {
   readonly messages: ReadonlyArray<SessionMessage.Info>
 }) => {
   const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
+  // CUSTOM-ROLE-SYSTEM START
+  const persona = loadRoleEvalConfig().assistant_system
+  const stock = input.agent.system
+    ? input.agent.system
+    : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name))
+  const lead = persona
+    ? [persona, stripIdentity(stock)].filter((part) => part.length > 0).join("\n")
+    : stock
+  // CUSTOM-ROLE-SYSTEM END
   return {
     providerMetadataKey,
-    system: [
-      input.agent.system
-        ? input.agent.system
-        : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
-      input.initial,
-    ]
+    system: [lead, input.initial]
       .filter((part) => part.length > 0)
       .map(SystemPart.make),
     messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
