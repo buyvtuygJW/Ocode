@@ -307,6 +307,30 @@ jobs:
             return 0
           }
 
+          # Upstream's 2.x naming refactor renamed packages/opencode -> packages/cli
+          # (and its dist dirs from opencode-<platform> -> cli-<platform>, and the
+          # build flag --skip-embed-web-ui -> --skip-web-ui). Fallback builds can
+          # still check out old 1.x refs, so BOTH layouts must keep working:
+          # resolve everything per-checkout instead of hardcoding either one.
+          locate_opencode_pkg() {
+            if [ -f packages/opencode/package.json ]; then
+              echo "packages/opencode"
+            elif [ -f packages/cli/package.json ]; then
+              echo "packages/cli"
+            else
+              return 1
+            fi
+          }
+
+          dist_prefix_for() {
+            # build.ts names each dist subdir "<target>" with the binary name replaced:
+            # old tree -> "opencode-linux-x64", renamed tree -> "cli-linux-x64".
+            case "$1" in
+              packages/cli) echo "cli" ;;
+              *) echo "opencode" ;;
+            esac
+          }
+
           resolve_opencode_version() {
             # The build stamps this string into the binary via --define OPENCODE_VERSION,
             # and the SAME string becomes the process user-agent: opencode/<version>.
@@ -327,7 +351,7 @@ jobs:
             # 1) honour an explicit override, 2) else the upstream tree's own version
             if [ -z "$v" ]; then
               v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-                     packages/opencode/package.json 2>/dev/null | head -1 || true)"
+                     "$(locate_opencode_pkg 2>/dev/null || echo packages/opencode)/package.json" 2>/dev/null | head -1 || true)"
             fi
 
             # 3) last resort: whatever upstream actually published
@@ -363,17 +387,26 @@ jobs:
             if ! resolve_opencode_version; then
               return 1
             fi
-            if ! bun run --cwd packages/opencode build -- --skip-embed-web-ui; then
+            local pkg prefix flag
+            if ! pkg="$(locate_opencode_pkg)"; then
+              echo "ERROR: no CLI package found (neither packages/opencode nor packages/cli has a package.json)"
+              return 1
+            fi
+            prefix="$(dist_prefix_for "$pkg")"
+            flag="--skip-embed-web-ui"
+            [ "$pkg" = "packages/cli" ] && flag="--skip-web-ui"
+            echo "CLI package dir: $pkg (dist prefix: $prefix, web-ui flag: $flag)"
+            if ! bun run --cwd "$pkg" build -- "$flag"; then
               echo "opencode build failed"
               return 1
             fi
             echo "Checking expected build outputs..."
             for d in \
-              opencode-windows-x64 opencode-windows-x64-baseline \
-              opencode-linux-x64 opencode-linux-x64-baseline opencode-linux-arm64 \
-              opencode-darwin-x64 opencode-darwin-x64-baseline opencode-darwin-arm64; do
-              if [ ! -d "packages/opencode/dist/$d" ]; then
-                echo "missing build output: $d"
+              windows-x64 windows-x64-baseline \
+              linux-x64 linux-x64-baseline linux-arm64 \
+              darwin-x64 darwin-x64-baseline darwin-arm64; do
+              if [ ! -d "$pkg/dist/$prefix-$d" ]; then
+                echo "missing build output: $prefix-$d"
                 return 1
               fi
             done
@@ -383,7 +416,7 @@ jobs:
             # checks that the binary starts -- it never looks at the number.
             echo "Verifying the stamped version survived into the binary..."
             local bin
-            bin="$(find packages/opencode/dist/opencode-linux-x64 -type f -name opencode \
+            bin="$(find "$pkg/dist/$prefix-linux-x64" -type f -name opencode \
                    -perm -u+x 2>/dev/null | head -1 || true)"
             if [ -z "$bin" ]; then
               echo "ERROR: could not locate the linux-x64 opencode binary to verify"
@@ -522,7 +555,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Old upstream layout vs post-rename layout (packages/opencode -> packages/cli,
+          # dist subdirs opencode-<plat> -> cli-<plat>). Release ASSET names stay the same.
           DIST="opencode-src/packages/opencode/dist"
+          PREFIX="opencode"
+          if [ ! -d "$DIST" ]; then
+            DIST="opencode-src/packages/cli/dist"
+            PREFIX="cli"
+          fi
+          echo "DIST=$DIST (prefix: $PREFIX)"
           OUT="$PWD/out"
 
           rm -rf "$OUT"
@@ -542,16 +583,16 @@ jobs:
             tar -czf "$OUT/$name.tar.gz" -C "$src/bin" .
           }
 
-          package_zip "$DIST/opencode-windows-x64" "opencode-windows-x64-custom"
-          package_zip "$DIST/opencode-windows-x64-baseline" "opencode-windows-x64-baseline-custom"
+          package_zip "$DIST/$PREFIX-windows-x64" "opencode-windows-x64-custom"
+          package_zip "$DIST/$PREFIX-windows-x64-baseline" "opencode-windows-x64-baseline-custom"
 
-          package_tar "$DIST/opencode-linux-x64" "opencode-linux-x64-custom"
-          package_tar "$DIST/opencode-linux-x64-baseline" "opencode-linux-x64-baseline-custom"
-          package_tar "$DIST/opencode-linux-arm64" "opencode-linux-arm64-custom"
+          package_tar "$DIST/$PREFIX-linux-x64" "opencode-linux-x64-custom"
+          package_tar "$DIST/$PREFIX-linux-x64-baseline" "opencode-linux-x64-baseline-custom"
+          package_tar "$DIST/$PREFIX-linux-arm64" "opencode-linux-arm64-custom"
 
-          package_zip "$DIST/opencode-darwin-x64" "opencode-darwin-x64-custom"
-          package_zip "$DIST/opencode-darwin-x64-baseline" "opencode-darwin-x64-baseline-custom"
-          package_zip "$DIST/opencode-darwin-arm64" "opencode-darwin-arm64-custom"
+          package_zip "$DIST/$PREFIX-darwin-x64" "opencode-darwin-x64-custom"
+          package_zip "$DIST/$PREFIX-darwin-x64-baseline" "opencode-darwin-x64-baseline-custom"
+          package_zip "$DIST/$PREFIX-darwin-arm64" "opencode-darwin-arm64-custom"
 
           # Optional science-skills pack (best-effort; only for a 'latest' release; NEVER fails the build).
           # Skills are too many to compile into the binary, so they ship as a downloadable asset.
