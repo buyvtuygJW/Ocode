@@ -4,12 +4,12 @@ Subject: [PATCH] tui: stop @opentui/core eating ctrl+a inside dialog filter inpu
 Fixes: ctrl+a in the model-selection dialog moves the cursor (visible as the accent
        coloured cursor cell jumping to column 0) instead of opening the provider list.
 
-Upstream base: anomalyco/opencode @ f96e6aa6ed3f0a9c027da4eb7c4fba248426152b
+Upstream base: anomalyco/opencode @ 0ccfe69ff386e56751141adbabbde635d3dba102 (2.0.29 re-anchor)
 Verified against: @opentui/core@0.4.5 (bun cache copy on this box)
 
 ROOT CAUSE (all line numbers read from shipped code, not guessed)
 
-  1. packages/tui/src/config/keybind.ts:116
+  1. packages/tui/src/config/keybind.ts:163
          model_provider_list: keybind("ctrl+a", "Open provider list from model dialog")
      -> command "model.dialog.provider" (keybind.ts:370)
 
@@ -72,29 +72,31 @@ WHY THE FIX IS SHAPED THIS WAY
   Inside the filter box, Home still reaches buffer-home (index.bun.js:6366).
 
 diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
+index 6b1652035..0bd481907 100644
 --- a/packages/tui/src/ui/dialog-select.tsx
 +++ b/packages/tui/src/ui/dialog-select.tsx
-@@ -1,9 +1,10 @@
- import {
-   InputRenderable,
-   RGBA,
-   ScrollBoxRenderable,
-   TextAttributes,
+@@ -1,4 +1,11 @@
+-import { CliRenderEvents, InputRenderable, RGBA, ScrollBoxRenderable, TextAttributes } from "@opentui/core"
++import {
++  CliRenderEvents,
++  InputRenderable,
++  RGBA,
++  ScrollBoxRenderable,
++  TextAttributes,
 +  type KeyBinding,
-   type KeyEvent,
-   type Renderable,
- } from "@opentui/core"
- import type { Binding } from "@opentui/keymap"
-@@ -19,5 +20,21 @@
- import { getScrollAcceleration } from "../util/scroll"
- import { useTuiConfig } from "../config"
- import { formatKeyBindings, useBindings, useKeymapSelector } from "../keymap"
-
++} from "@opentui/core"
+ import { Keymap, type KeymapCommand } from "../context/keymap"
+ import { useTheme } from "../context/theme"
+ import { entries, filter, flatMap, groupBy, pipe } from "remeda"
+@@ -13,6 +20,23 @@ import { getScrollAcceleration } from "../util/scroll"
+ import { useConfig } from "../config"
+ import { moveSelection, reconcileSelection } from "./select-controller"
+ 
 +// @opentui/core's editors carry their own hard-coded key table
 +// (defaultTextareaKeyBindings) and TextareaRenderable.handleKeyPress() consumes a match
 +// before the keymap is ever consulted. ctrl+a is "line-home" in that table, so while
 +// this filter input holds focus it swallowed any dialog action bound to ctrl+a - which
-+// is what keybind.ts ships as `model_provider_list`, "Open provider list from model
++// is what keybind.ts ships as `model.dialog.provider`, "Open provider list from model
 +// dialog". Symptom: the cursor jumps to column 0 in the accent `cursorColor` and the
 +// provider list never opens.
 +//
@@ -108,11 +110,13 @@ diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-
 +] as unknown as KeyBinding[]
 +
  export interface DialogSelectProps<T> {
-@@ -506,6 +523,7 @@
+   title: string
+   titleView?: JSX.Element
+@@ -692,6 +716,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                    props.onFilter?.(e)
                  })
                }}
 +              keyBindings={FILTER_KEY_BINDINGS}
-               focusedBackgroundColor={theme.backgroundPanel}
-               cursorColor={theme.primary}
-               focusedTextColor={theme.textMuted}
+               focusedBackgroundColor={theme.background.formfield.focused}
+               cursorColor={theme.text.formfield.focused}
+               cursorStyle={config.cursor}

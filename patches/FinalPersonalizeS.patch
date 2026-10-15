@@ -1,11 +1,11 @@
-diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 536a642..8f46eee 100644
---- a/packages/opencode/src/agent/agent.ts
-+++ b/packages/opencode/src/agent/agent.ts
-@@ -14,6 +14,15 @@ import PROMPT_COMPACTION from "./prompt/compaction.txt"
- import PROMPT_EXPLORE from "./prompt/explore.txt"
- import PROMPT_SUMMARY from "./prompt/summary.txt"
- import PROMPT_TITLE from "./prompt/title.txt"
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+index eaa443ae4..f25e566ea 100644
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -3,6 +3,15 @@ export * as AgentPlugin from "./agent.js"
+ import { define } from "@opencode/plugin/effect/plugin"
+ import { Effect } from "effect"
+ import { Agent } from "../agent.js"
 +import PROMPT_RESEARCH from "./prompt/research.txt"
 +import PROMPT_BIOLOGY from "./prompt/biology.txt"
 +import PROMPT_PHYSICS from "./prompt/physics.txt"
@@ -15,203 +15,159 @@ index 536a642..8f46eee 100644
 +import PROMPT_CRITIQUE from "./prompt/critique.txt"
 +import PROMPT_PHYSICS_CRITIQUE from "./prompt/physics-critique.txt"
 +import PROMPT_REVIEWER from "./prompt/reviewer.txt"
- import { Permission } from "@/permission"
- import { mergeDeep, pipe, sortBy, values } from "remeda"
- import { Global } from "@opencode-ai/core/global"
-@@ -153,6 +162,188 @@ const layer = Layer.effect(
-             mode: "primary",
-             native: true,
-           },
-+          // --- OpenScience research agents (optional patch: FinalPersonalizeS) ---
-+          research: {
-+            name: "research",
-+            description:
-+              "Scientific research agent — literature review, data analysis, cloud GPU compute, and synthesis across a bundled science skill library.",
-+            options: {},
-+            color: "#06b6d4",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                question: "allow",
-+                plan_enter: "allow",
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_RESEARCH,
-+            mode: "primary",
-+            native: true,
-+          },
-+          biology: {
-+            name: "biology",
-+            description:
-+              "Computational biology agent — bioinformatics analysis, 30+ biological database integrations, and systematic data-to-answer workflows.",
-+            options: {},
-+            color: "#10b981",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                question: "allow",
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_BIOLOGY,
-+            mode: "all",
-+            native: true,
-+          },
-+          physics: {
-+            name: "physics",
-+            description:
-+              "Computational physics agent — simulation, PDE solving, dynamical systems, symbolic regression, data analysis, and scientific computing.",
-+            options: {},
-+            color: "#8b5cf6",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                question: "allow",
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_PHYSICS,
-+            mode: "all",
-+            native: true,
-+          },
-+          ml: {
-+            name: "ml",
-+            description:
-+              "Machine learning agent — trains, evaluates, and analyzes models end-to-end (deep learning, LLMs, classical ML, RL) with rigorous evaluation, and builds specialized models to replace frontier APIs.",
-+            options: {},
-+            color: "#6366f1",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                question: "allow",
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_ML,
-+            mode: "all",
-+            native: true,
-+          },
-+          write: {
-+            name: "write",
-+            description:
-+              "Scientific & technical writing. Produces LaTeX papers, grants, literature reviews with verified citations and figures.",
-+            options: {},
-+            color: "#a78bfa",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                question: "allow",
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_WRITE,
-+            mode: "subagent",
-+            native: true,
-+          },
-+          "literature-review": {
-+            name: "literature-review",
-+            description:
-+              "Full PRISMA literature review — systematic search, screening, eligibility, synthesis, verification.",
-+            options: {},
-+            color: "#818cf8",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                "*": "deny",
-+                bash: "allow",
-+                read: "allow",
-+                glob: "allow",
-+                grep: "allow",
-+                webfetch: "allow",
-+                websearch: "allow",
-+                skill: "allow",
-+                external_directory: readonlyExternalDirectory,
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_LITERATURE_REVIEW,
-+            mode: "subagent",
-+            native: true,
-+          },
-+          critique: {
-+            name: "critique",
-+            steps: 60,
-+            description:
-+              "Scientific critique specialist. Finds blocking errors — data leakage, wrong statistics, unsupported claims — in research artifacts before expensive or irreversible actions. Read-only.",
-+            options: {},
-+            color: "#ef4444",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                "*": "deny",
-+                read: "allow",
-+                glob: "allow",
-+                grep: "allow",
-+                skill: "allow",
-+                external_directory: readonlyExternalDirectory,
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_CRITIQUE,
-+            mode: "subagent",
-+            native: true,
-+          },
-+          "physics-critique": {
-+            name: "physics-critique",
-+            steps: 60,
-+            description:
-+              "Physics critique specialist — validates computational physics results (PDE solutions, PINN outputs, fitted parameters) against rigorous physical and numerical criteria. Read-only.",
-+            options: {},
-+            color: "#c084fc",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                "*": "deny",
-+                read: "allow",
-+                glob: "allow",
-+                grep: "allow",
-+                bash: "allow",
-+                external_directory: readonlyExternalDirectory,
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_PHYSICS_CRITIQUE,
-+            mode: "subagent",
-+            native: true,
-+          },
-+          reviewer: {
-+            name: "reviewer",
-+            steps: 60,
-+            description:
-+              "Blind, adversarial reviewer of research outputs. Traces every claim, number, and figure back to evidence — flags citation mismatches, untraceable numbers, and figure/stat mismatches. Read-only.",
-+            options: {},
-+            color: "#f59e0b",
-+            permission: Permission.merge(
-+              defaults,
-+              Permission.fromConfig({
-+                "*": "deny",
-+                read: "allow",
-+                glob: "allow",
-+                grep: "allow",
-+                bash: "allow",
-+                skill: "allow",
-+                external_directory: readonlyExternalDirectory,
-+              }),
-+              user,
-+            ),
-+            prompt: PROMPT_REVIEWER,
-+            mode: "subagent",
-+            native: true,
-+          },
-           plan: {
-             name: "plan",
-             description: "Plan mode. Disallows all edit tools.",
-diff --git a/packages/opencode/src/agent/prompt/biology.txt b/packages/opencode/src/agent/prompt/biology.txt
+ 
+ const PROMPT_EXPLORE = `You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
+ 
+@@ -138,6 +147,144 @@ export const Plugin = define({
+         item.system = PROMPT_SUMMARY
+         item.permissions.push({ action: "*", resource: "*", effect: "deny" })
+       })
++
++      // --- OpenScience research agents (optional patch: FinalPersonalizeS) ---
++      editor.update(Agent.ID.make("research"), (item) => {
++        item.name = Agent.Name.make("Research")
++        item.description =
++          "Scientific research agent — literature review, data analysis, cloud GPU compute, and synthesis across a bundled science skill library."
++        item.system = PROMPT_RESEARCH
++        item.mode = "primary"
++        item.color = "#06b6d4"
++        item.permissions.push({ action: "question", resource: "*", effect: "allow" })
++      })
++
++      editor.update(Agent.ID.make("biology"), (item) => {
++        item.name = Agent.Name.make("Biology")
++        item.description =
++          "Computational biology agent — bioinformatics analysis, 30+ biological database integrations, and systematic data-to-answer workflows."
++        item.system = PROMPT_BIOLOGY
++        item.mode = "all"
++        item.color = "#10b981"
++        item.permissions.push({ action: "question", resource: "*", effect: "allow" })
++      })
++
++      editor.update(Agent.ID.make("physics"), (item) => {
++        item.name = Agent.Name.make("Physics")
++        item.description =
++          "Computational physics agent — simulation, PDE solving, dynamical systems, symbolic regression, data analysis, and scientific computing."
++        item.system = PROMPT_PHYSICS
++        item.mode = "all"
++        item.color = "#8b5cf6"
++        item.permissions.push({ action: "question", resource: "*", effect: "allow" })
++      })
++
++      editor.update(Agent.ID.make("ml"), (item) => {
++        item.name = Agent.Name.make("ML")
++        item.description =
++          "Machine learning agent — trains, evaluates, and analyzes models end-to-end (deep learning, LLMs, classical ML, RL) with rigorous evaluation, and builds specialized models to replace frontier APIs."
++        item.system = PROMPT_ML
++        item.mode = "all"
++        item.color = "#6366f1"
++        item.permissions.push({ action: "question", resource: "*", effect: "allow" })
++      })
++
++      editor.update(Agent.ID.make("write"), (item) => {
++        item.name = Agent.Name.make("Write")
++        item.description =
++          "Scientific & technical writing. Produces LaTeX papers, grants, literature reviews with verified citations and figures."
++        item.system = PROMPT_WRITE
++        item.mode = "subagent"
++        item.color = "#a78bfa"
++        item.permissions.push({ action: "question", resource: "*", effect: "allow" })
++      })
++
++      editor.update(Agent.ID.make("literature-review"), (item) => {
++        item.name = Agent.Name.make("Literature Review")
++        item.description =
++          "Full PRISMA literature review — systematic search, screening, eligibility, synthesis, verification."
++        item.system = PROMPT_LITERATURE_REVIEW
++        item.mode = "subagent"
++        item.color = "#818cf8"
++        item.permissions.push(
++          { action: "*", resource: "*", effect: "deny" },
++          { action: "shell", resource: "*", effect: "allow" },
++          { action: "read", resource: "*", effect: "allow" },
++          { action: "read", resource: "*.env", effect: "ask" },
++          { action: "read", resource: "*.env.*", effect: "ask" },
++          { action: "read", resource: "*.env.example", effect: "allow" },
++          { action: "glob", resource: "*", effect: "allow" },
++          { action: "grep", resource: "*", effect: "allow" },
++          { action: "webfetch", resource: "*", effect: "allow" },
++          { action: "websearch", resource: "*", effect: "allow" },
++          { action: "skill", resource: "*", effect: "allow" },
++          { action: "external_directory", resource: "*", effect: "allow" },
++        )
++      })
++
++      editor.update(Agent.ID.make("critique"), (item) => {
++        item.name = Agent.Name.make("Critique")
++        item.steps = 60
++        item.description =
++          "Scientific critique specialist. Finds blocking errors — data leakage, wrong statistics, unsupported claims — in research artifacts before expensive or irreversible actions. Read-only."
++        item.system = PROMPT_CRITIQUE
++        item.mode = "subagent"
++        item.color = "#ef4444"
++        item.permissions.push(
++          { action: "*", resource: "*", effect: "deny" },
++          { action: "read", resource: "*", effect: "allow" },
++          { action: "read", resource: "*.env", effect: "ask" },
++          { action: "read", resource: "*.env.*", effect: "ask" },
++          { action: "read", resource: "*.env.example", effect: "allow" },
++          { action: "glob", resource: "*", effect: "allow" },
++          { action: "grep", resource: "*", effect: "allow" },
++          { action: "skill", resource: "*", effect: "allow" },
++          { action: "external_directory", resource: "*", effect: "allow" },
++        )
++      })
++
++      editor.update(Agent.ID.make("physics-critique"), (item) => {
++        item.name = Agent.Name.make("Physics Critique")
++        item.steps = 60
++        item.description =
++          "Physics critique specialist — validates computational physics results (PDE solutions, PINN outputs, fitted parameters) against rigorous physical and numerical criteria. Read-only."
++        item.system = PROMPT_PHYSICS_CRITIQUE
++        item.mode = "subagent"
++        item.color = "#c084fc"
++        item.permissions.push(
++          { action: "*", resource: "*", effect: "deny" },
++          { action: "read", resource: "*", effect: "allow" },
++          { action: "read", resource: "*.env", effect: "ask" },
++          { action: "read", resource: "*.env.*", effect: "ask" },
++          { action: "read", resource: "*.env.example", effect: "allow" },
++          { action: "glob", resource: "*", effect: "allow" },
++          { action: "grep", resource: "*", effect: "allow" },
++          { action: "shell", resource: "*", effect: "allow" },
++          { action: "external_directory", resource: "*", effect: "allow" },
++        )
++      })
++
++      editor.update(Agent.ID.make("reviewer"), (item) => {
++        item.name = Agent.Name.make("Reviewer")
++        item.steps = 60
++        item.description =
++          "Blind, adversarial reviewer of research outputs. Traces every claim, number, and figure back to evidence — flags citation mismatches, untraceable numbers, and figure/stat mismatches. Read-only."
++        item.system = PROMPT_REVIEWER
++        item.mode = "subagent"
++        item.color = "#f59e0b"
++        item.permissions.push(
++          { action: "*", resource: "*", effect: "deny" },
++          { action: "read", resource: "*", effect: "allow" },
++          { action: "read", resource: "*.env", effect: "ask" },
++          { action: "read", resource: "*.env.*", effect: "ask" },
++          { action: "read", resource: "*.env.example", effect: "allow" },
++          { action: "glob", resource: "*", effect: "allow" },
++          { action: "grep", resource: "*", effect: "allow" },
++          { action: "shell", resource: "*", effect: "allow" },
++          { action: "skill", resource: "*", effect: "allow" },
++          { action: "external_directory", resource: "*", effect: "allow" },
++        )
++      })
+     })
+   }),
+ })
+diff --git a/packages/core/src/plugin/prompt/biology.txt b/packages/core/src/plugin/prompt/biology.txt
 new file mode 100644
-index 0000000..94ad876
+index 000000000..94ad8765f
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/biology.txt
++++ b/packages/core/src/plugin/prompt/biology.txt
 @@ -0,0 +1,905 @@
 +<system-reminder>
 +You are in biology mode — a computational biology and bioinformatics agent.
@@ -1118,11 +1074,11 @@ index 0000000..94ad876
 +12. **Answer concisely.** The grader needs a short, extractable answer.
 +13. **Use skills.** Load relevant bundled skills for battle-tested code patterns.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/critique.txt b/packages/opencode/src/agent/prompt/critique.txt
+diff --git a/packages/core/src/plugin/prompt/critique.txt b/packages/core/src/plugin/prompt/critique.txt
 new file mode 100644
-index 0000000..174816e
+index 000000000..174816e14
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/critique.txt
++++ b/packages/core/src/plugin/prompt/critique.txt
 @@ -0,0 +1,197 @@
 +<system-reminder>
 +You are a critique sub-agent — a specialist in identifying blocking errors in scientific
@@ -1321,11 +1277,11 @@ index 0000000..174816e
 +   statistical validity. Don't dilute your critique by trying to cover everything. The
 +   primary agent may spawn multiple critique instances for different angles.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/literature-review.txt b/packages/opencode/src/agent/prompt/literature-review.txt
+diff --git a/packages/core/src/plugin/prompt/literature-review.txt b/packages/core/src/plugin/prompt/literature-review.txt
 new file mode 100644
-index 0000000..c1fc7dd
+index 000000000..c1fc7dd78
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/literature-review.txt
++++ b/packages/core/src/plugin/prompt/literature-review.txt
 @@ -0,0 +1,267 @@
 +<system-reminder>
 +You are a literature review sub-agent — a specialist in PRISMA-style systematic literature
@@ -1594,11 +1550,11 @@ index 0000000..c1fc7dd
 +ask "Would you like me to continue?" Complete from start to finish. The parent agent is
 +waiting for your complete, structured findings.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/ml.txt b/packages/opencode/src/agent/prompt/ml.txt
+diff --git a/packages/core/src/plugin/prompt/ml.txt b/packages/core/src/plugin/prompt/ml.txt
 new file mode 100644
-index 0000000..fc8ffff
+index 000000000..fc8ffff46
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/ml.txt
++++ b/packages/core/src/plugin/prompt/ml.txt
 @@ -0,0 +1,271 @@
 +<system-reminder>
 +You are in ML mode — an autonomous machine learning research and engineering agent.
@@ -1871,11 +1827,11 @@ index 0000000..fc8ffff
 +correct can anchor a verifier into accepting flawed logic. Let the artifacts speak for
 +themselves.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/physics-critique.txt b/packages/opencode/src/agent/prompt/physics-critique.txt
+diff --git a/packages/core/src/plugin/prompt/physics-critique.txt b/packages/core/src/plugin/prompt/physics-critique.txt
 new file mode 100644
-index 0000000..7c0dad6
+index 000000000..7c0dad679
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/physics-critique.txt
++++ b/packages/core/src/plugin/prompt/physics-critique.txt
 @@ -0,0 +1,151 @@
 +<system-reminder>
 +You are a physics critique sub-agent — a specialist in validating computational physics
@@ -2028,11 +1984,11 @@ index 0000000..7c0dad6
 +   violates a conservation law is CRITICALLY_FLAWED. A solution with slightly elevated chi-squared
 +   but correct physics is MINOR_FIXES.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/physics.txt b/packages/opencode/src/agent/prompt/physics.txt
+diff --git a/packages/core/src/plugin/prompt/physics.txt b/packages/core/src/plugin/prompt/physics.txt
 new file mode 100644
-index 0000000..95622b8
+index 000000000..95622b89b
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/physics.txt
++++ b/packages/core/src/plugin/prompt/physics.txt
 @@ -0,0 +1,341 @@
 +<system-reminder>
 +You are in physics mode — an autonomous computational physics and applied mathematics agent.
@@ -2375,11 +2331,11 @@ index 0000000..95622b8
 +(Feng et al. 2026, arXiv:2602.10177). Your chain-of-thought about why a solution is correct
 +can anchor the verifier into accepting flawed logic. Let the artifacts speak for themselves.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/research.txt b/packages/opencode/src/agent/prompt/research.txt
+diff --git a/packages/core/src/plugin/prompt/research.txt b/packages/core/src/plugin/prompt/research.txt
 new file mode 100644
-index 0000000..95827a2
+index 000000000..95827a27d
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/research.txt
++++ b/packages/core/src/plugin/prompt/research.txt
 @@ -0,0 +1,635 @@
 +<system-reminder>
 +You are in research mode — a scientific research agent.
@@ -3016,11 +2972,11 @@ index 0000000..95827a2
 +
 +You handle the science. The write agent handles the writing.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/reviewer.txt b/packages/opencode/src/agent/prompt/reviewer.txt
+diff --git a/packages/core/src/plugin/prompt/reviewer.txt b/packages/core/src/plugin/prompt/reviewer.txt
 new file mode 100644
-index 0000000..bd47640
+index 000000000..bd4764051
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/reviewer.txt
++++ b/packages/core/src/plugin/prompt/reviewer.txt
 @@ -0,0 +1,153 @@
 +<system-reminder>
 +You are a reviewer sub-agent — a blind, adversarial auditor of research outputs. You are the
@@ -3175,11 +3131,11 @@ index 0000000..bd47640
 +7. **Stay in your lane.** You audit — you don't rewrite the artifact or redesign the research.
 +   Cite the defect and its evidence; the primary agent fixes it.
 +</system-reminder>
-diff --git a/packages/opencode/src/agent/prompt/write.txt b/packages/opencode/src/agent/prompt/write.txt
+diff --git a/packages/core/src/plugin/prompt/write.txt b/packages/core/src/plugin/prompt/write.txt
 new file mode 100644
-index 0000000..2293cad
+index 000000000..2293caddc
 --- /dev/null
-+++ b/packages/opencode/src/agent/prompt/write.txt
++++ b/packages/core/src/plugin/prompt/write.txt
 @@ -0,0 +1,79 @@
 +<system-reminder>
 +You are in write mode — a scientific and technical writing agent.
