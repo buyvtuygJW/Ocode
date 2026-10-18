@@ -383,6 +383,46 @@ jobs:
             return 0
           }
 
+          run_patch_tests() {
+            # Unit tests shipped inside FinalPERSONALIZE.patch. They pin the two
+            # behaviors a bad merge keeps breaking:
+            #  - context-decay reader: archived turns may NEVER surface undefined
+            #    content/system into compaction (TypeError: e.content.map crash),
+            #  - model-request hooks: a hook wiping system/messages falls back to
+            #    the original input instead of returning undefined.
+            local tests=() f found
+            for f in \
+              packages/core/test/session-context-decay.test.ts \
+              packages/core/test/session-model-request-hooks.test.ts; do
+              if [ -f "$f" ]; then
+                tests+=("$f")
+              else
+                # tolerate upstream layout renames -- the patch tracks them
+                found="$(git ls-files "*/$(basename "$f")" | head -1 || true)"
+                if [ -n "$found" ]; then
+                  tests+=("$found")
+                else
+                  echo "ERROR: patched test file missing from tree: $(basename "$f")"
+                  return 1
+                fi
+              fi
+            done
+            # upstream bunfig.toml pins the bun-test root away from the repo
+            # root ("do-not-run-tests-from-root" guard), so `bun test` dies when
+            # launched from the root even with explicit file args -- run from
+            # the owning package directory with package-relative paths instead
+            local pkgdir="${tests[0]%%/test/*}"
+            [ "$pkgdir" = "${tests[0]}" ] && pkgdir="."
+            local rel=() f2
+            for f2 in "${tests[@]}"; do rel+=("${f2#"$pkgdir"/}"); done
+            echo "Running patched unit tests (cwd $pkgdir): ${rel[*]}"
+            if ! (cd "$pkgdir" && bun test "${rel[@]}"); then
+              echo "ERROR: patched unit tests FAILED -- refusing to build this ref"
+              return 1
+            fi
+            return 0
+          }
+
           run_opencode_build() {
             if ! resolve_opencode_version; then
               return 1
@@ -490,16 +530,16 @@ jobs:
               return 30
             fi
 
-            if ! run_opencode_build; then
+            if ! { run_patch_tests && run_opencode_build; }; then
               if [ "${APPLIED_TRANSPARENCY:-off}" = "on" ] || [ "${APPLIED_SCIENCE:-off}" = "on" ] || [ "${APPLIED_RSI:-off}" = "on" ]; then
-                echo "Build failed with optional patch(es) applied (transparency=${APPLIED_TRANSPARENCY:-off}, science=${APPLIED_SCIENCE:-off}, rsi=${APPLIED_RSI:-off})."
-                echo "Dropping ALL optional patches and retrying the build without them..."
+                echo "Tests/build failed with optional patch(es) applied (transparency=${APPLIED_TRANSPARENCY:-off}, science=${APPLIED_SCIENCE:-off}, rsi=${APPLIED_RSI:-off})."
+                echo "Dropping ALL optional patches and retrying the tests + build without them..."
                 git reset --hard "${CORE_SHA:-HEAD}" >/dev/null 2>&1 || true
                 APPLIED_TRANSPARENCY="off"
                 APPLIED_SCIENCE="off"
                 APPLIED_RSI="off"
-                if ! run_opencode_build; then
-                  echo "ERROR: opencode build failed even without the optional patches"
+                if ! { run_patch_tests && run_opencode_build; }; then
+                  echo "ERROR: opencode tests/build failed even without the optional patches"
                   cd ..
                   return 40
                 fi

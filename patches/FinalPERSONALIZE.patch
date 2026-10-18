@@ -93,7 +93,7 @@ diff --git a/packages/core/src/config/markdown.ts b/packages/core/src/config/mar
 index 8093ff7e7..beafc6234 100644
 --- a/packages/core/src/config/markdown.ts
 +++ b/packages/core/src/config/markdown.ts
-@@ -21,20 +21,90 @@ export function parseOption(content: string) {
+@@ -21,20 +21,97 @@ export function parseOption(content: string) {
    }
  }
  
@@ -103,11 +103,12 @@ index 8093ff7e7..beafc6234 100644
 +// frontmatter that strict YAML rejects: unquoted colons in values, hyphenated
 +// keys (allowed-tools), values wrapped across unindented lines, tab indentation,
 +// and a leading BOM. On a parse failure we normalize the frontmatter into
-+// equivalent valid YAML -- any value that needs escaping (contains a colon, a
-+// YAML indicator, or spills onto following lines) becomes a literal `|-` block
-+// scalar -- and retry. This runs ONLY after the strict parse has already failed,
-+// so valid files are never touched. It is a superset of the original colon-only
-+// rewrite: existing config files keep working.
++// equivalent valid YAML -- a plain-scalar value that needs escaping (contains a
++// colon or spills onto following lines) becomes a literal `|-` block scalar --
++// and retry. The rewrite is validated before it is returned: if it still does
++// not parse, the original content is returned unchanged, the strict parse
++// error propagates, and callers skip the file. This runs ONLY after the
++// strict parse has already failed, so valid files are never touched.
  export function sanitize(content: string) {
 -  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
 +  const stripped = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
@@ -127,8 +128,6 @@ index 8093ff7e7..beafc6234 100644
 +
 +  // top-level "key:" or "key: value" (hyphen/dot keys allowed; space after ":" optional)
 +  const KEY = /^([A-Za-z0-9][\w.-]*)[ \t]*:(?:[ \t]*(.*))?$/
-+  // leading chars that make a plain scalar ambiguous and need a block scalar
-+  const INDICATOR = /^[!&*?@`%,[\]{}]/
 +  // an intentional block-scalar header ("|", ">", "|-", ">2", ...) — leave alone
 +  const BLOCK_HEADER = /^[|>][+-]?\d*$/
 +  const isComment = (line: string) => /^\s*#/.test(line)
@@ -156,7 +155,7 @@ index 8093ff7e7..beafc6234 100644
 +    }
 +  }
 +
-+  const needsBlock = (v: string) => v.includes(":") || INDICATOR.test(v) || / #/.test(v)
++  const needsBlock = (v: string) => v.includes(":") || / #/.test(v)
 +
 +  const out: string[] = [...preface]
 +  for (const g of groups) {
@@ -195,7 +194,15 @@ index 8093ff7e7..beafc6234 100644
 +    }
 +  }
 +
-+  return stripped.replace(frontmatter, () => out.join("\n"))
++  const result = stripped.replace(frontmatter, () => out.join("\n"))
++  // the rewrite must parse -- otherwise return the input untouched so the
++  // strict parse error propagates and callers skip the file
++  try {
++    matter(result, {})
++  } catch {
++    return content
++  }
++  return result
  }
 diff --git a/packages/core/src/database/database.ts b/packages/core/src/database/database.ts
 index 93724052f..48b6fb724 100644
@@ -525,7 +532,7 @@ new file mode 100644
 index 000000000..3b4198499
 --- /dev/null
 +++ b/packages/core/src/session/runner/context-decay.ts
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,391 @@
 +import { SessionMessage } from "../message.js"
 +
 +/**
@@ -774,7 +781,10 @@ index 000000000..3b4198499
 +
 +const contentText = (tool: SessionMessage.AssistantTool) => {
 +  if (tool.state.status !== "completed" && tool.state.status !== "error") return ""
-+  return tool.state.content.map((part) => ("text" in part && typeof part.text === "string" ? part.text : "")).join("\n")
++  // ToolStateError.content is optional in the V2 schema — error states may carry no content (see compaction.ts, which guards the same way)
++  return (tool.state.content ?? [])
++    .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
++    .join("\n")
 +}
 +
 +const stub = (tool: SessionMessage.AssistantTool, body: string) => {
@@ -1072,3 +1082,297 @@ index 2a78031ad..b88de419d 100644
        yield* db
          .transaction((tx) =>
            Effect.gen(function* () {
+diff --git a/packages/core/test/session-model-request-hooks.test.ts b/packages/core/test/session-model-request-hooks.test.ts
+index 8e7612066344ea31aeff6a8edbcc6688eb6db413..f262eda8c120cff69019563536abf1a5a0695eb3 100644
+--- a/packages/core/test/session-model-request-hooks.test.ts
++++ b/packages/core/test/session-model-request-hooks.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, expect } from "bun:test"
++import { Message, SystemPart } from "@opencode/ai"
+ import { OpenAIChat } from "@opencode/ai/protocols"
+ import { Agent } from "@opencode/schema/agent"
+ import { Money } from "@opencode/schema/money"
+@@ -154,3 +155,42 @@
+     }),
+   )
+ })
++
++describe("SessionModelRequest hook null-safety", () => {
++  it.effect("falls back to the pre-hook draft when a hook nulls system/messages", () =>
++    Effect.gen(function* () {
++      const hooks = yield* PluginHooks.Service
++      const wiped: string[] = []
++      for (const name of ["context", "compaction", "generate", "title"] as const) {
++        yield* hooks.register("session", name, (event) =>
++          Effect.sync(() => {
++            wiped.push(name)
++            // Simulate a buggy plugin wiping the draft — must never reach the LLM request.
++            Object.assign(event, { system: undefined, messages: undefined })
++          }),
++        )
++      }
++      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
++      const system = [SystemPart.make("Stay terse.")]
++      const messages = [Message.user("hello")]
++
++      for (const kind of KINDS) {
++        const prepared = yield* requests[kind]({
++          session,
++          agent: Agent.ID.make("build"),
++          model,
++          system,
++          messages,
++        })
++        expect(prepared.request.system).toBeDefined()
++        expect(prepared.request.messages).toBeDefined()
++        expect(prepared.request.system.length).toBe(1)
++        expect(prepared.request.messages.length).toBe(1)
++        for (const message of prepared.request.messages) {
++          expect(message.content).toBeDefined()
++        }
++      }
++      expect(wiped.sort()).toEqual(["compaction", "context", "generate", "title"])
++    }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
++  )
++})
+diff --git a/packages/core/test/session-context-decay.test.ts b/packages/core/test/session-context-decay.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b027140c29
+--- /dev/null
++++ b/packages/core/test/session-context-decay.test.ts
+@@ -0,0 +1,235 @@
++import { expect, test } from "bun:test"
++import { SessionMessage } from "@opencode/schema/session-message"
++import {
++  ARCHIVE_AFTER_TURNS,
++  REEVAL_QUANTUM,
++  decay,
++  indexBlock,
++} from "@opencode/core/session/runner/context-decay"
++import { Schema } from "effect"
++
++// ------------------------------------------------------------------------------------------------- fixtures
++
++let counter = 0
++const callID = () => `call_${counter++}`
++
++const user = (text: string) =>
++  Schema.decodeUnknownSync(SessionMessage.User)({
++    id: SessionMessage.ID.create(),
++    type: "user",
++    text,
++    time: { created: 0 },
++  })
++
++const assistant = (content: readonly unknown[]) =>
++  Schema.decodeUnknownSync(SessionMessage.Assistant)({
++    id: SessionMessage.ID.create(),
++    type: "assistant",
++    agent: "build", // Agent.defaultID — decode validates it against the Agent.ID brand
++
++    model: { id: "test-model", providerID: "test" },
++    content,
++    time: { created: 0, completed: 0 },
++  })
++
++const tool = (state: Record<string, unknown>, id = callID()) => ({
++  type: "tool",
++  id,
++  name: "read",
++  state,
++  time: { created: 0 },
++})
++
++const text = (value: string) => ({ type: "text", text: value })
++
++const err = { type: "unknown", message: "tool blew up" }
++
++/** Every tool part in a projected history, across every assistant message. */
++const toolsOf = (messages: readonly SessionMessage.Info[]) =>
++  messages.flatMap((message) =>
++    message.type === "assistant"
++      ? message.content.filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++      : [],
++  )
++
++/**
++ * The exact read compaction/lowering performs on a tool result. This is the line that crashed in production
++ * (`e.content.map` on an error state that carried no content) — it must never see `undefined` on a completed
++ * state and must never be handed an emptied array on a rewritten one.
++ */
++const compactionRead = (state: SessionMessage.ToolState) => {
++  if (state.status === "completed") return state.content.map((part) => ("text" in part ? part.text : "")).join("\n")
++  if (state.status === "error") return (state.content ?? []).map((part) => ("text" in part ? part.text : "")).join("\n")
++  return ""
++}
++
++// ----------------------------------------------------------------------------------------------------- tests
++
++test("reader survives every tool state — including an error state with no content", () => {
++  const noContentID = callID()
++  const messages = [
++    user("please read the file"),
++    assistant([
++      text("running the tools"),
++      tool({ status: "streaming", input: '{"filePath": "D:/tmp/a' }),
++      tool({ status: "running", input: { filePath: "D:/tmp/a/x.ts" }, metadata: {} }),
++      tool({ status: "completed", input: {}, content: [text("short output")] }),
++      tool({ status: "error", input: {}, error: err, content: [text("stack trace")] }),
++      // The regression: ToolStateError.content is optional — V2 rows can legally omit it entirely.
++      tool({ status: "error", input: {}, error: err }, noContentID),
++    ]),
++  ]
++
++  expect(() => decay(messages)).not.toThrow()
++  const result = decay(messages)
++
++  for (const item of toolsOf(result.messages)) {
++    // The reader itself must come back as a string for every state, never undefined, never a throw.
++    expect(() => compactionRead(item.state)).not.toThrow()
++    expect(typeof compactionRead(item.state)).toBe("string")
++    // Completed content is a NonEmptyArray in the schema; decay must never have emptied or dropped it.
++    if (item.state.status === "completed") {
++      expect(Array.isArray(item.state.content)).toBe(true)
++      expect(item.state.content.length).toBeGreaterThan(0)
++    }
++    // Error content stays either absent (untouched) or a non-empty array — never null, never [].
++    if (item.state.status === "error" && item.state.content !== undefined) {
++      expect(item.state.content.length).toBeGreaterThan(0)
++    }
++  }
++
++  // The no-content error tool passed through untouched: no fabricated body, no crash, content still absent.
++  const untouched = toolsOf(result.messages).find((item) => item.id === noContentID)
++  expect(untouched).toBeDefined()
++  expect(untouched!.state.status).toBe("error")
++  expect((untouched!.state as SessionMessage.ToolStateError).content).toBeUndefined()
++})
++
++test("archived tools keep a non-empty marker — content is never emptied or undefined", () => {
++  const big = "x".repeat(5_000)
++  const oldCompleted = callID()
++  const oldErrored = callID()
++
++  const history: SessionMessage.Info[] = [
++    user("task one"),
++    assistant([
++      text("reading the big files"),
++      tool({ status: "completed", input: { filePath: "D:/tmp/a/big.ts" }, content: [text(big)] }, oldCompleted),
++      tool({ status: "error", input: { filePath: "D:/tmp/a/gone.ts" }, error: err, content: [text(big)] }, oldErrored),
++    ]),
++  ]
++  // Push the first turns behind the archive frontier: frontier = quantize(length - ARCHIVE_AFTER_TURNS) >= 2.
++  const padding = ARCHIVE_AFTER_TURNS + REEVAL_QUANTUM * 2
++  for (let i = 0; i < padding; i++) history.push(user(`filler turn ${i}`), assistant([text(`noted ${i}`)]))
++
++  const result = decay(history)
++  expect(result.rewritten).toBe(true)
++  expect(result.archive.length).toBeGreaterThanOrEqual(2)
++
++  const byID = new Map(toolsOf(result.messages).map((item) => [item.id, item]))
++  for (const id of [oldCompleted, oldErrored]) {
++    const item = byID.get(id)!
++    expect(item).toBeDefined()
++    const state = item.state as SessionMessage.ToolStateCompleted | SessionMessage.ToolStateError
++    // Never emptied outright — an empty tool result trips provider tool_call/tool_result pairing checks,
++    // and an undefined one is exactly the `e.content.map` crash this test pins down.
++    expect(Array.isArray(state.content)).toBe(true)
++    expect(state.content!.length).toBeGreaterThan(0)
++    const body = compactionRead(state)
++    expect(body).toMatch(/^\[archived — ref .+\]$/)
++    expect(body.length).toBeGreaterThan(0)
++  }
++
++  // Every surviving tool in the whole history still reads cleanly through the compaction path.
++  for (const item of toolsOf(result.messages)) {
++    expect(typeof compactionRead(item.state)).toBe("string")
++  }
++
++  // The index block mirrors the archive and stays a plain string.
++  const block = indexBlock(result.archive)
++  expect(block).toBeDefined()
++  expect(block!).toContain(`count="${result.archive.length}"`)
++  expect(indexBlock([])).toBeUndefined()
++})
++
++test("content-less V2 variants (idle, compaction, marker turns) pass through decay untouched — no crash, no fabricated content", () => {
++  // The production crash: `undefined is not an object (evaluating 'e.content.map')` inside SessionCompaction.compact.
++  // V2 `Info` is an 11-variant union and these variants have NO `content` field and NO `role` field at all.
++  const idle = Schema.decodeUnknownSync(SessionMessage.Info)({
++    id: SessionMessage.ID.create(),
++    type: "idle",
++    outcome: "succeeded",
++    time: { created: 0 },
++  })
++  const compaction = Schema.decodeUnknownSync(SessionMessage.Info)({
++    id: SessionMessage.ID.create(),
++    type: "compaction",
++    status: "completed",
++    reason: "auto",
++    summary: "compacted earlier work",
++    recent: "recent tail",
++    time: { created: 0 },
++  })
++
++  const toolID = callID()
++  const messages = [
++    user("do the thing"),
++    assistant([text("on it"), tool({ status: "completed", input: {}, content: [text("ok")] }, toolID)]),
++    idle,
++    compaction,
++    user("next task"),
++  ]
++
++  // Must not throw on any variant, with or without a prior key.
++  expect(() => decay(messages)).not.toThrow()
++  const result = decay(messages)
++  expect(() => decay(result.messages, result.key)).not.toThrow()
++
++  // Markers come back as the exact same references — decay never rewrites, clones, or invents `content` on them.
++  expect(result.messages).toHaveLength(messages.length)
++  expect(result.messages[2]).toBe(idle)
++  expect(result.messages[3]).toBe(compaction)
++  expect("content" in result.messages[2]!).toBe(false)
++  expect("content" in result.messages[3]!).toBe(false)
++
++  // The assistant turn's tool still reads cleanly through the compaction path.
++  const item = toolsOf(result.messages).find((entry) => entry.id === toolID)!
++  expect(item).toBeDefined()
++  expect(typeof compactionRead(item.state)).toBe("string")
++})
++
++test("short-circuit hands back identical references, not re-read copies", () => {
++  const messages = [
++    user("hello"),
++    assistant([text("done"), tool({ status: "completed", input: {}, content: [text("ok")] })]),
++  ]
++  const first = decay(messages)
++  const second = decay(first.messages, first.key)
++  expect(second.rewritten).toBe(false)
++  expect(second.messages).toBe(first.messages)
++  expect(second.archive).toEqual([])
++})
++
++test("mixed text and file parts read without crashing and short output is left verbatim", () => {
++  const mixedID = callID()
++  const messages = [
++    user("read the image"),
++    assistant([
++      text("reading"),
++      tool(
++        {
++          status: "completed",
++          input: {},
++          content: [text("tiny"), { type: "file", mime: "image/png", uri: "data:image/png;base64,QUJD" }],
++        },
++        mixedID,
++      ),
++    ]),
++  ]
++  const result = decay(messages)
++  const item = toolsOf(result.messages).find((entry) => entry.id === mixedID)!
++  const state = item.state as SessionMessage.ToolStateCompleted
++  // Too short to be worth touching: body, including the non-text part, survives byte-identical.
++  expect(state.content.length).toBe(2)
++  expect(() => compactionRead(state)).not.toThrow()
++})
