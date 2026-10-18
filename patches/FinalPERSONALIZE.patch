@@ -439,10 +439,10 @@ index 000000000..379dc1864
 +exposes no `depth` parameter, narrow by `ref`/selector to the subtree you need instead
 +and record that selector as `anchor` — the memory protocol above is unchanged.
 diff --git a/packages/core/src/session/model-request.ts b/packages/core/src/session/model-request.ts
-index aaa05b0f0..6d1433f0d 100644
+index 293c93a5e..c7d44f1e7 100644
 --- a/packages/core/src/session/model-request.ts
 +++ b/packages/core/src/session/model-request.ts
-@@ -97,6 +97,59 @@ const outputLimit = (
+@@ -97,6 +97,59 @@
    return Math.min(requested, Math.max(OUTPUT_TOKEN_MIN, room))
  }
  
@@ -502,7 +502,7 @@ index aaa05b0f0..6d1433f0d 100644
  export const baseTranscript = (input: {
    readonly agent: Agent.Info
    readonly model: SessionRunnerModel.Resolved
-@@ -105,14 +158,18 @@ export const baseTranscript = (input: {
+@@ -105,14 +158,18 @@
    readonly messages: ReadonlyArray<SessionMessage.Info>
  }) => {
    const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
@@ -527,12 +527,23 @@ index aaa05b0f0..6d1433f0d 100644
        .filter((part) => part.length > 0)
        .map(SystemPart.make),
      messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
+@@ -263,6 +320,10 @@
+         },
+         Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
+       )
++      // PATCH hook null-safety: a plugin that nulls system/messages must never reach the LLM request —
++      // fall back to the pre-hook draft. A hook REPLACING either field is untouched.
++      if (shaped.system == null) shaped.system = input.system
++      if (shaped.messages == null) shaped.messages = input.messages
+       // Match by identity first, then by key. Entries matching neither were invented by a
+       // hook and are dropped. `t.name` stays the real name so execution can map renames back.
+       const byName = new Map(tools.definitions.map((t) => [t.name, t]))
 diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
 new file mode 100644
-index 000000000..3b4198499
+index 000000000..1efee327b
 --- /dev/null
 +++ b/packages/core/src/session/runner/context-decay.ts
-@@ -0,0 +1,391 @@
+@@ -0,0 +1,396 @@
 +import { SessionMessage } from "../message.js"
 +
 +/**
@@ -655,20 +666,25 @@ index 000000000..3b4198499
 +}
 +
 +const toolsOf = (message: SessionMessage.Info): SessionMessage.AssistantTool[] => {
-+  if (message.role !== "assistant") return []
++  if (message.type !== "assistant") return []
 +  return message.content.filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
 +}
 +
-+const textOf = (message: SessionMessage.Info) =>
-+  message.content
-+    .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
-+    .join(" ")
-+    .toLowerCase()
++// Info is a tagged union: only `assistant` carries a content array; user/synthetic/system/etc. carry a plain `text`.
++const textOf = (message: SessionMessage.Info): string => {
++  if (message.type === "assistant")
++    return message.content
++      .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
++      .join(" ")
++      .toLowerCase()
++  return "text" in message && typeof message.text === "string" ? message.text.toLowerCase() : ""
++}
 +
 +const toTurn = (message: SessionMessage.Info): Turn => {
 +  const tools = toolsOf(message)
 +  const text = textOf(message)
-+  const paths = tools.flatMap((tool) => absolutePaths(tool.state.status === "pending" ? {} : tool.state.input))
++  // `streaming` holds the raw unparsed input string; every settled state holds the parsed input record.
++  const paths = tools.flatMap((tool) => absolutePaths(tool.state.status === "streaming" ? {} : tool.state.input))
 +  return { message, tools, paths, text, words: keywords(text) }
 +}
 +
@@ -901,7 +917,7 @@ index 000000000..3b4198499
 +  archive.reverse() // filled newest-first; present it oldest-first like the transcript
 +
 +  const next = messages.map((message) => {
-+    if (message.role !== "assistant") return message
++    if (message.type !== "assistant") return message
 +    if (!message.content.some((item) => item.type === "tool" && verdict.has(item.id))) return message
 +    const content = message.content.map((item) => (item.type === "tool" && verdict.has(item.id) ? verdict.get(item.id)! : item))
 +    return { ...message, content } as SessionMessage.Info
