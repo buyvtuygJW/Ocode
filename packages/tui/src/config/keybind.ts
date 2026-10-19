@@ -122,9 +122,8 @@ export const Definitions = {
   "session.fork": keybind("none", "Fork session from message"),
   "session.rename": keybind("ctrl+r", "Rename session"),
   "session.delete": keybind("ctrl+d", "Delete session"),
-  // Retain shipped configuration names; session sharing was removed.
-  "session.share": keybind("none", "Deprecated: session sharing was removed"),
-  "session.unshare": keybind("none", "Deprecated: session sharing was removed"),
+  "session.share": keybind("none", "Share current session"),
+  "session.unshare": keybind("none", "Unshare current session"),
   "session.interrupt": keybind("escape", "Interrupt current session"),
   "session.background": keybind("ctrl+b", "Background blocking session tools"),
   "session.compact": keybind("<leader>c", "Compact the session"),
@@ -161,7 +160,7 @@ export const Definitions = {
   "session.tab.select.10": keybind("<leader>0,ctrl+0", "Switch to session tab 10"),
 
   "stash.delete": keybind("ctrl+d", "Delete stash entry"),
-  "model.dialog.provider": keybind("ctrl+a", "Open provider list from model dialog"),
+  "model.dialog.provider": keybind("alt+p,ctrl+a", "Open provider list from model dialog"),
   "model.dialog.favorite": keybind("ctrl+f", "Toggle model favorite status"),
   "model.list": keybind("<leader>m", "List available models"),
   "model.cycle_recent": keybind("f2", "Next recently used model"),

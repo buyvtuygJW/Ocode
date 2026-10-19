@@ -1,4 +1,4 @@
-import { CliRenderEvents, SyntaxStyle, type TerminalColors } from "@opentui/core"
+import { CliRenderEvents, RGBA, SyntaxStyle, type TerminalColors } from "@opentui/core"
 import { useRenderer } from "@opentui/solid"
 import {
   generateSyntax,
@@ -82,6 +82,7 @@ type State = {
   lock: "dark" | "light" | undefined
   active: string
   ready: boolean
+  transparent: boolean
 }
 
 type Themes = {
@@ -97,6 +98,8 @@ type Themes = {
   locked: Accessor<boolean>
   lock(): void
   unlock(): void
+  transparent: Accessor<boolean>
+  toggleTransparent(): void
   setMode(mode?: "dark" | "light", persist?: boolean): boolean
   set(theme: string): boolean
   afterPaint(): void
@@ -115,6 +118,7 @@ const [store, setStore] = createStore<State>({
   lock: undefined,
   active: "opencode",
   ready: false,
+  transparent: false,
 })
 const [themeSources, setThemeSources] = createSignal(allThemes())
 
@@ -129,12 +133,15 @@ const themeContext = createSimpleContext({
     const config = configState.data
     const themes = props.source
     const cache = useStorageOptional()?.store<{ colors?: TerminalColors }>("system-theme", { initial: {} })
+    // CUSTOM-TRANSPARENCY: persisted toggle, session-scoped store survives restarts via tui storage.
+    const transparency = useStorageOptional()?.store<{ on?: boolean }>("theme-transparent", { initial: {} })
 
     setStore(
       produce((draft) => {
         const lock = config.theme?.mode === "dark" || config.theme?.mode === "light" ? config.theme.mode : undefined
         const mode = lock ?? renderer.themeMode ?? props.mode
         draft.mode = mode
+        draft.transparent = transparency?.[0].on === true
         draft.lock = lock
         draft.active = config.theme?.name ?? "opencode"
         draft.ready = false
@@ -309,7 +316,15 @@ const themeContext = createSimpleContext({
     })
     const modes = () => selected().modes
     const mode = () => selected().mode
-    const tokens = () => selected().theme
+    const baseTokens = () => selected().theme
+    // CUSTOM-TRANSPARENCY: when toggled on, force the resolved base background fully
+    // transparent so the terminal background shows through everywhere it is painted.
+    const TRANSPARENT = RGBA.fromInts(0, 0, 0, 0)
+    const tokens = createMemo(() =>
+      store.transparent
+        ? { ...baseTokens(), background: { ...baseTokens().background, base: TRANSPARENT } }
+        : baseTokens(),
+    )
     tokens()
     themePerformance.set("Init", `${(performance.now() - initStarted).toFixed(2)} ms`)
     const current = createComponentTheme(tokens)
@@ -352,6 +367,14 @@ const themeContext = createSimpleContext({
       onError: themeErrors.onError,
       get ready() {
         return store.ready
+      },
+      transparent: () => store.transparent,
+      toggleTransparent() {
+        const next = !store.transparent
+        setStore("transparent", next)
+        void transparency?.[1]((draft) => {
+          draft.on = next
+        }).catch(() => {})
       },
     }
     return {

@@ -1,4 +1,11 @@
-import { CliRenderEvents, InputRenderable, RGBA, ScrollBoxRenderable, TextAttributes } from "@opentui/core"
+import {
+  CliRenderEvents,
+  InputRenderable,
+  RGBA,
+  ScrollBoxRenderable,
+  TextAttributes,
+  type KeyBinding,
+} from "@opentui/core"
 import { Keymap, type KeymapCommand } from "../context/keymap"
 import { useTheme } from "../context/theme"
 import { entries, filter, flatMap, groupBy, pipe } from "remeda"
@@ -22,6 +29,23 @@ import { Locale } from "../util/locale"
 import { getScrollAcceleration } from "../util/scroll"
 import { useConfig, useNewDesigns } from "../config"
 import { moveSelection, reconcileSelection } from "./select-controller"
+
+// @opentui/core's editors carry their own hard-coded key table
+// (defaultTextareaKeyBindings) and TextareaRenderable.handleKeyPress() consumes a match
+// before the keymap is ever consulted. ctrl+a is "line-home" in that table, so while
+// this filter input holds focus it swallowed any dialog action bound to ctrl+a - which
+// is what keybind.ts ships as `model.dialog.provider`, "Open provider list from model
+// dialog". Symptom: the cursor jumps to column 0 in the accent `cursorColor` and the
+// provider list never opens.
+//
+// mergeKeyBindings() keys entries on `name:ctrl:shift:meta:super` and lets a custom
+// entry replace the default, but never delete it - so we replace ctrl+a with an action
+// core has no handler for. handleKeyPress() then falls through and returns false, the
+// event continues to the keymap, and the dialog's own ctrl+a action runs. Other a-chords
+// (ctrl+shift+a, alt+a, cmd+a) keep core's defaults, and Home still does buffer-home.
+const FILTER_KEY_BINDINGS = [
+  { name: "a", ctrl: true, action: "opencode:pass-through" },
+] as unknown as KeyBinding[]
 
 export interface DialogSelectProps<T> {
   title: string
@@ -635,6 +659,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           props.onFilter?.(e)
         })
       }}
+      keyBindings={FILTER_KEY_BINDINGS}
       focusedBackgroundColor={theme.background.formfield.focused}
       cursorColor={newDesigns() ? theme.text.base : theme.text.formfield.focused}
       cursorStyle={config.cursor}
