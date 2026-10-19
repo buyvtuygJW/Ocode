@@ -26,8 +26,33 @@ index 88939ebc8..621ffb019 100644
        {
          name: "agent.cycle",
          title: "Agent cycle",
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+index ef1cba9cc..8594f7430 100644
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -122,9 +122,8 @@ export const Definitions = {
+   "session.fork": keybind("none", "Fork session from message"),
+   "session.rename": keybind("ctrl+r", "Rename session"),
+   "session.delete": keybind("ctrl+d", "Delete session"),
+-  // Retain shipped configuration names; session sharing was removed.
+-  "session.share": keybind("none", "Deprecated: session sharing was removed"),
+-  "session.unshare": keybind("none", "Deprecated: session sharing was removed"),
++  "session.share": keybind("none", "Share current session"),
++  "session.unshare": keybind("none", "Unshare current session"),
+   "session.interrupt": keybind("escape", "Interrupt current session"),
+   "session.background": keybind("ctrl+b", "Background blocking session tools"),
+   "session.compact": keybind("<leader>c", "Compact the session"),
+@@ -161,7 +160,7 @@ export const Definitions = {
+   "session.tab.select.10": keybind("<leader>0,ctrl+0", "Switch to session tab 10"),
+ 
+   "stash.delete": keybind("ctrl+d", "Delete stash entry"),
+-  "model.dialog.provider": keybind("ctrl+a", "Open provider list from model dialog"),
++  "model.dialog.provider": keybind("alt+p,ctrl+a", "Open provider list from model dialog"),
+   "model.dialog.favorite": keybind("ctrl+f", "Toggle model favorite status"),
+   "model.list": keybind("<leader>m", "List available models"),
+   "model.cycle_recent": keybind("f2", "Next recently used model"),
 diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme.tsx
-index 4802bacee..5a3166249 100644
+index ed568e695..27c1bca7d 100644
 --- a/packages/tui/src/context/theme.tsx
 +++ b/packages/tui/src/context/theme.tsx
 @@ -1,4 +1,4 @@
@@ -36,7 +61,7 @@ index 4802bacee..5a3166249 100644
  import { useRenderer } from "@opentui/solid"
  import {
    generateSyntax,
-@@ -81,6 +81,7 @@ type State = {
+@@ -82,6 +82,7 @@ type State = {
    lock: "dark" | "light" | undefined
    active: string
    ready: boolean
@@ -44,7 +69,7 @@ index 4802bacee..5a3166249 100644
  }
  
  type Themes = {
-@@ -96,6 +97,8 @@ type Themes = {
+@@ -97,6 +98,8 @@ type Themes = {
    locked: Accessor<boolean>
    lock(): void
    unlock(): void
@@ -53,7 +78,7 @@ index 4802bacee..5a3166249 100644
    setMode(mode?: "dark" | "light", persist?: boolean): boolean
    set(theme: string): boolean
    afterPaint(): void
-@@ -114,6 +117,7 @@ const [store, setStore] = createStore<State>({
+@@ -115,6 +118,7 @@ const [store, setStore] = createStore<State>({
    lock: undefined,
    active: "opencode",
    ready: false,
@@ -61,7 +86,7 @@ index 4802bacee..5a3166249 100644
  })
  const [themeSources, setThemeSources] = createSignal(allThemes())
  
-@@ -127,12 +131,15 @@ const themeContext = createSimpleContext({
+@@ -129,12 +133,15 @@ const themeContext = createSimpleContext({
      const config = configState.data
      const themes = props.source
      const cache = useStorageOptional()?.store<{ colors?: TerminalColors }>("system-theme", { initial: {} })
@@ -77,7 +102,7 @@ index 4802bacee..5a3166249 100644
          draft.lock = lock
          draft.active = config.theme?.name ?? "opencode"
          draft.ready = false
-@@ -301,7 +308,15 @@ const themeContext = createSimpleContext({
+@@ -309,7 +316,15 @@ const themeContext = createSimpleContext({
      })
      const modes = () => selected().modes
      const mode = () => selected().mode
@@ -94,7 +119,7 @@ index 4802bacee..5a3166249 100644
      tokens()
      themePerformance.set("Init", `${(performance.now() - initStarted).toFixed(2)} ms`)
      const current = createComponentTheme(tokens)
-@@ -345,6 +360,14 @@ const themeContext = createSimpleContext({
+@@ -353,6 +368,14 @@ const themeContext = createSimpleContext({
        get ready() {
          return store.ready
        },
@@ -110,7 +135,7 @@ index 4802bacee..5a3166249 100644
      return {
        current,
 diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
-index 6b1652035..0bd481907 100644
+index 6756bfa26..893f99088 100644
 --- a/packages/tui/src/ui/dialog-select.tsx
 +++ b/packages/tui/src/ui/dialog-select.tsx
 @@ -1,4 +1,11 @@
@@ -126,8 +151,8 @@ index 6b1652035..0bd481907 100644
  import { Keymap, type KeymapCommand } from "../context/keymap"
  import { useTheme } from "../context/theme"
  import { entries, filter, flatMap, groupBy, pipe } from "remeda"
-@@ -13,6 +20,23 @@ import { getScrollAcceleration } from "../util/scroll"
- import { useConfig } from "../config"
+@@ -23,6 +30,23 @@ import { getScrollAcceleration } from "../util/scroll"
+ import { useConfig, useNewDesigns } from "../config"
  import { moveSelection, reconcileSelection } from "./select-controller"
  
 +// @opentui/core's editors carry their own hard-coded key table
@@ -150,11 +175,11 @@ index 6b1652035..0bd481907 100644
  export interface DialogSelectProps<T> {
    title: string
    titleView?: JSX.Element
-@@ -692,6 +716,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
-                   props.onFilter?.(e)
-                 })
-               }}
-+              keyBindings={FILTER_KEY_BINDINGS}
-               focusedBackgroundColor={theme.background.formfield.focused}
-               cursorColor={theme.text.formfield.focused}
-               cursorStyle={config.cursor}
+@@ -635,6 +659,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+           props.onFilter?.(e)
+         })
+       }}
++      keyBindings={FILTER_KEY_BINDINGS}
+       focusedBackgroundColor={theme.background.formfield.focused}
+       cursorColor={newDesigns() ? theme.text.base : theme.text.formfield.focused}
+       cursorStyle={config.cursor}
