@@ -8,12 +8,23 @@ import { Effect } from "effect"
 import { AbsolutePath } from "../schema.js"
 import { Skill } from "../skill.js"
 import { Config } from "../config.js"
+import { Global } from "@opencode/util/global"
 import os from "os"
+import path from "path"
 import opencodeContent from "./skill/opencode.md" with { type: "text" }
 import reportContent from "./skill/report.md" with { type: "text" }
+import playwrightDepthContent from "./skill/playwright-depth.md" with { type: "text" }
 
 export const OpencodeContent = opencodeContent
 export const ReportContent = reportContent
+
+// Resolved at import time rather than written into the markdown, so the cache path is
+// correct on every platform instead of whichever machine authored the file.
+export const PlaywrightDepthCachePath = path.join(Global.Path.state, "playwright-depth-cache.json")
+export const PlaywrightDepthContent = playwrightDepthContent.replaceAll("{{CACHE_PATH}}", PlaywrightDepthCachePath)
+
+export const PLAYWRIGHT_DEPTH_DESCRIPTION =
+  "Use when taking Playwright or browser MCP snapshots: picks snapshot depth from per-site memory instead of defaulting to full depth."
 
 export const OpencodeDescription =
   "Use this skill for any question about OpenCode itself, including how OpenCode works, using or configuring it, migrating from V1 to V2, troubleshooting it, developing plugins or integrations, using the OpenCode SDK, clients, server, or API, and contributing to the OpenCode codebase. Also use it for OpenCode agents, commands, skills, tools, permissions, MCP servers, providers, models, themes, keybinds, formatters, the CLI, TUI, desktop app, and web app."
@@ -41,6 +52,15 @@ export const Plugin = define({
           description: REPORT_DESCRIPTION,
           path: AbsolutePath.make("/builtin/report.md"),
           content: reportContent,
+        }),
+      )
+      editor.add(
+        Skill.Info.make({
+          id: Skill.ID.make("playwright-depth"),
+          name: Skill.Name.make("Playwright Depth"),
+          description: PLAYWRIGHT_DEPTH_DESCRIPTION,
+          path: AbsolutePath.make("/builtin/playwright-depth.md"),
+          content: PlaywrightDepthContent,
         }),
       )
     })

@@ -127,8 +127,8 @@ Effect.gen(function* () {
   ),
   Effect.provide(
     Observability.layer({
-      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
-      headers: process.env.OTEL_EXPORTER_OTLP_HEADERS,
+      endpoint: undefined, // SANITIZE(#459): force OTLP/telemetry off (no honeycomb)
+      headers: undefined,
       client: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
       version: OPENCODE_VERSION,
       channel: OPENCODE_CHANNEL,
