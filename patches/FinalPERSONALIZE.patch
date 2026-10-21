@@ -439,7 +439,7 @@ index 000000000..379dc1864
 +exposes no `depth` parameter, narrow by `ref`/selector to the subtree you need instead
 +and record that selector as `anchor` — the memory protocol above is unchanged.
 diff --git a/packages/core/src/session/model-request.ts b/packages/core/src/session/model-request.ts
-index 293c93a5e..c7d44f1e7 100644
+index 293c93a5e..512995a6f 100644
 --- a/packages/core/src/session/model-request.ts
 +++ b/packages/core/src/session/model-request.ts
 @@ -97,6 +97,59 @@
@@ -527,7 +527,35 @@ index 293c93a5e..c7d44f1e7 100644
        .filter((part) => part.length > 0)
        .map(SystemPart.make),
      messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
-@@ -263,6 +320,10 @@
+@@ -159,7 +216,8 @@
+   replace: (media: { mime: string; name: string | undefined; bytes: () => number }) => string | undefined,
+ ) =>
+   messages.map((message) => {
+-    const content = message.content.map((part) => {
++    const parts = Array.isArray(message.content) ? message.content : []
++    const content = parts.map((part) => {
+       if (part.type === "media") {
+         const text = replace({ mime: part.media.mediaType, name: part.filename, bytes: () => mediaBytes(part.media) })
+         return text === undefined ? part : Message.text(text)
+@@ -175,7 +233,7 @@
+         ? part
+         : { ...part, result: { ...result, value } }
+     })
+-    return content.every((part, index) => part === message.content[index])
++    return content.every((part, index) => part === parts[index])
+       ? message
+       : new Message({ ...message, content })
+   })
+@@ -191,7 +249,7 @@
+   const imageBytes = messages.reduce(
+     (total, message) =>
+       total +
+-      message.content.reduce((sum, part) => {
++      (Array.isArray(message.content) ? message.content : []).reduce((sum, part) => {
+         if (part.type === "media" && isImage(part.media.mediaType)) return sum + mediaBytes(part.media)
+         if (part.type !== "tool-result" || part.result.type !== "content") return sum
+         return (
+@@ -263,6 +321,10 @@
          },
          Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
        )
@@ -538,12 +566,24 @@ index 293c93a5e..c7d44f1e7 100644
        // Match by identity first, then by key. Entries matching neither were invented by a
        // hook and are dropped. `t.name` stays the real name so execution can map renames back.
        const byName = new Map(tools.definitions.map((t) => [t.name, t]))
+@@ -328,7 +390,10 @@
+           selected,
+           SessionProviderContext.provenance({ model: request.model, ref: model.ref }),
+         ) &&
+-        request.messages.some((message) => message.content.some((part) => part.type === "compaction"))
++        request.messages.some(
++          (message) =>
++            Array.isArray(message.content) && message.content.some((part) => part.type === "compaction"),
++        )
+       )
+         return yield* Effect.die(
+           new Error("Provider context is incompatible with the route selected by model request hooks"),
 diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
 new file mode 100644
-index 000000000..1efee327b
+index 000000000..a3eeb7c1c
 --- /dev/null
 +++ b/packages/core/src/session/runner/context-decay.ts
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,401 @@
 +import { SessionMessage } from "../message.js"
 +
 +/**
@@ -665,19 +705,23 @@ index 000000000..1efee327b
 +  readonly words: ReadonlySet<string>
 +}
 +
++// Info is a tagged union: only `assistant` is declared with a content array, but in-flight records and
++// tool `error` states carry no/optional `content` — treat "no array" as "no content", never throw.
++const contentOf = (message: SessionMessage.Info) =>
++  "content" in message && Array.isArray(message.content) ? message.content : []
++
 +const toolsOf = (message: SessionMessage.Info): SessionMessage.AssistantTool[] => {
 +  if (message.type !== "assistant") return []
-+  return message.content.filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++  return contentOf(message).filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
 +}
 +
-+// Info is a tagged union: only `assistant` carries a content array; user/synthetic/system/etc. carry a plain `text`.
++// user/synthetic/system/etc. carry a plain `text`; everything else reads through the guarded content array.
 +const textOf = (message: SessionMessage.Info): string => {
-+  if (message.type === "assistant")
-+    return message.content
-+      .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
-+      .join(" ")
-+      .toLowerCase()
-+  return "text" in message && typeof message.text === "string" ? message.text.toLowerCase() : ""
++  if ("text" in message && typeof message.text === "string") return message.text.toLowerCase()
++  return contentOf(message)
++    .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
++    .join(" ")
++    .toLowerCase()
 +}
 +
 +const toTurn = (message: SessionMessage.Info): Turn => {
@@ -918,8 +962,9 @@ index 000000000..1efee327b
 +
 +  const next = messages.map((message) => {
 +    if (message.type !== "assistant") return message
-+    if (!message.content.some((item) => item.type === "tool" && verdict.has(item.id))) return message
-+    const content = message.content.map((item) => (item.type === "tool" && verdict.has(item.id) ? verdict.get(item.id)! : item))
++    const items = Array.isArray(message.content) ? message.content : []
++    if (!items.some((item) => item.type === "tool" && verdict.has(item.id))) return message
++    const content = items.map((item) => (item.type === "tool" && verdict.has(item.id) ? verdict.get(item.id)! : item))
 +    return { ...message, content } as SessionMessage.Info
 +  })
 +
@@ -941,7 +986,7 @@ index 000000000..1efee327b
 +  ].join("\n")
 +}
 diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
-index 8d03c824e..f0e55485b 100644
+index 8d03c824e..4acccaa70 100644
 --- a/packages/core/src/session/runner/to-llm-message.ts
 +++ b/packages/core/src/session/runner/to-llm-message.ts
 @@ -11,6 +11,7 @@ import type { Model } from "@opencode/schema/model"
@@ -952,7 +997,21 @@ index 8d03c824e..f0e55485b 100644
  import { SessionProviderContext } from "../provider-context.js"
  import type { FileAttachment } from "@opencode/schema/prompt"
  
-@@ -326,9 +327,19 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
+@@ -154,10 +155,11 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
+   const sameProvider = String(message.model.providerID) === String(model.providerID)
+   const sameModel = sameProvider && String(message.model.id) === String(model.id)
+   const reuseProviderMetadata = sameModel && message.error === undefined
+-  const reasoningInterrupted = message.content.some(
++  const items = Array.isArray(message.content) ? message.content : []
++  const reasoningInterrupted = items.some(
+     (item) => item.type === "reasoning" && item.time !== undefined && item.time.completed === undefined,
+   )
+-  const content = message.content.flatMap((item): ContentPart[] => {
++  const content = items.flatMap((item): ContentPart[] => {
+     if (item.type === "text")
+       return [
+         {
+@@ -326,9 +328,19 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
    }
  }
  
@@ -1417,3 +1476,163 @@ index 4ba54f2ed..c1bf75763 100644
        if (!title) return
        const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
        const current = yield* store.get(sessionID)
+diff --git a/packages/core/test/session/content-guards.test.ts b/packages/core/test/session/content-guards.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4593833286af0a6fee619a60ea5f19c1cebba6f2
+--- /dev/null
++++ b/packages/core/test/session/content-guards.test.ts
+@@ -0,0 +1,43 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import path from "node:path"
++
++// CI guard checker: every array-style access of `.content` in patch-owned files must sit behind an
++// Array.isArray guard. Upstream has shipped messages whose `content` is undefined/non-array mid-stream;
++// an unguarded `.content.map(...)` there is exactly the TypeError that broke context-decay. Scope is the
++// patch-owned files only - upstream files are taken as-is and are not rewritten by this check.
++const OWNED = [
++  "src/config/markdown.ts",
++  "src/database/database.ts",
++  "src/database/v1-migration.bun.ts",
++  "src/plugin/skill.ts",
++  "src/session/model-request.ts",
++  "src/session/runner/context-decay.ts",
++  "src/session/runner/to-llm-message.ts",
++  "src/session/title.ts",
++]
++
++const ACCESS =
++  /\.content(\?\.|\.)(map|flatMap|filter|some|every|find|findLast|findIndex|forEach|reduce|reduceRight|slice|concat|join|at|indexOf|lastIndexOf|includes|entries|keys|values|length)\b|\.content\[/
++const GUARD = /Array\.isArray\(/
++const LOOKBACK = 12
++
++describe("content guards", () => {
++  test("every .content array access in patch-owned files is guarded", () => {
++    const root = path.join(import.meta.dir, "..", "..")
++    const errors: string[] = []
++    for (const rel of OWNED) {
++      const lines = readFileSync(path.join(root, rel), "utf8").split("\n")
++      lines.forEach((line, index) => {
++        if (!ACCESS.test(line)) return
++        const from = Math.max(0, index - LOOKBACK)
++        if (lines.slice(from, index + 1).some((near) => GUARD.test(near))) return
++        errors.push(
++          `${rel}:${index + 1} unguarded .content access -> add: const items = Array.isArray(x.content) ? x.content : [] and use items`,
++        )
++      })
++    }
++    if (errors.length) throw new Error(`unguarded .content array access:\n${errors.join("\n")}`)
++    expect(errors).toEqual([])
++  })
++})
+diff --git a/packages/server/src/service-status.ts b/packages/server/src/service-status.ts
+--- a/packages/server/src/service-status.ts
++++ b/packages/server/src/service-status.ts
+@@ -6,12 +6,12 @@
+   | { readonly type: "starting" }
+   | { readonly type: "ready" }
+   | { readonly type: "stopping" }
+-  | { readonly type: "failed" }
++  | { readonly type: "failed"; readonly reason?: string }
+ 
+ export interface Interface {
+   readonly current: Effect.Effect<State>
+   readonly ready: Effect.Effect<void>
+-  readonly fail: Effect.Effect<void>
++  readonly fail: (reason?: string) => Effect.Effect<void>
+   readonly beginStopping: Effect.Effect<void>
+ }
+ 
+@@ -24,7 +24,12 @@
+   return {
+     current: Ref.get(current),
+     ready: Ref.update(current, (status) => (status.type === "starting" ? ({ type: "ready" } satisfies State) : status)),
+-    fail: Ref.update(current, (status) => (status.type === "starting" ? ({ type: "failed" } satisfies State) : status)),
++    fail: (reason?: string) =>
++      Ref.update(current, (status) =>
++        status.type === "starting"
++          ? ((reason === undefined ? { type: "failed" } : { type: "failed", reason }) satisfies State)
++          : status,
++      ),
+     beginStopping,
+   } satisfies Interface
+ })
+diff --git a/packages/server/src/process.ts b/packages/server/src/process.ts
+--- a/packages/server/src/process.ts
++++ b/packages/server/src/process.ts
+@@ -122,7 +122,8 @@
+   }).pipe(
+     Effect.catchCause((cause) => {
+       if (!lifecycle || Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause)
+-      return status.fail.pipe(
++      // Keep the first line of the failure so /api/info and the 503 can report why boot failed.
++      return status.fail(Cause.pretty(cause).split("\n", 1)[0]).pipe(
+         Effect.andThen(
+           Scope.close(applicationScope, Exit.failCause(cause)).pipe(
+             Effect.catchCause((cleanupCause) =>
+@@ -208,7 +209,13 @@
+ ) {
+   const state = yield* status.current
+   return HttpServerResponse.jsonUnsafe(
+-    { version, pid: process.pid, urls: urls(), paths: { tmp } },
++    {
++      version,
++      pid: process.pid,
++      urls: urls(),
++      paths: { tmp },
++      ...(state.type === "failed" && state.reason !== undefined ? { error: state.reason } : {}),
++    },
+     {
+       status: state.type === "ready" ? 200 : state.type === "failed" ? 500 : 503,
+       headers: state.type === "starting" || state.type === "stopping" ? { "retry-after": "1" } : undefined,
+@@ -221,7 +228,8 @@
+     return HttpServerResponse.jsonUnsafe(
+       {
+         code: "service_failed",
+-        message: "The background service could not start.",
++        message:
++          "The background service could not start." + (status.reason === undefined ? "" : " " + status.reason),
+         action: "Run `opencode service restart` after checking the service logs.",
+       },
+       { status: 503 },
+diff --git a/packages/client/src/service-probe.ts b/packages/client/src/service-probe.ts
+--- a/packages/client/src/service-probe.ts
++++ b/packages/client/src/service-probe.ts
+@@ -13,6 +13,7 @@
+   readonly version?: string
+   readonly state: "ready" | "waiting" | "failed"
+   readonly compatible: boolean
++  readonly error?: string
+ }
+ 
+ /**
+@@ -27,7 +28,12 @@
+       "Background service uses an incompatible health protocol. Update this client or explicitly restart the service.",
+     )
+   if (service.state === "ready") return { _tag: "reuse" } as const
+-  if (service.state === "failed") return fail("Background service failed to start")
++  if (service.state === "failed")
++    return fail(
++      service.error === undefined
++        ? "Background service failed to start"
++        : "Background service failed to start: " + service.error,
++    )
+   return { _tag: "wait" } as const
+ }
+ 
+@@ -84,6 +90,7 @@
+       version: serverInfo.version,
+       state: response.ok ? "ready" : response.status === 500 ? "failed" : "waiting",
+       compatible: true,
++      error: serverInfo.error,
+     } satisfies LocalService,
+     timedOut: false,
+   }
+@@ -101,5 +108,6 @@
+   if (typeof input !== "object" || input === null) return
+   if (!("version" in input) || typeof input.version !== "string") return
+   if (!("pid" in input) || typeof input.pid !== "number" || !Number.isInteger(input.pid) || input.pid < 0) return
+-  return { version: input.version, pid: input.pid }
++  const error = "error" in input && typeof input.error === "string" ? input.error : undefined
++  return { version: input.version, pid: input.pid, error }
+ }

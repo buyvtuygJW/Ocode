@@ -27,22 +27,10 @@ index 88939ebc8..621ffb019 100644
          name: "agent.cycle",
          title: "Agent cycle",
 diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
-index ef1cba9cc..8594f7430 100644
+index 31132eb..212baed 100644
 --- a/packages/tui/src/config/keybind.ts
 +++ b/packages/tui/src/config/keybind.ts
-@@ -122,9 +122,8 @@ export const Definitions = {
-   "session.fork": keybind("none", "Fork session from message"),
-   "session.rename": keybind("ctrl+r", "Rename session"),
-   "session.delete": keybind("ctrl+d", "Delete session"),
--  // Retain shipped configuration names; session sharing was removed.
--  "session.share": keybind("none", "Deprecated: session sharing was removed"),
--  "session.unshare": keybind("none", "Deprecated: session sharing was removed"),
-+  "session.share": keybind("none", "Share current session"),
-+  "session.unshare": keybind("none", "Unshare current session"),
-   "session.interrupt": keybind("escape", "Interrupt current session"),
-   "session.background": keybind("ctrl+b", "Background blocking session tools"),
-   "session.compact": keybind("<leader>c", "Compact the session"),
-@@ -161,7 +160,7 @@ export const Definitions = {
+@@ -160,7 +160,7 @@ export const Definitions = {
    "session.tab.select.10": keybind("<leader>0,ctrl+0", "Switch to session tab 10"),
  
    "stash.delete": keybind("ctrl+d", "Delete stash entry"),
@@ -135,7 +123,7 @@ index ed568e695..27c1bca7d 100644
      return {
        current,
 diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
-index 6756bfa26..893f99088 100644
+index ce961f2..8fb2435 100644
 --- a/packages/tui/src/ui/dialog-select.tsx
 +++ b/packages/tui/src/ui/dialog-select.tsx
 @@ -1,4 +1,11 @@
@@ -151,8 +139,8 @@ index 6756bfa26..893f99088 100644
  import { Keymap, type KeymapCommand } from "../context/keymap"
  import { useTheme } from "../context/theme"
  import { entries, filter, flatMap, groupBy, pipe } from "remeda"
-@@ -23,6 +30,23 @@ import { getScrollAcceleration } from "../util/scroll"
- import { useConfig, useNewDesigns } from "../config"
+@@ -13,6 +20,23 @@ import { getScrollAcceleration } from "../util/scroll"
+ import { useConfig } from "../config"
  import { moveSelection, reconcileSelection } from "./select-controller"
  
 +// @opentui/core's editors carry their own hard-coded key table
@@ -175,11 +163,11 @@ index 6756bfa26..893f99088 100644
  export interface DialogSelectProps<T> {
    title: string
    titleView?: JSX.Element
-@@ -635,6 +659,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
-           props.onFilter?.(e)
-         })
-       }}
-+      keyBindings={FILTER_KEY_BINDINGS}
-       focusedBackgroundColor={theme.background.formfield.focused}
-       cursorColor={newDesigns() ? theme.text.base : theme.text.formfield.focused}
-       cursorStyle={config.cursor}
+@@ -692,6 +716,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+                   props.onFilter?.(e)
+                 })
+               }}
++              keyBindings={FILTER_KEY_BINDINGS}
+               focusedBackgroundColor={theme.background.formfield.focused}
+               cursorColor={theme.text.formfield.focused}
+               cursorStyle={config.cursor}
