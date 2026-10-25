@@ -546,15 +546,15 @@ index 293c93a5e..512995a6f 100644
        ? message
        : new Message({ ...message, content })
    })
-@@ -191,7 +249,7 @@
-   const imageBytes = messages.reduce(
-     (total, message) =>
-       total +
--      message.content.reduce((sum, part) => {
-+      (Array.isArray(message.content) ? message.content : []).reduce((sum, part) => {
-         if (part.type === "media" && isImage(part.media.mediaType)) return sum + mediaBytes(part.media)
-         if (part.type !== "tool-result" || part.result.type !== "content") return sum
-         return (
+@@ -188,7 +246,7 @@
+ export const boundImages = (messages: LLMRequest["messages"]) => {
+   const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
+   const sizes = messages.flatMap((message) =>
+-    message.content.flatMap((part) => {
++    (Array.isArray(message.content) ? message.content : []).flatMap((part) => {
+       if (part.type === "media") return isImage(part.media.mediaType) ? [mediaBytes(part.media)] : []
+       if (part.type !== "tool-result" || part.result.type !== "content") return []
+       return part.result.value.flatMap((item: Content) =>
 @@ -263,6 +321,10 @@
          },
          Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
@@ -566,18 +566,6 @@ index 293c93a5e..512995a6f 100644
        // Match by identity first, then by key. Entries matching neither were invented by a
        // hook and are dropped. `t.name` stays the real name so execution can map renames back.
        const byName = new Map(tools.definitions.map((t) => [t.name, t]))
-@@ -328,7 +390,10 @@
-           selected,
-           SessionProviderContext.provenance({ model: request.model, ref: model.ref }),
-         ) &&
--        request.messages.some((message) => message.content.some((part) => part.type === "compaction"))
-+        request.messages.some(
-+          (message) =>
-+            Array.isArray(message.content) && message.content.some((part) => part.type === "compaction"),
-+        )
-       )
-         return yield* Effect.die(
-           new Error("Provider context is incompatible with the route selected by model request hooks"),
 diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
 new file mode 100644
 index 000000000..a3eeb7c1c
@@ -989,12 +977,13 @@ diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/
 index 8d03c824e..4acccaa70 100644
 --- a/packages/core/src/session/runner/to-llm-message.ts
 +++ b/packages/core/src/session/runner/to-llm-message.ts
-@@ -11,6 +11,7 @@ import type { Model } from "@opencode/schema/model"
+@@ -11,7 +11,8 @@ import type { Model } from "@opencode/schema/model"
  import { Option, Schema } from "effect"
  import { fileURLToPath } from "url"
  import { SessionMessage } from "../message.js"
 +import { decay, indexBlock } from "./context-decay.js"
- import { SessionProviderContext } from "../provider-context.js"
+ import { SessionHistory } from "../history.js"
+ import { SessionRecentText } from "../recent-text.js"
  import type { FileAttachment } from "@opencode/schema/prompt"
  
 @@ -154,10 +155,11 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
@@ -1452,11 +1441,11 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +  expect(() => compactionRead(state)).not.toThrow()
 +})
 diff --git a/packages/core/src/session/title.ts b/packages/core/src/session/title.ts
-index 4ba54f2ed..c1bf75763 100644
+index 816cc45..4cf5bdd 100644
 --- a/packages/core/src/session/title.ts
 +++ b/packages/core/src/session/title.ts
-@@ -126,11 +126,15 @@ export const layer = Layer.effect(
-         : firstUser.text
+@@ -132,11 +132,15 @@ export const layer = Layer.effect(
+         : messagePrompt(firstUser.text)
        const selection = yield* context.selectTitle(session)
        if (!selection) return
 -      const title =

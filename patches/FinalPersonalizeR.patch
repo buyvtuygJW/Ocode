@@ -16,8 +16,8 @@ index f6239be4c..83097ca1c 100644
    SkillTool.Plugin,
 +  PersonalizePlugin.Plugin,
    SubagentTool.Plugin,
+   TodoTool.Plugin,
    WebFetchTool.Plugin,
-   WebSearchTool.Plugin,
 diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
 new file mode 100644
 index 000000000..8efc3e0d3
