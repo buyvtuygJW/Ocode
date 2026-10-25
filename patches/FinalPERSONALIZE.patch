@@ -987,8 +987,8 @@ index 8d03c824e..4acccaa70 100644
  import type { FileAttachment } from "@opencode/schema/prompt"
  
 @@ -154,10 +155,11 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
-   const sameProvider = String(message.model.providerID) === String(model.providerID)
-   const sameModel = sameProvider && String(message.model.id) === String(model.id)
+   const sameProvider = message.model.providerID === model.providerID
+   const sameModel = sameProvider && message.model.id === model.id
    const reuseProviderMetadata = sameModel && message.error === undefined
 -  const reasoningInterrupted = message.content.some(
 +  const items = Array.isArray(message.content) ? message.content : []

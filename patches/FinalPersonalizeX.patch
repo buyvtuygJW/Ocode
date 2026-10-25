@@ -37,8 +37,8 @@ index 31132eb..212baed 100644
 -  "model.dialog.provider": keybind("ctrl+a", "Open provider list from model dialog"),
 +  "model.dialog.provider": keybind("alt+p,ctrl+a", "Open provider list from model dialog"),
    "model.dialog.favorite": keybind("ctrl+f", "Toggle model favorite status"),
+   "model.dialog.usage": keybind("ctrl+u", "Open usage limits from model dialog"),
    "model.list": keybind("<leader>m", "List available models"),
-   "model.cycle_recent": keybind("f2", "Next recently used model"),
 diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme.tsx
 index ed568e695..27c1bca7d 100644
 --- a/packages/tui/src/context/theme.tsx
