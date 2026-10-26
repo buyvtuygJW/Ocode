@@ -744,6 +744,43 @@ export function run(
           }
         yield* Effect.yieldNow
       }
+      // PERSONALIZE(v1-adoption): sessions imported into Project.ID.global are
+      // normally re-homed by the session projector when Worktree.Event.Resolved
+      // fires — but persist() publishes that event only when the worktree row is
+      // first inserted. Any directory resolved BEFORE this import finished (e.g.
+      // the directory opencode was launched in) has already consumed its one-shot
+      // event, stranding its V1 sessions in global forever. Replay that adoption
+      // here for every already-resolved worktree before marking completion,
+      // using the same semantics as the projector: longest matching worktree
+      // wins, path becomes the directory relative to it, recency untouched.
+      yield* db
+        .transaction((tx) =>
+          Effect.gen(function* () {
+            yield* tx.run(sql`
+              UPDATE session_v2 SET
+                project_id = (
+                  SELECT w.project_id FROM worktree w
+                  WHERE session_v2.directory = w.directory
+                     OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
+                  ORDER BY length(w.directory) DESC LIMIT 1
+                ),
+                path = (
+                  SELECT ltrim(substr(session_v2.directory, length(w.directory) + 1), '/') FROM worktree w
+                  WHERE session_v2.directory = w.directory
+                     OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
+                  ORDER BY length(w.directory) DESC LIMIT 1
+                )
+              WHERE project_id = ${Project.ID.global}
+                AND workspace_id IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM worktree w
+                  WHERE session_v2.directory = w.directory
+                     OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
+                )
+            `)
+          }),
+        )
+        .pipe(Effect.orDie)
       yield* db
         .transaction((tx) =>
           Effect.gen(function* () {

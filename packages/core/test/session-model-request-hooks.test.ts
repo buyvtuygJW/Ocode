@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { Message, SystemPart } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
@@ -152,5 +153,44 @@ describe("SessionModelRequest HTTP hooks", () => {
         "receive:primary:created",
       ])
     }),
+  )
+})
+
+describe("SessionModelRequest hook null-safety", () => {
+  it.effect("falls back to the pre-hook draft when a hook nulls system/messages", () =>
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      const wiped: string[] = []
+      for (const name of ["context", "compaction", "generate", "title"] as const) {
+        yield* hooks.register("session", name, (event) =>
+          Effect.sync(() => {
+            wiped.push(name)
+            // Simulate a buggy plugin wiping the draft — must never reach the LLM request.
+            Object.assign(event, { system: undefined, messages: undefined })
+          }),
+        )
+      }
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const system = [SystemPart.make("Stay terse.")]
+      const messages = [Message.user("hello")]
+
+      for (const kind of KINDS) {
+        const prepared = yield* requests[kind]({
+          session,
+          agent: Agent.ID.make("build"),
+          model,
+          system,
+          messages,
+        })
+        expect(prepared.request.system).toBeDefined()
+        expect(prepared.request.messages).toBeDefined()
+        expect(prepared.request.system.length).toBe(1)
+        expect(prepared.request.messages.length).toBe(1)
+        for (const message of prepared.request.messages) {
+          expect(message.content).toBeDefined()
+        }
+      }
+      expect(wiped.sort()).toEqual(["compaction", "context", "generate", "title"])
+    }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
   )
 })

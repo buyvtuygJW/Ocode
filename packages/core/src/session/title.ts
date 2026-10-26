@@ -132,11 +132,15 @@ export const layer = Layer.effect(
         : messagePrompt(firstUser.text)
       const selection = yield* context.selectTitle(session)
       if (!selection) return
-      const title =
-        (yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
-        (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
-          ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
-          : undefined)
+      // PERSONALIZE: NO-TITLE-LLM — minimal deterministic local name ("NewSession-YYYYMMDD-HHMMSS"),
+      // zero tokens, no API call ever. LLM branch kept dead below (same hard-force idiom as the
+      // updater gate) so every helper/import stays referenced and the diff stays minimal.
+      const title = (true as boolean)
+        ? `NewSession-${new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-")}`
+        : ((yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
+          (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
+            ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
+            : undefined))
       if (!title) return
       const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
       const current = yield* store.get(sessionID)

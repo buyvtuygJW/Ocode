@@ -13,6 +13,7 @@ export type LocalService = {
   readonly version?: string
   readonly state: "ready" | "waiting" | "failed"
   readonly compatible: boolean
+  readonly error?: string
 }
 
 /**
@@ -27,7 +28,12 @@ export function decide(service: LocalService, options: DiscoverOptions) {
       "Background service uses an incompatible health protocol. Update this client or explicitly restart the service.",
     )
   if (service.state === "ready") return { _tag: "reuse" } as const
-  if (service.state === "failed") return fail("Background service failed to start")
+  if (service.state === "failed")
+    return fail(
+      service.error === undefined
+        ? "Background service failed to start"
+        : "Background service failed to start: " + service.error,
+    )
   return { _tag: "wait" } as const
 }
 
@@ -84,6 +90,7 @@ export async function probeResult(info: Info, timeout = defaultEnsureTiming.requ
       version: serverInfo.version,
       state: response.ok ? "ready" : response.status === 500 ? "failed" : "waiting",
       compatible: true,
+      error: serverInfo.error,
     } satisfies LocalService,
     timedOut: false,
   }
@@ -101,5 +108,6 @@ function decodeInfo(input: unknown) {
   if (typeof input !== "object" || input === null) return
   if (!("version" in input) || typeof input.version !== "string") return
   if (!("pid" in input) || typeof input.pid !== "number" || !Number.isInteger(input.pid) || input.pid < 0) return
-  return { version: input.version, pid: input.pid }
+  const error = "error" in input && typeof input.error === "string" ? input.error : undefined
+  return { version: input.version, pid: input.pid, error }
 }

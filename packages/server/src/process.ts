@@ -123,7 +123,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   }).pipe(
     Effect.catchCause((cause) => {
       if (!lifecycle || Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause)
-      return status.fail.pipe(
+      // Keep the first line of the failure so /api/info and the 503 can report why boot failed.
+      return status.fail(Cause.pretty(cause).split("\n", 1)[0]).pipe(
         Effect.andThen(
           Scope.close(applicationScope, Exit.failCause(cause)).pipe(
             Effect.catchCause((cleanupCause) =>
@@ -210,7 +211,13 @@ const infoResponse = Effect.fnUntraced(function* (
 ) {
   const state = yield* status.current
   return HttpServerResponse.jsonUnsafe(
-    { version, pid: process.pid, urls: urls(), paths: { tmp } },
+    {
+      version,
+      pid: process.pid,
+      urls: urls(),
+      paths: { tmp },
+      ...(state.type === "failed" && state.reason !== undefined ? { error: state.reason } : {}),
+    },
     {
       status: state.type === "ready" ? 200 : state.type === "failed" ? 500 : 503,
       headers: state.type === "starting" || state.type === "stopping" ? { "retry-after": "1" } : undefined,
@@ -223,7 +230,8 @@ function unavailable(status: Status.State) {
     return HttpServerResponse.jsonUnsafe(
       {
         code: "service_failed",
-        message: "The background service could not start.",
+        message:
+          "The background service could not start." + (status.reason === undefined ? "" : " " + status.reason),
         action: "Run `opencode service restart` after checking the service logs.",
       },
       { status: 503 },

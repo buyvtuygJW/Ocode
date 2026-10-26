@@ -11,6 +11,7 @@ import type { Model } from "@opencode/schema/model"
 import { Option, Schema } from "effect"
 import { fileURLToPath } from "url"
 import { SessionMessage } from "../message.js"
+import { decay, indexBlock } from "./context-decay.js"
 import { SessionHistory } from "../history.js"
 import { SessionRecentText } from "../recent-text.js"
 import type { FileAttachment } from "@opencode/schema/prompt"
@@ -156,10 +157,11 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
   const sameProvider = message.model.providerID === model.providerID
   const sameModel = sameProvider && message.model.id === model.id
   const reuseProviderMetadata = sameModel && message.error === undefined
-  const reasoningInterrupted = message.content.some(
+  const items = Array.isArray(message.content) ? message.content : []
+  const reasoningInterrupted = items.some(
     (item) => item.type === "reasoning" && item.time !== undefined && item.time.completed === undefined,
   )
-  const content = message.content.flatMap((item): ContentPart[] => {
+  const content = items.flatMap((item): ContentPart[] => {
     if (item.type === "text")
       return [
         {
@@ -314,9 +316,19 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
   }
 }
 
-/** Translate projected Session history into canonical @opencode/ai context. */
+/**
+ * Translate projected Session history into canonical @opencode/ai context. Decay runs first, on Session messages
+ * rather than lowered ones, so it can see tool inputs/paths and rewrite a tool's own body in place. The retrieval index
+ * is appended last, never prepended: it grows every time something is archived, and a growing prefix would cold-cache
+ * the whole request on every turn.
+ */
 export const toLLMMessages = (
   messages: readonly SessionMessage.Info[],
   model: Model.Ref,
   providerMetadataKey: string = model.providerID,
-) => messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey))
+) => {
+  const decayed = decay(messages)
+  const lowered = decayed.messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey))
+  const index = indexBlock(decayed.archive)
+  return index === undefined ? lowered : [...lowered, Message.user(index)]
+}

@@ -782,7 +782,9 @@ export const lowerGeneration = (request: LLMRequest, options = OpenResponsesOpti
     top_p: generation?.topP,
     presence_penalty: generation?.presencePenalty,
     frequency_penalty: generation?.frequencyPenalty,
-    ...(options.store !== undefined ? { store: options.store } : {}),
+    // SANITIZE(#459): default store:false so OpenAI does not retain the Responses payload
+    // (zero-logging). An explicit store in provider options still wins.
+    store: options.store ?? false,
     ...(options.metadata ? { metadata: options.metadata } : {}),
     ...(options.safetyIdentifier ? { safety_identifier: options.safetyIdentifier } : {}),
     ...(options.streamOptions?.includeObfuscation !== undefined
