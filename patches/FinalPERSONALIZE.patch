@@ -379,9 +379,107 @@ index 0000000000000000000000000000000000000000..56bff6ccfd5593c5db2676603f65e4f7
 +    rmSync(directory, { recursive: true, force: true })
 +  }
 +})
+diff --git a/.personalize/dedup.test.mjs b/.personalize/dedup.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..51840663b5834c957854b20f7af4476405a7ee78
+--- /dev/null
++++ b/.personalize/dedup.test.mjs
+@@ -0,0 +1,92 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import {
++  bumpLedger,
++  callSignature,
++  dedupeText,
++  estimateTokens,
++  ledgerState,
++  normalizeSentence,
++  punchLine,
++  resetLedger,
++  slapReceipt,
++  splitSentences,
++  stableStringify,
++} from "../packages/core/src/personalize/dedup.ts"
++
++test("stableStringify is key-order invariant and array-order exact", () => {
++  assert.equal(stableStringify({ b: 1, a: 2 }), stableStringify({ a: 2, b: 1 }))
++  assert.equal(
++    stableStringify({ a: { y: 1, x: 2 }, b: [3, 4] }),
++    stableStringify({ b: [3, 4], a: { x: 2, y: 1 } }),
++  )
++  assert.notEqual(stableStringify([1, 2]), stableStringify([2, 1]))
++  assert.equal(stableStringify(undefined), "null")
++})
++
++test("callSignature collides only for calls differing in argument key order", () => {
++  assert.equal(callSignature("read", { path: "a", limit: 5 }), callSignature("read", { limit: 5, path: "a" }))
++  assert.notEqual(callSignature("read", { path: "a" }), callSignature("read", { path: "b" }))
++  assert.notEqual(callSignature("read", {}), callSignature("glob", {}))
++})
++
++test("slapReceipt carries the call number, waste estimate and optional punch", () => {
++  assert.equal(
++    slapReceipt(7, 12, ""),
++    "*Systemslap* DUPLICATE of call #7 this turn — result already in context. wasted: ~12 tkn",
++  )
++  assert.equal(
++    slapReceipt(2, 4, "\n*SystemPunch* duplicates this session: 2 (≈8 tkn wasted)"),
++    "*Systemslap* DUPLICATE of call #2 this turn — result already in context. wasted: ~4 tkn\n*SystemPunch* duplicates this session: 2 (≈8 tkn wasted)",
++  )
++})
++
++test("punch line appears only from the second duplicate onward and counts both kinds", () => {
++  resetLedger()
++  assert.equal(punchLine(ledgerState("s1")), "")
++  bumpLedger("s1", "calls", 10)
++  assert.equal(punchLine(ledgerState("s1")), "")
++  bumpLedger("s1", "prose", 30)
++  assert.match(punchLine(ledgerState("s1")), /\*SystemPunch\* duplicates this session: 2 \(≈40 tkn wasted\)/)
++  assert.equal(ledgerState("nope"), undefined)
++  resetLedger()
++  assert.equal(ledgerState("s1"), undefined)
++})
++
++test("dedupeText strips adjacent duplicate sentences, keeps the first, leaves a marker", () => {
++  const text = "Build finished with exit zero. Build finished with exit zero. Now running the serve test."
++  const result = dedupeText(text)
++  assert.ok(result)
++  assert.equal(result.removed, 1)
++  assert.match(result.text, /\[duplicate removed ×1: "Build finished[^"]*"\]/)
++  assert.ok(result.text.includes("Now running the serve test."))
++  assert.ok(result.wastedTokens > 0)
++  const withoutMarker = result.text.replace(/\[duplicate[^\]]*\]/, "")
++  assert.ok(!withoutMarker.includes("Build finished with exit zero. Build"))
++})
++
++test("dedupeText collapses longer runs into one marker", () => {
++  const text = "Alpha beta gamma delta epsilon. Alpha beta gamma delta epsilon. Alpha beta gamma delta epsilon."
++  const result = dedupeText(text)
++  assert.ok(result)
++  assert.equal(result.removed, 2)
++  assert.match(result.text, /×2/)
++})
++
++test("dedupeText leaves non-adjacent repeats, short sentences and healthy text alone", () => {
++  assert.equal(dedupeText("Just one sentence, nothing repeated here at all."), undefined)
++  assert.equal(dedupeText("Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine."), undefined)
++  const nonAdjacent =
++    "Alpha beta gamma delta epsilon zeta. A completely different sentence follows here. Alpha beta gamma delta epsilon zeta."
++  assert.equal(dedupeText(nonAdjacent), undefined)
++})
++
++test("sentence normalization ignores case, punctuation and whitespace", () => {
++  assert.equal(normalizeSentence("  Build, FINISHED!!  "), normalizeSentence("build finished"))
++  assert.deepEqual(splitSentences("One. Two!\nThree?"), ["One.", "Two!", "Three?"])
++})
++
++test("estimateTokens is a deterministic chars/4 ceiling", () => {
++  assert.equal(estimateTokens("1234"), 1)
++  assert.equal(estimateTokens("12345"), 2)
++})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..269db1cc76b13bfc93bf8012894ab57161d1063f
+index 0000000000000000000000000000000000000000..e2ed71f92217b854898665b536aea24707bde4e8
 --- /dev/null
 +++ b/.personalize/manifest.json
 @@ -0,0 +1,20 @@
@@ -389,7 +487,6 @@ index 0000000000000000000000000000000000000000..269db1cc76b13bfc93bf8012894ab571
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
 +    { "target": "packages/cli/src/version.ts", "factory": "packages/cli/src/personalize/version.ts", "exports": ["OPENCODE_CHANNEL", "OPENCODE_LOCAL"] },
-+    { "target": "packages/cli/src/database-path.ts", "factory": "packages/cli/src/personalize/database-path.ts", "exports": ["databasePath"] },
 +    { "target": "packages/util/src/observability.ts", "factory": "packages/util/src/personalize-observability.ts", "exports": ["layer"] },
 +    { "target": "packages/ai/src/protocols/open-responses.ts", "factory": "packages/ai/src/personalize/open-responses.ts", "exports": ["lowerGeneration", "fromRequest", "fromRequestWithAdapter", "protocol"] },
 +    { "target": "packages/core/src/config/markdown.ts", "factory": "packages/core/src/personalize/markdown.ts", "exports": ["sanitize"] },
@@ -397,7 +494,8 @@ index 0000000000000000000000000000000000000000..269db1cc76b13bfc93bf8012894ab571
 +    { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
 +    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
 +    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
-+    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages"] },
++    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
++    { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },
 +    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
 +    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
 +    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
@@ -452,19 +550,6 @@ index 0000000000000000000000000000000000000000..35a8bb34eb5a8da0d024683fa49f1c2e
 +delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 +delete process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
 +delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-diff --git a/packages/cli/src/personalize/database-path.ts b/packages/cli/src/personalize/database-path.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..03176735724f89f84792ff63a68acb45247675fa
---- /dev/null
-+++ b/packages/cli/src/personalize/database-path.ts
-@@ -0,0 +1,7 @@
-+import { normalizeChannel } from "../../../../.personalize/channel.mjs"
-+
-+export function decorate(stock: typeof import("../database-path")) {
-+  const databasePath: typeof stock.databasePath = (input) =>
-+    stock.databasePath({ ...input, channel: normalizeChannel(input.channel) })
-+  return { databasePath }
-+}
 diff --git a/packages/cli/src/personalize/version.ts b/packages/cli/src/personalize/version.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..552e669cfaa7a25bdecdb6630c9add9114ca5e5c
@@ -593,6 +678,146 @@ index 0000000000000000000000000000000000000000..1075ed09aa1de59786c95590314ece1a
 +  }
 +  const configured: typeof stock.configured = (options) => stock.configured(options).mapLayer(() => layer(options))
 +  return { layer, configured, node: configured({ path: ":memory:" }) }
++}
+diff --git a/packages/core/src/personalize/dedup.ts b/packages/core/src/personalize/dedup.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d19c6de113494da4bbf7cbced7f6d10875e1228
+--- /dev/null
++++ b/packages/core/src/personalize/dedup.ts
+@@ -0,0 +1,134 @@
++// ============================================================================
++// PERSONALIZATION (deltav11) — duplicate guards.
++// Deterministic detection of the two provable waste shapes:
++//   1. call echo: adjacent identical tool calls inside one step
++//   2. prose echo: adjacent duplicate sentences inside one text part
++// Hard punishment only where waste is provable (adjacent identical);
++// everything contextual is counted in the ledger, never blocked.
++// Pure module: no imports, no effects — unit-tested in .personalize/dedup.test.mjs.
++// ============================================================================
++
++export interface LedgerEntry {
++  readonly calls: number
++  readonly prose: number
++  readonly wastedTokens: number
++}
++
++const ledgers = new Map<string, LedgerEntry>()
++
++export function resetLedger(): void {
++  ledgers.clear()
++}
++
++export function ledgerState(key: string): LedgerEntry | undefined {
++  return ledgers.get(key)
++}
++
++export function estimateTokens(text: string): number {
++  return Math.max(1, Math.ceil(text.length / 4))
++}
++
++export function bumpLedger(key: string, kind: "calls" | "prose", wastedTokens: number): LedgerEntry {
++  const entry = ledgers.get(key) ?? { calls: 0, prose: 0, wastedTokens: 0 }
++  const next: LedgerEntry = {
++    calls: entry.calls + (kind === "calls" ? 1 : 0),
++    prose: entry.prose + (kind === "prose" ? 1 : 0),
++    wastedTokens: entry.wastedTokens + wastedTokens,
++  }
++  ledgers.set(key, next)
++  return next
++}
++
++/** Cumulative punch line, injected once the session has two or more duplicates total. */
++export function punchLine(entry: LedgerEntry | undefined): string {
++  if (!entry) return ""
++  const total = entry.calls + entry.prose
++  if (total < 2) return ""
++  return `\n*SystemPunch* duplicates this session: ${total} (≈${entry.wastedTokens} tkn wasted)`
++}
++
++// --- guard 1: call echo ------------------------------------------------------
++
++export function stableStringify(value: unknown): string {
++  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
++  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`
++  const record = value as Record<string, unknown>
++  const keys = Object.keys(record).sort()
++  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`
++}
++
++/** Signature of one tool call; calls differing only in argument key order collide by design. */
++export function callSignature(name: unknown, args: unknown): string {
++  return `${String(name ?? "")}(${stableStringify(args)})`
++}
++
++export function slapReceipt(callNumber: number, wastedTokens: number, punch: string): string {
++  return `*Systemslap* DUPLICATE of call #${callNumber} this turn — result already in context. wasted: ~${wastedTokens} tkn${punch}`
++}
++
++// --- guard 2: prose echo -----------------------------------------------------
++
++/** Sentences shorter than this (normalized) are structural noise — never compared. */
++const MIN_SENTENCE_CHARS = 24
++
++export function normalizeSentence(sentence: string): string {
++  return sentence
++    .toLowerCase()
++    .replace(/\s+/g, " ")
++    .replace(/[^\p{L}\p{N} ]/gu, "")
++    .trim()
++}
++
++export function splitSentences(text: string): string[] {
++  return text
++    .split(/(?<=[.!?])\s+|\n+/)
++    .map((sentence) => sentence.trim())
++    .filter((sentence) => sentence.length > 0)
++}
++
++export interface DedupeTextResult {
++  readonly text: string
++  readonly removed: number
++  readonly wastedTokens: number
++}
++
++/**
++ * Strips runs of adjacent duplicate sentences from ONE text part. The first
++ * occurrence is kept, each stripped run leaves one inline marker. Everything
++ * else — short sentences, non-adjacent repeats, cross-part or cross-turn
++ * repetition — is deliberately left alone.
++ */
++export function dedupeText(text: string): DedupeTextResult | undefined {
++  if (text.length < MIN_SENTENCE_CHARS * 2) return undefined
++  const sentences = splitSentences(text)
++  if (sentences.length < 2) return undefined
++  const out: string[] = []
++  let removed = 0
++  let wastedTokens = 0
++  let changed = false
++  let index = 0
++  while (index < sentences.length) {
++    const kept = sentences[index]!
++    out.push(kept)
++    const normalized = normalizeSentence(kept)
++    let run = 0
++    while (
++      index + 1 + run < sentences.length &&
++      normalized.length >= MIN_SENTENCE_CHARS &&
++      normalizeSentence(sentences[index + 1 + run]!) === normalized
++    ) {
++      run++
++    }
++    if (run > 0) {
++      changed = true
++      removed += run
++      wastedTokens += run * estimateTokens(kept)
++      const preview = kept.length > 60 ? `${kept.slice(0, 60)}…` : kept
++      out.push(`[duplicate removed ×${run}: "${preview}"]`)
++      index += run
++    }
++    index++
++  }
++  if (!changed) return undefined
++  return { text: out.join(" "), removed, wastedTokens }
 +}
 diff --git a/packages/core/src/personalize/hooks.ts b/packages/core/src/personalize/hooks.ts
 new file mode 100644
@@ -725,14 +950,47 @@ index 0000000000000000000000000000000000000000..dfb1489f5102edcc989a16f226e44921
 +}
 +
 +export const decorate = (_stock: typeof import("../config/markdown")) => ({ sanitize })
+diff --git a/packages/core/src/personalize/message-updater.ts b/packages/core/src/personalize/message-updater.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eff6f79388ce8d3c00c2ed3a17e3cee38e5b233a
+--- /dev/null
++++ b/packages/core/src/personalize/message-updater.ts
+@@ -0,0 +1,25 @@
++// PERSONALIZATION (deltav11) — guard 2: prose echo.
++// Strips runs of adjacent duplicate sentences from ONE assistant text part
++// before the message is projected and stored, so both the display and the
++// next request's context carry the deduped text. The first occurrence is
++// kept; each stripped run leaves one inline marker. Cross-part and
++// cross-turn repetition is deliberately untouched (it may be deliberate).
++import { bumpLedger, dedupeText, punchLine } from "./dedup"
++
++export function decorate(stock: typeof import("../session/message-updater")) {
++  const update: typeof stock.update = (adapter, event) => {
++    if (event.type === "session.text.ended") {
++      const data = event.data as { readonly text: string; readonly sessionID?: unknown; readonly assistantMessageID?: unknown }
++      const result = dedupeText(data.text)
++      if (result) {
++        const key = String(data.sessionID ?? data.assistantMessageID ?? "session")
++        const entry = bumpLedger(key, "prose", result.wastedTokens)
++        const punch = punchLine(entry)
++        const text = punch ? `${result.text}\n${punch}` : result.text
++        event = { ...event, data: { ...data, text } }
++      }
++    }
++    return stock.update(adapter, event)
++  }
++  return { update }
++}
 diff --git a/packages/core/src/personalize/model-request.ts b/packages/core/src/personalize/model-request.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..eb62642d090aec73947a2b848b8ff3ab0534c4c4
+index 0000000000000000000000000000000000000000..35631623b123525f91db362169c86c89bec866e8
 --- /dev/null
 +++ b/packages/core/src/personalize/model-request.ts
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,67 @@
++import { Context, Effect, Layer } from "effect"
 +import { canonicalMessages, copyWith } from "./content"
 +import { personaLead, stripStockIdentity } from "./persona"
++import { bumpLedger, callSignature, estimateTokens, punchLine, slapReceipt } from "./dedup"
 +
 +export function personalizeSystem<T extends { readonly content: string }>(system: readonly T[]): T[] {
 +  const persona = personaLead()
@@ -747,7 +1005,54 @@ index 0000000000000000000000000000000000000000..eb62642d090aec73947a2b848b8ff3ab
 +  }
 +  const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)
 +  const boundImages: typeof stock.boundImages = (messages, ...rest) => stock.boundImages(canonicalMessages(messages), ...rest)
-+  return { baseTranscript, unsupportedParts, boundImages }
++
++  // Guard 1 (deltav11): adjacent duplicate tool calls get a *Systemslap*
++  // receipt instead of execution. executeTool runs once per tool-call event
++  // in stream order, so a closure over the previous signature flags exactly
++  // the blind-echo shape: the model re-emitted a call before any result
++  // could exist. A different call in between, or a later step (fresh
++  // Prepared), is informed repetition and stays legal.
++  const guardPrepared = <P extends { readonly executeTool: (input: any) => any; readonly [key: string]: unknown }>(prepared: P): P => {
++    let lastSignature: string | undefined
++    let callNumber = 0
++    return {
++      ...prepared,
++      executeTool: (input: any) => {
++        callNumber += 1
++        const signature = callSignature(input?.call?.name, input?.call?.arguments)
++        if (signature === lastSignature) {
++          const wasted = estimateTokens(signature)
++          const entry = bumpLedger(String(input?.sessionID ?? ""), "calls", wasted)
++          const receipt = slapReceipt(callNumber, wasted, punchLine(entry))
++          return Effect.succeed({ content: [{ type: "text" as const, text: receipt }] })
++        }
++        lastSignature = signature
++        return prepared.executeTool(input)
++      },
++    } as P
++  }
++
++  // Same node-wrapping pattern as the owned hooks factory: build the stock
++  // layer, wrap the service inside its context, keep dependency wiring and
++  // the service contract intact (mapLayer preserves the node's deps).
++  const node: typeof stock.node = stock.node.mapLayer((layer) =>
++    Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
++      const original = Context.get(context, stock.Service)
++      return Context.add(
++        context,
++        stock.Service,
++        {
++          ...original,
++          primary: (input: Parameters<typeof original.primary>[0]) => Effect.map(original.primary(input), guardPrepared),
++          compaction: (input: Parameters<typeof original.compaction>[0]) => Effect.map(original.compaction(input), guardPrepared),
++          generate: (input: Parameters<typeof original.generate>[0]) => Effect.map(original.generate(input), guardPrepared),
++          title: (input: Parameters<typeof original.title>[0]) => Effect.map(original.title(input), guardPrepared),
++        },
++      )
++    })),
++  )
++
++  return { baseTranscript, unsupportedParts, boundImages, node }
 +}
 diff --git a/packages/core/src/personalize/persona.ts b/packages/core/src/personalize/persona.ts
 new file mode 100644
@@ -1629,10 +1934,10 @@ index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22
 +})
 diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7dfc5274c0a9a21ed3f1ebcfda8c1d9e75b95480
+index 0000000000000000000000000000000000000000..65006af29a3c9ca4d63ce0074351b9ef60964df9
 --- /dev/null
 +++ b/packages/server/src/personalize/process.ts
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,31 @@
 +import os from "node:os"
 +import path from "node:path"
 +import { Effect } from "effect"
@@ -1641,19 +1946,32 @@ index 0000000000000000000000000000000000000000..7dfc5274c0a9a21ed3f1ebcfda8c1d9e
 +
 +export function decorate(stock: typeof import("../process")) {
 +  const start: typeof stock.start = (options) => Effect.acquireUseRelease(
-+    Effect.promise((signal) => Flock.acquire("service-bootstrap", {
-+      dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++    Effect.promise((signal) =>
++      Flock.acquire("service-bootstrap", {
++        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++      }).then((lease) => {
++        // Flock refuses a second release (metadata is deleted on the first);
++        // the boot-service release and the finalizer share one guarded
++        // release so whichever fires first wins and the other no-ops.
++        let done = false
++        const release = () => {
++          if (done) return Promise.resolve()
++          done = true
++          return lease.release()
++        }
++        return { release }
++      })
++    ),
++    (boot) => stock.start(options).pipe(Effect.provideService(PersonalizeBoot, {
++      retry: Effect.void, release: Effect.promise(() => boot.release()),
 +    })),
-+    (lease) => stock.start(options).pipe(Effect.provideService(PersonalizeBoot, {
-+      retry: Effect.void, release: Effect.promise(() => lease.release()),
-+    })),
-+    (lease) => Effect.promise(() => lease.release()),
++    (boot) => Effect.promise(() => boot.release()),
 +  )
 +  return { start }
 +}
 diff --git a/packages/server/src/personalize/service-status.ts b/packages/server/src/personalize/service-status.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8204b91e9d0433dca619c879198b3827d43e9582
+index 0000000000000000000000000000000000000000..059c8b413b8f0b6c47935e291fa43a0b0b160e05
 --- /dev/null
 +++ b/packages/server/src/personalize/service-status.ts
 @@ -0,0 +1,23 @@
@@ -1661,9 +1979,9 @@ index 0000000000000000000000000000000000000000..8204b91e9d0433dca619c879198b3827
 +import { PersonalizeBoot } from "@opencode/util/personalize-boot"
 +
 +export function decorate(stock: typeof import("../service-status")) {
-+  const make: typeof stock.make = (options) => Effect.gen(function* () {
++  const make: typeof stock.make = (options = {}) => Effect.gen(function* () {
 +    type State = import("../service-status").State | { readonly type: "retrying" }
-+    const state = yield* Ref.make<State>({ type: options.starting ? "starting" : "ready" })
++    const state = yield* Ref.make<State>(options.initial ?? { type: "starting" })
 +    const boot = yield* Effect.serviceOption(PersonalizeBoot)
 +    const release = Option.isSome(boot) ? boot.value.release : Effect.void
 +    if (Option.isSome(boot)) boot.value.retry = Ref.update(state, (value) =>
@@ -1675,7 +1993,7 @@ index 0000000000000000000000000000000000000000..8204b91e9d0433dca619c879198b3827
 +        .pipe(Effect.andThen(release)),
 +      fail: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "failed" } : value)
 +        .pipe(Effect.andThen(release)),
-+      beginStopping: Ref.modify(state, (value) => value.type === "stopping" ? [false, value] : [true, { type: "stopping" }]),
++      beginStopping: Ref.update(state, (value) => value.type === "stopping" ? value : { type: "stopping" }),
 +    }
 +  })
 +  return { make }

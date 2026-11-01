@@ -11,22 +11,26 @@ index 0000000000000000000000000000000000000000..3f1f250f7d8383737443b209cddd7d2b
 +}
 diff --git a/packages/core/src/personalize/tools.ts b/packages/core/src/personalize/tools.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d812dee817cd84bad6fc31d1ecca115a41e8b986
+index 0000000000000000000000000000000000000000..5f437b9ee35a602dbac438be2fc4bd2adb90d788
 --- /dev/null
 +++ b/packages/core/src/personalize/tools.ts
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,18 @@
 +import { Context, Effect, Scope } from "effect"
 +import { Plugin } from "../plugin/personalize"
 +
 +export function decorate(stock: typeof import("../plugin/internal")) {
 +  type Requirements = ReturnType<typeof Plugin.effect> extends Effect.Effect<unknown, unknown, infer R> ? R : never
-+  const list: typeof stock.list = stock.list.pipe(Effect.flatMap((plugins) => Effect.gen(function* () {
++  const list: typeof stock.list = Effect.fn("PluginInternal.list")(function* () {
++    const plugins = yield* stock.list()
 +    const context = Context.omit(Scope.Scope)(yield* Effect.context<Requirements>())
-+    return { ...plugins, post: [...plugins.post, {
-+      id: Plugin.id,
-+      effect: (host) => Plugin.effect(host).pipe(Effect.provide(context)),
-+    }] }
-+  })))
++    return {
++      ...plugins,
++      post: [...plugins.post, {
++        id: Plugin.id,
++        effect: (host) => Plugin.effect(host).pipe(Effect.provide(context)),
++      }],
++    }
++  })
 +  return { list }
 +}
 diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
