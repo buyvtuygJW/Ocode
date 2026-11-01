@@ -1,31 +1,3 @@
-diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
-index 80a67fe..7daf404 100755
---- a/packages/cli/script/build.ts
-+++ b/packages/cli/script/build.ts
-@@ -1,4 +1,5 @@
- #!/usr/bin/env bun
-+import { PersonalizeBuild } from "../../../.personalize/build.mjs"
- 
- import { $ } from "bun"
- import { createHash } from "node:crypto"
-@@ -160,7 +161,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
-   const result = await Bun.build({
-     entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
-     tsconfig: "./tsconfig.json",
--    plugins: [
-+    plugins: PersonalizeBuild.plugins([
-       appAssetsPlugin,
-       solidPlugin,
-       parcelWatcherPlugin,
-@@ -168,7 +169,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
-       pluginRuntimePlugin,
-       simulationGraphPlugin,
-       modelsSnapshot,
--    ],
-+    ]),
-     external: ["node-gyp"],
-     format: "esm",
-     minify: true,
 diff --git a/.personalize/build.d.mts b/.personalize/build.d.mts
 new file mode 100644
 index 0000000000000000000000000000000000000000..bc05d0d68a8c3f46c027cfb7b190a25b2fbcb487
@@ -286,7 +258,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..7a59a3b4927c3e812455eb43034be464e1c155fc
 --- /dev/null
 +++ b/.personalize/channel.d.mts
-@@ -0,0 +1,1 @@
+@@ -0,0 +1 @@
 +export function normalizeChannel(value: unknown): string
 diff --git a/.personalize/channel.mjs b/.personalize/channel.mjs
 new file mode 100644
@@ -535,6 +507,34 @@ index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97
 +    protocol: { ...stock.protocol, body: { ...stock.protocol.body, from: fromRequest } },
 +  }
 +}
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index 80a67fe75589d35a68f803ae2ffdab35e48715a6..7daf40430eae26b2e61239f5d79593ab1719c6ad 100644
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env bun
++import { PersonalizeBuild } from "../../../.personalize/build.mjs"
+ 
+ import { $ } from "bun"
+ import { createHash } from "node:crypto"
+@@ -160,7 +161,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+   const result = await Bun.build({
+     entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [
++    plugins: PersonalizeBuild.plugins([
+       appAssetsPlugin,
+       solidPlugin,
+       parcelWatcherPlugin,
+@@ -168,7 +169,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       pluginRuntimePlugin,
+       simulationGraphPlugin,
+       modelsSnapshot,
+-    ],
++    ]),
+     external: ["node-gyp"],
+     format: "esm",
+     minify: true,
 diff --git a/packages/cli/src/personalize/bootstrap.ts b/packages/cli/src/personalize/bootstrap.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..35a8bb34eb5a8da0d024683fa49f1c2e488267af
@@ -640,15 +640,16 @@ index 0000000000000000000000000000000000000000..031c11b3c2aa19dbbc190db469d7432c
 +}
 diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1075ed09aa1de59786c95590314ece1ad25bd769
+index 0000000000000000000000000000000000000000..e362747a9694ad5c049894e7944650f72aeae689
 --- /dev/null
 +++ b/packages/core/src/personalize/database.ts
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,40 @@
 +import path from "node:path"
 +import { Cause, Effect, Exit, Layer, Scope } from "effect"
 +import { Global } from "@opencode/util/global"
 +import { Flock } from "@opencode/util/flock"
 +import { sqliteBusy, updateBoot } from "@opencode/util/personalize-boot"
++import { guardSessionSchema } from "./schema-guard"
 +
 +export function decorate(stock: typeof import("../database/database")) {
 +  const layer: typeof stock.layer = (options = { path: ":memory:" }) => {
@@ -665,7 +666,11 @@ index 0000000000000000000000000000000000000000..1075ed09aa1de59786c95590314ece1a
 +            const scope = yield* Scope.make()
 +            yield* Scope.addFinalizerExit(parent, (exit) => Scope.close(scope, exit))
 +            const exit = yield* Effect.exit(Layer.buildWithScope(stock.layer({ ...options, path: file }), scope))
-+            if (Exit.isSuccess(exit)) return exit.value
++            if (Exit.isSuccess(exit)) {
++              // Schema drift guard: runs after migrations settle; never throws (see schema-guard.ts).
++              guardSessionSchema(file)
++              return exit.value
++            }
 +            yield* Scope.close(scope, exit)
 +            if (attempt >= 6 || !sqliteBusy(Cause.pretty(exit.cause))) return yield* Effect.failCause(exit.cause)
 +            yield* updateBoot("retry")
@@ -1080,6 +1085,62 @@ index 0000000000000000000000000000000000000000..6d0f3669589b67f28f3d9f2d07fa594c
 +  if (prompt.startsWith("You are opencode, an agent")) return prompt
 +  return prompt.replace(/^You are an AI agent running in OpenCode,[^.]*\.\s*/, "")
 +    .replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
+diff --git a/packages/core/src/personalize/schema-guard.ts b/packages/core/src/personalize/schema-guard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbdf76ccd78541cf6d4929449394c4a09b401a0d
+--- /dev/null
++++ b/packages/core/src/personalize/schema-guard.ts
+@@ -0,0 +1,50 @@
++import { Database as RawDatabase } from "bun:sqlite"
++import { getTableColumns } from "drizzle-orm"
++import { SessionTable } from "../session/sql"
++
++// Upstream once shipped a migration that drops a column other builds on the
++// same machine still select, which turns into "no such column: session_v2.x"
++// boot crash loops (2026-10-24: session_v2.allowance). After the stock layer
++// settles (migrations included), re-add any column this build's schema
++// declares but the table no longer has. Add-only: never drops, never renames,
++// no-op when the table is absent. Best effort: any failure is logged and
++// skipped so boot never breaks because of the guard itself.
++export function guardSessionSchema(file: string | undefined) {
++  if (!file || file === ":memory:") return
++  let db: RawDatabase
++  try {
++    db = new RawDatabase(file)
++  } catch {
++    return
++  }
++  try {
++    const table = db
++      .query<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`)
++      .get()
++    if (!table) return
++    const present = new Set(
++      db.query<{ name: string }>(`PRAGMA table_info("session_v2")`).all().map((row) => row.name),
++    )
++    for (const [name, column] of Object.entries(getTableColumns(SessionTable))) {
++      if (present.has(name)) continue
++      const type = column.getSQLType()
++      const literal =
++        typeof column.default === "number" || typeof column.default === "string" || typeof column.default === "boolean"
++          ? column.default
++          : undefined
++      const notNull = literal !== undefined && column.notNull ? " NOT NULL" : ""
++      const fallback =
++        literal === undefined
++          ? ""
++          : ` DEFAULT ${typeof literal === "string" ? `'${literal.replaceAll("'", "''")}'` : literal}`
++      db.run(`ALTER TABLE "session_v2" ADD COLUMN "${name}" ${type}${notNull}${fallback};`)
++      console.warn(
++        `[personalize schema-guard] session_v2.${name} was missing (dropped by an upstream migration); re-added as ${type}${notNull}${fallback}`,
++      )
++    }
++  } catch (error) {
++    console.warn(`[personalize schema-guard] skipped: ${error instanceof Error ? error.message : String(error)}`)
++  } finally {
++    db.close()
++  }
 +}
 diff --git a/packages/core/src/personalize/skill.ts b/packages/core/src/personalize/skill.ts
 new file mode 100644
