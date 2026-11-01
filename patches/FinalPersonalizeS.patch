@@ -1,27 +1,35 @@
-diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
-index eaa443ae4..f25e566ea 100644
---- a/packages/core/src/plugin/agent.ts
-+++ b/packages/core/src/plugin/agent.ts
-@@ -3,6 +3,15 @@ export * as AgentPlugin from "./agent.js"
- import { define } from "@opencode/plugin/effect/plugin"
- import { Effect } from "effect"
- import { Agent } from "../agent.js"
-+import PROMPT_RESEARCH from "./prompt/research.txt"
-+import PROMPT_BIOLOGY from "./prompt/biology.txt"
-+import PROMPT_PHYSICS from "./prompt/physics.txt"
-+import PROMPT_ML from "./prompt/ml.txt"
-+import PROMPT_WRITE from "./prompt/write.txt"
-+import PROMPT_LITERATURE_REVIEW from "./prompt/literature-review.txt"
-+import PROMPT_CRITIQUE from "./prompt/critique.txt"
-+import PROMPT_PHYSICS_CRITIQUE from "./prompt/physics-critique.txt"
-+import PROMPT_REVIEWER from "./prompt/reviewer.txt"
- 
- const PROMPT_EXPLORE = `You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
- 
-@@ -138,6 +147,144 @@ export const Plugin = define({
-         item.system = PROMPT_SUMMARY
-         item.permissions.push({ action: "*", resource: "*", effect: "deny" })
-       })
+diff --git a/.personalize/S.json b/.personalize/S.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..df6f6ea6dec872c68e598a423537b4532d5b0d75
+--- /dev/null
++++ b/.personalize/S.json
+@@ -0,0 +1,5 @@
++{
++  "modules": [
++    { "target": "packages/core/src/plugin/agent.ts", "factory": "packages/core/src/personalize/science.ts", "exports": ["Plugin"] }
++  ]
++}
+diff --git a/packages/core/src/personalize/science.ts b/packages/core/src/personalize/science.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1aa0631b3b7a30a8bd6a7953ddcdaf40668e3dff
+--- /dev/null
++++ b/packages/core/src/personalize/science.ts
+@@ -0,0 +1,156 @@
++import { Effect } from "effect"
++import { Agent } from "@opencode/schema/agent"
++import PROMPT_RESEARCH from "../plugin/prompt/research.txt"
++import PROMPT_BIOLOGY from "../plugin/prompt/biology.txt"
++import PROMPT_PHYSICS from "../plugin/prompt/physics.txt"
++import PROMPT_ML from "../plugin/prompt/ml.txt"
++import PROMPT_WRITE from "../plugin/prompt/write.txt"
++import PROMPT_LITERATURE_REVIEW from "../plugin/prompt/literature-review.txt"
++import PROMPT_CRITIQUE from "../plugin/prompt/critique.txt"
++import PROMPT_PHYSICS_CRITIQUE from "../plugin/prompt/physics-critique.txt"
++import PROMPT_REVIEWER from "../plugin/prompt/reviewer.txt"
++export function decorate(stock: typeof import("../plugin/agent")) {
++  return { Plugin: { ...stock.Plugin, effect: Effect.fn(function* (ctx: Parameters<typeof stock.Plugin.effect>[0]) {
++    yield* stock.Plugin.effect(ctx)
++    yield* ctx.agent.transform((editor) => {
 +
 +      // --- OpenScience research agents (optional patch: FinalPersonalizeS) ---
 +      editor.update(Agent.ID.make("research"), (item) => {
@@ -160,12 +168,12 @@ index eaa443ae4..f25e566ea 100644
 +          { action: "external_directory", resource: "*", effect: "allow" },
 +        )
 +      })
-     })
-   }),
- })
++    })
++  }) } }
++}
 diff --git a/packages/core/src/plugin/prompt/biology.txt b/packages/core/src/plugin/prompt/biology.txt
 new file mode 100644
-index 000000000..94ad8765f
+index 0000000000000000000000000000000000000000..94ad8765f41d8607c62677f5f8a9b16ce53b0736
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/biology.txt
 @@ -0,0 +1,905 @@
@@ -1076,7 +1084,7 @@ index 000000000..94ad8765f
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/critique.txt b/packages/core/src/plugin/prompt/critique.txt
 new file mode 100644
-index 000000000..174816e14
+index 0000000000000000000000000000000000000000..174816e142d94bd8f023b057c2d2c18554f86840
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/critique.txt
 @@ -0,0 +1,197 @@
@@ -1279,7 +1287,7 @@ index 000000000..174816e14
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/literature-review.txt b/packages/core/src/plugin/prompt/literature-review.txt
 new file mode 100644
-index 000000000..c1fc7dd78
+index 0000000000000000000000000000000000000000..c1fc7dd7880d4d97fb4c4fb248b89c0658ba5272
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/literature-review.txt
 @@ -0,0 +1,267 @@
@@ -1552,7 +1560,7 @@ index 000000000..c1fc7dd78
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/ml.txt b/packages/core/src/plugin/prompt/ml.txt
 new file mode 100644
-index 000000000..fc8ffff46
+index 0000000000000000000000000000000000000000..fc8ffff4646864efc8a8279ad3b00db8423a60cc
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/ml.txt
 @@ -0,0 +1,271 @@
@@ -1829,7 +1837,7 @@ index 000000000..fc8ffff46
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/physics-critique.txt b/packages/core/src/plugin/prompt/physics-critique.txt
 new file mode 100644
-index 000000000..7c0dad679
+index 0000000000000000000000000000000000000000..7c0dad67949afd4980a23f3f1c569b338bdf923e
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/physics-critique.txt
 @@ -0,0 +1,151 @@
@@ -1986,7 +1994,7 @@ index 000000000..7c0dad679
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/physics.txt b/packages/core/src/plugin/prompt/physics.txt
 new file mode 100644
-index 000000000..95622b89b
+index 0000000000000000000000000000000000000000..95622b89b41f5966a465daa8aef7b91b425e6db3
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/physics.txt
 @@ -0,0 +1,341 @@
@@ -2333,7 +2341,7 @@ index 000000000..95622b89b
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/research.txt b/packages/core/src/plugin/prompt/research.txt
 new file mode 100644
-index 000000000..95827a27d
+index 0000000000000000000000000000000000000000..95827a27d049ad2df056f90b15cc1ad74195ce35
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/research.txt
 @@ -0,0 +1,635 @@
@@ -2974,7 +2982,7 @@ index 000000000..95827a27d
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/reviewer.txt b/packages/core/src/plugin/prompt/reviewer.txt
 new file mode 100644
-index 000000000..bd4764051
+index 0000000000000000000000000000000000000000..bd4764051c36aa9df2417cef86033065f7ea74be
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/reviewer.txt
 @@ -0,0 +1,153 @@
@@ -3133,7 +3141,7 @@ index 000000000..bd4764051
 +</system-reminder>
 diff --git a/packages/core/src/plugin/prompt/write.txt b/packages/core/src/plugin/prompt/write.txt
 new file mode 100644
-index 000000000..2293caddc
+index 0000000000000000000000000000000000000000..2293caddc348a1ccd89116089d4b2c43487933c8
 --- /dev/null
 +++ b/packages/core/src/plugin/prompt/write.txt
 @@ -0,0 +1,79 @@

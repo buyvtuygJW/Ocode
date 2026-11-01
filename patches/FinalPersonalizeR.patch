@@ -1,26 +1,37 @@
-diff --git a/packages/core/src/plugin/internal.ts b/packages/core/src/plugin/internal.ts
-index f6239be4c..83097ca1c 100644
---- a/packages/core/src/plugin/internal.ts
-+++ b/packages/core/src/plugin/internal.ts
-@@ -97,6 +97,7 @@ import { ProviderPlugins } from "./provider.js"
- import { OpencodePlugin } from "./provider/opencode.js"
- import { WebSearchPlugins } from "./websearch/index.js"
- import { SkillPlugin } from "./skill.js"
-+import { PersonalizePlugin } from "./personalize.js"
- import { VcsHgPlugin } from "./vcs/hg.js"
- import { ToolInputRepairPlugin } from "./tool-input-repair.js"
- import { OptimizePlugin } from "./optimize.js"
-@@ -242,6 +243,7 @@ const pre = [
-   ReadTool.Plugin,
-   ShellTool.Plugin,
-   SkillTool.Plugin,
-+  PersonalizePlugin.Plugin,
-   SubagentTool.Plugin,
-   TodoTool.Plugin,
-   WebFetchTool.Plugin,
+diff --git a/.personalize/R.json b/.personalize/R.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f1f250f7d8383737443b209cddd7d2be5282bbf
+--- /dev/null
++++ b/.personalize/R.json
+@@ -0,0 +1,5 @@
++{
++  "modules": [
++    { "target": "packages/core/src/plugin/internal.ts", "factory": "packages/core/src/personalize/tools.ts", "exports": ["list"] }
++  ]
++}
+diff --git a/packages/core/src/personalize/tools.ts b/packages/core/src/personalize/tools.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d812dee817cd84bad6fc31d1ecca115a41e8b986
+--- /dev/null
++++ b/packages/core/src/personalize/tools.ts
+@@ -0,0 +1,14 @@
++import { Context, Effect, Scope } from "effect"
++import { Plugin } from "../plugin/personalize"
++
++export function decorate(stock: typeof import("../plugin/internal")) {
++  type Requirements = ReturnType<typeof Plugin.effect> extends Effect.Effect<unknown, unknown, infer R> ? R : never
++  const list: typeof stock.list = stock.list.pipe(Effect.flatMap((plugins) => Effect.gen(function* () {
++    const context = Context.omit(Scope.Scope)(yield* Effect.context<Requirements>())
++    return { ...plugins, post: [...plugins.post, {
++      id: Plugin.id,
++      effect: (host) => Plugin.effect(host).pipe(Effect.provide(context)),
++    }] }
++  })))
++  return { list }
++}
 diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
 new file mode 100644
-index 000000000..8efc3e0d3
+index 0000000000000000000000000000000000000000..8efc3e0d38f4c522f413d0fc3b83789e6ca4c311
 --- /dev/null
 +++ b/packages/core/src/plugin/personalize.ts
 @@ -0,0 +1,716 @@

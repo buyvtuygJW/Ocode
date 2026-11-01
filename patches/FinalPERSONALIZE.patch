@@ -1,130 +1,649 @@
-diff --git a/packages/ai/src/protocols/open-responses.ts b/packages/ai/src/protocols/open-responses.ts
-index 1cc4c331e..05808716e 100644
---- a/packages/ai/src/protocols/open-responses.ts
-+++ b/packages/ai/src/protocols/open-responses.ts
-@@ -788,7 +788,9 @@ export const lowerGeneration = (request: LLMRequest, options = OpenResponsesOpti
-     top_p: generation?.topP,
-     presence_penalty: generation?.presencePenalty,
-     frequency_penalty: generation?.frequencyPenalty,
--    ...(options.store !== undefined ? { store: options.store } : {}),
-+    // SANITIZE(#459): default store:false so OpenAI does not retain the Responses payload
-+    // (zero-logging). An explicit store in provider options still wins.
-+    store: options.store ?? false,
-     ...(options.metadata ? { metadata: options.metadata } : {}),
-     ...(options.safetyIdentifier ? { safety_identifier: options.safetyIdentifier } : {}),
-     ...(options.streamOptions?.includeObfuscation !== undefined
-diff --git a/packages/cli/src/database-path.ts b/packages/cli/src/database-path.ts
-index 958449c3e..d13e12804 100644
---- a/packages/cli/src/database-path.ts
-+++ b/packages/cli/src/database-path.ts
-@@ -2,12 +2,16 @@ import path from "node:path"
- import { OPENCODE_CHANNEL } from "./version"
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index 80a67fe..7daf404 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env bun
++import { PersonalizeBuild } from "../../../.personalize/build.mjs"
  
- export function databasePath(data: string) {
-+  // Sanitise first, then decide. A channel that sanitises to nothing must never reach the
-+  // suffix branch -- that is what produced the orphaned `opencode-.db`.
-+  const channel = OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^[-.]+|-+$/g, "")
-   const filename =
-     process.env.OPENCODE_DB ??
--    (["latest", "dev", "beta", "next", "prod"].includes(OPENCODE_CHANNEL) ||
-+    (!channel ||
-+    ["latest", "dev", "beta", "next", "prod", "local"].includes(channel) ||
-     process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
-     process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
-       ? "opencode.db"
--      : `opencode-${OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
-+      : `opencode-${channel}.db`)
-   return filename === ":memory:" ? filename : path.resolve(data, filename)
- }
-diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
-index 0ae8c1f12..aad91761a 100755
---- a/packages/cli/src/index.ts
-+++ b/packages/cli/src/index.ts
-@@ -127,8 +127,8 @@ Effect.gen(function* () {
-   ),
-   Effect.provide(
-     Observability.layer({
--      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
--      headers: process.env.OTEL_EXPORTER_OTLP_HEADERS,
-+      endpoint: undefined, // SANITIZE(#459): force OTLP/telemetry off (no honeycomb)
-+      headers: undefined,
-       client: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
-       version: OPENCODE_VERSION,
-       channel: OPENCODE_CHANNEL,
-diff --git a/packages/cli/src/services/updater.ts b/packages/cli/src/services/updater.ts
-index 736e8f8ee..446265a34 100644
---- a/packages/cli/src/services/updater.ts
-+++ b/packages/cli/src/services/updater.ts
-@@ -531,7 +531,8 @@ const make = Effect.gen(function* () {
-   })
- 
-   const inspect = Effect.fnUntraced(function* () {
--    if (OPENCODE_LOCAL || ["1", "true"].includes(process.env.OPENCODE_DISABLE_AUTOUPDATE?.toLowerCase() ?? "")) {
-+    // SANITIZE(#459): no auto update-check (github/registry/opencode.ai) — hard-disabled, env no longer consulted
-+    if (true as boolean) {
-       yield* Effect.logInfo("update check skipped", {
-         reason: OPENCODE_LOCAL ? "local-install" : "disabled",
-         version: OPENCODE_VERSION,
-diff --git a/packages/cli/src/version.ts b/packages/cli/src/version.ts
-index 54caec498..d73bc1803 100644
---- a/packages/cli/src/version.ts
-+++ b/packages/cli/src/version.ts
-@@ -5,8 +5,17 @@ declare const OPENCODE_CHANNEL: string
- declare const OPENCODE_ARTIFACT: string
- declare const OPENCODE_RELEASE_HIGHLIGHTS: string
- 
--const version = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : "local"
--const channel = typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : "local"
-+// A build define can be present but empty (a build from a detached HEAD leaves
-+// OPENCODE_CHANNEL as ''). `typeof x === "string"` accepts that, so an empty channel used
-+// to leak downstream and produce things like `opencode-.db`, a bogus `opencode-ai/<empty>`
-+// npm dist-tag on upgrade, and OPENCODE_LOCAL === false for a local build.
-+// Guard on content, not just type. `typeof` on an undeclared global is still safe here.
-+function resolve(value: string | undefined) {
-+  return value?.trim() ? value.trim() : "local"
+ import { $ } from "bun"
+ import { createHash } from "node:crypto"
+@@ -160,7 +161,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+   const result = await Bun.build({
+     entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [
++    plugins: PersonalizeBuild.plugins([
+       appAssetsPlugin,
+       solidPlugin,
+       parcelWatcherPlugin,
+@@ -168,7 +169,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       pluginRuntimePlugin,
+       simulationGraphPlugin,
+       modelsSnapshot,
+-    ],
++    ]),
+     external: ["node-gyp"],
+     format: "esm",
+     minify: true,
+diff --git a/.personalize/build.d.mts b/.personalize/build.d.mts
+new file mode 100644
+index 0000000000000000000000000000000000000000..45c9e3f36716615138498518598515c46b516639
+--- /dev/null
++++ b/.personalize/build.d.mts
+@@ -0,0 +1,8 @@
++import type { BunPlugin } from "bun"
++
++export function normalizeChannel(value: unknown): string
++export function personalizationPlugins(plugins: BunPlugin[], options?: {
++  root?: string
++  resolve?: (specifier: string, from: string) => string
++}): BunPlugin[]
++export const PersonalizeBuild: { plugins: typeof personalizationPlugins }
+diff --git a/.personalize/build.mjs b/.personalize/build.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb2840e87d
+--- /dev/null
++++ b/.personalize/build.mjs
+@@ -0,0 +1,126 @@
++import { builtinModules } from "node:module"
++import { existsSync, readFileSync } from "node:fs"
++import path from "node:path"
++import { fileURLToPath } from "node:url"
++import { normalizeChannel } from "./channel.mjs"
++export { normalizeChannel } from "./channel.mjs"
++
++const ORIGINAL = "personalize-original"
++const PREFIX = "personalize:original:"
++const builtins = new Set([...builtinModules, "bun"])
++const directory = path.dirname(fileURLToPath(import.meta.url))
++
++// This module is the FIRST build-script import, before Script computes its constants.
++if (process.env.OPENCODE_CHANNEL !== undefined) {
++  process.env.OPENCODE_CHANNEL = normalizeChannel(process.env.OPENCODE_CHANNEL)
 +}
 +
-+const version = resolve(typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : undefined)
-+const channel = resolve(typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : undefined)
- const artifact = typeof OPENCODE_ARTIFACT === "string" ? OPENCODE_ARTIFACT : "cli"
- // Stable release builds embed the release notes' Highlights; every other build has none.
- const highlights =
-diff --git a/packages/core/src/config/markdown.ts b/packages/core/src/config/markdown.ts
-index 8093ff7e7..beafc6234 100644
---- a/packages/core/src/config/markdown.ts
-+++ b/packages/core/src/config/markdown.ts
-@@ -21,20 +21,97 @@ export function parseOption(content: string) {
-   }
- }
- 
--// Other coding agents accept unquoted colons in frontmatter values. Retry
--// those values as YAML block scalars so existing config files keep working.
-+// Other coding agents (e.g. Claude Code) accept loose YAML in SKILL.md / agent
-+// frontmatter that strict YAML rejects: unquoted colons in values, hyphenated
-+// keys (allowed-tools), values wrapped across unindented lines, tab indentation,
-+// and a leading BOM. On a parse failure we normalize the frontmatter into
-+// equivalent valid YAML -- a plain-scalar value that needs escaping (contains a
-+// colon or spills onto following lines) becomes a literal `|-` block scalar --
-+// and retry. The rewrite is validated before it is returned: if it still does
-+// not parse, the original content is returned unchanged, the strict parse
-+// error propagates, and callers skip the file. This runs ONLY after the
-+// strict parse has already failed, so valid files are never touched.
- export function sanitize(content: string) {
--  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
++const key = (value) => {
++  const normalized = path.resolve(value).replaceAll("\\", "/")
++  return process.platform === "win32" ? normalized.toLowerCase() : normalized
++}
++
++export function loadManifest(root) {
++  const result = new Map()
++  for (const name of ["manifest.json", "R.json", "S.json", "X.json"]) {
++    const filename = path.join(root, ".personalize", name)
++    if (!existsSync(filename)) continue
++    const manifest = JSON.parse(readFileSync(filename, "utf8"))
++    for (const item of manifest.modules) {
++      const target = path.resolve(root, item.target)
++      if (!existsSync(target)) throw new Error(`Personalize target missing: ${item.target}`)
++      for (const filename of [...(item.before || []), ...(item.factory ? [item.factory] : [])]) {
++        if (!existsSync(path.resolve(root, filename))) throw new Error(`Personalize owned module missing: ${filename}`)
++      }
++      const current = result.get(key(target)) || { target, modules: [] }
++      current.modules.push(item)
++      result.set(key(target), current)
++    }
++  }
++  return result
++}
++
++export function moduleShim(root, entry) {
++  const original = PREFIX + encodeURIComponent(entry.target)
++  const code = []
++  for (const item of entry.modules) for (const filename of item.before || []) {
++    code.push(`import ${JSON.stringify(path.resolve(root, filename).replaceAll("\\", "/"))}`)
++  }
++  code.push(`export * from ${JSON.stringify(original)}`)
++  const factories = entry.modules.filter((item) => item.factory)
++  if (!factories.length) return code.join("\n") + "\n"
++  code.push(`import * as original from ${JSON.stringify(original)}`)
++  const names = new Set()
++  factories.forEach((item, index) => {
++    for (const name of item.exports) {
++      if (!/^[A-Za-z_$][\w$]*$/.test(name) || name === "default") throw new Error(`Invalid Personalize export: ${name}`)
++      names.add(name)
++    }
++    code.push(`import { decorate as decorate${index} } from ${JSON.stringify(path.resolve(root, item.factory).replaceAll("\\", "/"))}`)
++    for (const name of item.exports) code.push(`if (!(${JSON.stringify(name)} in original)) throw new Error(${JSON.stringify(`Personalize public export changed: ${entry.target}#${name}`)})`)
++    code.push(`const stage${index} = { ...${index ? `stage${index - 1}` : "original"}, ...decorate${index}(${index ? `stage${index - 1}` : "original"}) }`)
++  })
++  for (const name of names) code.push(`export const ${name} = stage${factories.length - 1}.${name}`)
++  return code.join("\n") + "\n"
++}
++
++/** Adapt normal plugin registrations so original TSX still uses the STOCK Solid compiler. */
++export function forwardPlugin(plugin) {
++  return {
++    ...plugin,
++    setup(build) {
++      const facade = Object.create(build)
++      for (const method of ["onLoad", "onResolve"]) Object.defineProperty(facade, method, {
++        value(options, callback) {
++          build[method]({ namespace: "file", ...options }, callback)
++          if (!options.namespace || options.namespace === "file") {
++            build[method]({ ...options, namespace: ORIGINAL }, (args) => callback({ ...args, namespace: "file" }))
++          }
++        },
++      })
++      return plugin.setup(facade)
++    },
++  }
++}
++
++export function personalizationPlugins(plugins, options = {}) {
++  const root = options.root || path.resolve(directory, "..")
++  const resolve = options.resolve || ((specifier, from) => Bun.resolveSync(specifier, from))
++  const manifest = loadManifest(root)
++  const aliases = {
++    name: "personalize-owned-module-boundaries",
++    setup(build) {
++      const original = (args) => {
++        const filename = decodeURIComponent(args.path.slice(PREFIX.length))
++        if (!manifest.has(key(filename))) throw new Error(`Unregistered Personalize original: ${filename}`)
++        return { path: filename, namespace: ORIGINAL }
++      }
++      build.onResolve({ filter: /^personalize:original:/, namespace: "file" }, original)
++      build.onResolve({ filter: /^personalize:original:/, namespace: ORIGINAL }, original)
++      build.onLoad({ filter: /\.[cm]?[jt]sx?$/, namespace: "file" }, (args) => {
++        const entry = manifest.get(key(args.path))
++        if (!entry) return
++        return { loader: "js", contents: moduleShim(root, entry) }
++      })
++    },
++  }
++  const originals = {
++    name: "personalize-stock-modules-unchanged",
++    setup(build) {
++      build.onResolve({ filter: /.*/, namespace: ORIGINAL }, (args) => {
++        if (args.path.startsWith("node:") || args.path.startsWith("bun:") || builtins.has(args.path)) {
++          return { path: args.path, external: true }
++        }
++        return { path: resolve(args.path, path.dirname(args.importer)), namespace: "file" }
++      })
++      build.onLoad({ filter: /.*/, namespace: ORIGINAL }, (args) => ({
++        // No substitutions, AST edits, copied framework implementations, or source anchors.
++        contents: readFileSync(args.path, "utf8"),
++        loader: args.path.endsWith(".tsx") ? "tsx" : args.path.endsWith(".jsx") ? "jsx" : "ts",
++      }))
++    },
++  }
++  return [aliases, ...plugins.map(forwardPlugin), originals]
++}
++
++export const PersonalizeBuild = { plugins: personalizationPlugins }
+diff --git a/.personalize/build.test.mjs b/.personalize/build.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..18225049db3dda39d5cc0e2672d8f3d58b92ae01
+--- /dev/null
++++ b/.personalize/build.test.mjs
+@@ -0,0 +1,103 @@
++import { afterEach, test } from "node:test"
++import assert from "node:assert/strict"
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { forwardPlugin, loadManifest, moduleShim, normalizeChannel, personalizationPlugins } from "./build.mjs"
++
++const directories = []
++afterEach(() => {
++  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
++})
++
++function fixture() {
++  const temporary = path.join(tmpdir(), "opencode")
++  mkdirSync(temporary, { recursive: true })
++  const root = mkdtempSync(path.join(temporary, "personalize-resolver-"))
++  directories.push(root)
++  mkdirSync(path.join(root, ".personalize"))
++  writeFileSync(path.join(root, "stock.ts"), "// deliberately unlike ANY old source\nexport const value = 1\n")
++  writeFileSync(path.join(root, "owned.ts"), "export const decorate = stock => ({ value: stock.value + 1 })\n")
++  writeFileSync(path.join(root, ".personalize/manifest.json"), JSON.stringify({ modules: [
++    { target: "stock.ts", factory: "owned.ts", exports: ["value"] },
++  ] }))
++  return root
++}
++
++function registrations(plugins) {
++  const registrations = { onLoad: [], onResolve: [] }
++  for (const plugin of plugins) plugin.setup({
++    onLoad(options, callback) { registrations.onLoad.push({ options, callback }) },
++    onResolve(options, callback) { registrations.onResolve.push({ options, callback }) },
++  })
++  return registrations
++}
++
++test("channel normalization handles null/undefined/bad names without trim crashes", () => {
++  for (const value of [undefined, null, "", "undefined", " null ", "a/b", 1]) assert.equal(normalizeChannel(value), "local")
++  assert.equal(normalizeChannel(" custom "), "custom")
++})
++
++test("wrapper delegates every untouched export and contains no stock implementation", () => {
++  const root = fixture()
++  const shim = moduleShim(root, [...loadManifest(root).values()][0])
++  assert.match(shim, /export \* from "personalize:original:/)
++  assert.match(shim, /export const value = stage0.value/)
++  assert(!shim.includes("value = 1"))
++  assert(!shim.includes("deliberately unlike"))
++})
++
++test("unknown optional files are not invented and missing owned modules fail closed", () => {
++  const root = fixture()
++  assert.equal(loadManifest(root).size, 1)
++  rmSync(path.join(root, "owned.ts"))
++  assert.throws(() => loadManifest(root), /owned module missing/)
++})
++
++test("original module bytes stay byte-for-byte untouched", () => {
++  const root = fixture()
++  const hooks = registrations(personalizationPlugins([], { root, resolve: () => "unused" }))
++  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
++  assert.equal(original.callback({ path: path.join(root, "stock.ts") }).contents,
++    readFileSync(path.join(root, "stock.ts"), "utf8"))
++})
++
++test("private originals cannot address arbitrary unregistered files", () => {
++  const root = fixture()
++  const hooks = registrations(personalizationPlugins([], { root }))
++  const resolve = hooks.onResolve.find((h) => h.options.namespace === "file")
++  assert.throws(() => resolve.callback({ path: "personalize:original:" + encodeURIComponent(path.join(root, "secret.ts")) }), /Unregistered/)
++})
++
++test("stock Solid/virtual/native callbacks receive originals in their expected file namespace", () => {
++  const seen = []
++  const hooks = registrations([forwardPlugin({ name: "stock-solid", setup(build) {
++    build.onLoad({ filter: /\.tsx$/ }, (args) => { seen.push(args); return { contents: "compiled-by-stock-solid", loader: "js" } })
++  } })])
++  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
++  assert.equal(original.callback({ path: "stock.tsx", namespace: "personalize-original" }).contents, "compiled-by-stock-solid")
++  assert.equal(seen[0].namespace, "file")
++})
++
++test("custom upstream plugin namespaces are not duplicated or rewritten", () => {
++  const hooks = registrations([forwardPlugin({ name: "stock-virtual", setup(build) {
++    build.onLoad({ filter: /.*/, namespace: "opencode" }, () => ({ contents: "embedded" }))
++  } })])
++  assert.equal(hooks.onLoad.length, 1)
++  assert.equal(hooks.onLoad[0].options.namespace, "opencode")
++})
++
++test("non-writable SDK methods can be adapted without assigning to inherited fields", () => {
++  const calls = []
++  const build = Object.freeze({ onLoad: (...args) => calls.push(args), onResolve() {} })
++  forwardPlugin({ name: "frozen-sdk", setup(api) { api.onLoad({ filter: /x/ }, () => undefined) } }).setup(build)
++  assert.equal(calls.length, 2)
++  assert.equal(calls[0][0].namespace, "file")
++  assert.equal(calls[1][0].namespace, "personalize-original")
++})
++
++test("plugin order intercepts the selected file, then delegates original transforms before raw fallback", () => {
++  const root = fixture()
++  const plugins = personalizationPlugins([{ name: "stock", setup() {} }], { root })
++  assert.deepEqual(plugins.map((p) => p.name), ["personalize-owned-module-boundaries", "stock", "personalize-stock-modules-unchanged"])
++})
+diff --git a/.personalize/channel.d.mts b/.personalize/channel.d.mts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a59a3b4927c3e812455eb43034be464e1c155fc
+--- /dev/null
++++ b/.personalize/channel.d.mts
+@@ -0,0 +1,1 @@
++export function normalizeChannel(value: unknown): string
+diff --git a/.personalize/channel.mjs b/.personalize/channel.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..58d7470b10d17a195eee07fd2ac8fde633cd7952
+--- /dev/null
++++ b/.personalize/channel.mjs
+@@ -0,0 +1,4 @@
++export function normalizeChannel(value) {
++  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*$/i.test(value.trim()) &&
++    !["undefined", "null"].includes(value.trim().toLowerCase()) ? value.trim() : "local"
++}
+diff --git a/.personalize/content.test.mjs b/.personalize/content.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..56bff6ccfd5593c5db2676603f65e4f7ff197d3e
+--- /dev/null
++++ b/.personalize/content.test.mjs
+@@ -0,0 +1,75 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { canonicalMessages, historyMessages, copyWith } from "../packages/core/src/personalize/content.ts"
++import { personaLead, stripStockIdentity } from "../packages/core/src/personalize/persona.ts"
++
++test("valid messages retain their exact object identity and metadata", () => {
++  const message = { role: "user", content: [{ type: "text", text: "hello" }], metadata: { instruction: [1] } }
++  assert.equal(canonicalMessages([message])[0], message)
++})
++
++test("missing content is repaired without losing prototypes, symbols, readonly or hidden metadata", () => {
++  const marker = Symbol("metadata")
++  class Message { content = undefined; role = "user"; get kind() { return "original" } }
++  const message = new Message()
++  Object.defineProperty(message, marker, { value: { instructions: [1] }, enumerable: false })
++  Object.defineProperty(message, "content", { value: undefined, writable: false, enumerable: true })
++  const result = canonicalMessages([message])[0]
++  assert(result instanceof Message)
++  assert.equal(result.kind, "original")
++  assert.equal(result[marker], message[marker])
++  assert.equal(Object.getOwnPropertyDescriptor(result, marker).enumerable, false)
++  assert.equal(Object.getOwnPropertyDescriptor(result, "content").writable, false)
++  assert.deepEqual(result.content, [])
++  assert.equal(message.content, undefined)
++})
++
++test("nullish arrays and tool-result values are repaired, not mutated", () => {
++  assert.deepEqual(canonicalMessages(undefined), [])
++  const message = { role: "tool", content: [{ type: "tool-result", result: { type: "content", value: undefined } }] }
++  const result = canonicalMessages([message])[0]
++  assert.deepEqual(result.content[0].result.value, [])
++  assert.equal(message.content[0].result.value, undefined)
++})
++
++test("history repair keeps completed-tool metadata and leaves healthy records alone", () => {
++  const good = { role: "assistant", content: [] }
++  assert.equal(historyMessages([good])[0], good)
++  const bad = { role: "assistant", content: [{ type: "tool", state: { status: "completed", content: undefined, metadata: { id: 1 } } }] }
++  const result = historyMessages([bad])[0]
++  assert.deepEqual(result.content[0].state.content, [])
++  assert.equal(result.content[0].state.metadata, bad.content[0].state.metadata)
++})
++
++test("system-part replacement preserves instruction/cache metadata", () => {
++  const part = { content: "stock", metadata: { experimental: { instructions: [{ id: 1 }] } } }
++  const result = copyWith(part, { content: "persona\nstock" })
++  assert.equal(result.metadata, part.metadata)
++  assert.equal(part.content, "stock")
++})
++
++test("persona seeds the existing role schema and reads only assistant_system", () => {
++  const root = path.join(tmpdir(), "opencode")
++  mkdirSync(root, { recursive: true })
++  const directory = mkdtempSync(path.join(root, "personalize-role-"))
++  const previous = process.env.OPENCODE_ROLE_FILE
++  try {
++    const file = path.join(directory, "role.json")
++    process.env.OPENCODE_ROLE_FILE = file
++    assert.equal(personaLead(), "")
++    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { usersystem: "", assistant_system: "" })
++    writeFileSync(file, JSON.stringify({ usersystem: "not this", assistant_system: "exact persona" }))
++    assert.equal(personaLead(), "exact persona")
++    writeFileSync(file, "{broken")
++    assert.equal(personaLead(), "")
++    assert.equal(stripStockIdentity("You are OpenCode, a coding assistant. Keep tools."), "Keep tools.")
++    assert.equal(stripStockIdentity("You are opencode, an agent of change."), "You are opencode, an agent of change.")
++  } finally {
++    if (previous === undefined) delete process.env.OPENCODE_ROLE_FILE
++    else process.env.OPENCODE_ROLE_FILE = previous
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
+diff --git a/.personalize/manifest.json b/.personalize/manifest.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..269db1cc76b13bfc93bf8012894ab57161d1063f
+--- /dev/null
++++ b/.personalize/manifest.json
+@@ -0,0 +1,20 @@
++{
++  "modules": [
++    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
++    { "target": "packages/cli/src/version.ts", "factory": "packages/cli/src/personalize/version.ts", "exports": ["OPENCODE_CHANNEL", "OPENCODE_LOCAL"] },
++    { "target": "packages/cli/src/database-path.ts", "factory": "packages/cli/src/personalize/database-path.ts", "exports": ["databasePath"] },
++    { "target": "packages/util/src/observability.ts", "factory": "packages/util/src/personalize-observability.ts", "exports": ["layer"] },
++    { "target": "packages/ai/src/protocols/open-responses.ts", "factory": "packages/ai/src/personalize/open-responses.ts", "exports": ["lowerGeneration", "fromRequest", "fromRequestWithAdapter", "protocol"] },
++    { "target": "packages/core/src/config/markdown.ts", "factory": "packages/core/src/personalize/markdown.ts", "exports": ["sanitize"] },
++    { "target": "packages/core/src/database/database.ts", "factory": "packages/core/src/personalize/database.ts", "exports": ["layer", "configured", "node"] },
++    { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
++    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
++    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
++    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages"] },
++    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
++    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
++    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
++    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
++    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
++  ]
++}
+diff --git a/.personalize/preload.ts b/.personalize/preload.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..001ba8ad13e8a7ede81538bd447b7d97dd091dd6
+--- /dev/null
++++ b/.personalize/preload.ts
+@@ -0,0 +1,7 @@
++import path from "node:path"
++import { PersonalizeBuild } from "./build.mjs"
++
++const root = path.resolve(import.meta.dirname, "..")
++const solidPath = Bun.resolveSync("@opentui/solid/bun-plugin", path.join(root, "packages/cli"))
++const { createSolidTransformPlugin } = await import(solidPath)
++for (const plugin of PersonalizeBuild.plugins([createSolidTransformPlugin()])) Bun.plugin(plugin)
+diff --git a/packages/ai/src/personalize/open-responses.ts b/packages/ai/src/personalize/open-responses.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97f8683166
+--- /dev/null
++++ b/packages/ai/src/personalize/open-responses.ts
+@@ -0,0 +1,13 @@
++import { Effect } from "effect"
++
++export function decorate(stock: typeof import("../protocols/open-responses")) {
++  const lowerGeneration: typeof stock.lowerGeneration = (...args) => ({ ...stock.lowerGeneration(...args), store: false })
++  const fromRequest: typeof stock.fromRequest = (...args) =>
++    stock.fromRequest(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
++  const fromRequestWithAdapter: typeof stock.fromRequestWithAdapter = (...args) =>
++    stock.fromRequestWithAdapter(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
++  return {
++    lowerGeneration, fromRequest, fromRequestWithAdapter,
++    protocol: { ...stock.protocol, body: { ...stock.protocol.body, from: fromRequest } },
++  }
++}
+diff --git a/packages/cli/src/personalize/bootstrap.ts b/packages/cli/src/personalize/bootstrap.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..35a8bb34eb5a8da0d024683fa49f1c2e488267af
+--- /dev/null
++++ b/packages/cli/src/personalize/bootstrap.ts
+@@ -0,0 +1,9 @@
++// Loaded before the unmodified CLI entry point by the owned module boundary.
++// Explicit upgrades still work; background update inspection and telemetry do not.
++process.env.OPENCODE_DISABLE_AUTOUPDATE = "1"
++process.env.OTEL_SDK_DISABLED = "true"
++delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_HEADERS
++delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+diff --git a/packages/cli/src/personalize/database-path.ts b/packages/cli/src/personalize/database-path.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..03176735724f89f84792ff63a68acb45247675fa
+--- /dev/null
++++ b/packages/cli/src/personalize/database-path.ts
+@@ -0,0 +1,7 @@
++import { normalizeChannel } from "../../../../.personalize/channel.mjs"
++
++export function decorate(stock: typeof import("../database-path")) {
++  const databasePath: typeof stock.databasePath = (input) =>
++    stock.databasePath({ ...input, channel: normalizeChannel(input.channel) })
++  return { databasePath }
++}
+diff --git a/packages/cli/src/personalize/version.ts b/packages/cli/src/personalize/version.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..552e669cfaa7a25bdecdb6630c9add9114ca5e5c
+--- /dev/null
++++ b/packages/cli/src/personalize/version.ts
+@@ -0,0 +1,6 @@
++import { normalizeChannel } from "../../../../.personalize/channel.mjs"
++
++export function decorate(stock: typeof import("../version")) {
++  const OPENCODE_CHANNEL = normalizeChannel(stock.OPENCODE_CHANNEL)
++  return { OPENCODE_CHANNEL, OPENCODE_LOCAL: OPENCODE_CHANNEL === "local" }
++}
+diff --git a/packages/client/src/personalize/service-probe.ts b/packages/client/src/personalize/service-probe.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdc87b287e133b9800da89fa7277e8c53cc07753
+--- /dev/null
++++ b/packages/client/src/personalize/service-probe.ts
+@@ -0,0 +1,29 @@
++import type { Info } from "../service"
++
++export function decorate(stock: typeof import("../service-probe")) {
++  const decide: typeof stock.decide = (service, options) => {
++    const state = service && typeof service === "object" ? Reflect.get(service, "state") : undefined
++    return state === "waiting" || state === "retrying" ? { _tag: "wait" } : stock.decide(service, options)
++  }
++  const probeResult: typeof stock.probeResult = async (info: Info, timeout) => {
++    const result = await stock.probeResult(info, timeout)
++    if (result.service || result.timedOut) return result
++    // A registered owner must not be killed merely because the published version
++    // changes while that same PID is starting. All other stock health rules stay intact.
++    const endpoint = { url: info.url, auth: info.password === undefined ? undefined : {
++      type: "basic" as const, username: "opencode", password: info.password,
++    } }
++    try {
++      const response = await fetch(new URL("/api/info", info.url), {
++        headers: stock.headers(endpoint), signal: AbortSignal.timeout(timeout ?? 1000),
++      })
++      if (response.status !== 503) return result
++      const body: unknown = await response.json()
++      if (!body || typeof body !== "object" || !("pid" in body) || body.pid !== info.pid ||
++          !("version" in body) || typeof body.version !== "string") return result
++      return { timedOut: false, service: { info, endpoint, version: body.version,
++        state: "waiting" as const, compatible: true } }
++    } catch { return result }
++  }
++  return { decide, probeResult }
++}
+diff --git a/packages/core/src/personalize/content.ts b/packages/core/src/personalize/content.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..031c11b3c2aa19dbbc190db469d7432c3abcced8
+--- /dev/null
++++ b/packages/core/src/personalize/content.ts
+@@ -0,0 +1,35 @@
++import type { Message } from "@opencode/ai/effect"
++import type { SessionMessage } from "../session/message"
++
++export function copyWith<T extends object>(value: T, changes: Partial<T>): T {
++  const descriptors = Object.getOwnPropertyDescriptors(value)
++  for (const [key, replacement] of Object.entries(changes)) {
++    const before = Object.getOwnPropertyDescriptor(value, key)
++    Object.defineProperty(descriptors, key, { enumerable: true, configurable: true, value: {
++      value: replacement, enumerable: before?.enumerable ?? true,
++      configurable: before?.configurable ?? true, writable: before && "writable" in before ? before.writable : true,
++    } })
++  }
++  return Object.create(Object.getPrototypeOf(value), descriptors)
++}
++
++export function canonicalMessages(messages: unknown): Message[] {
++  if (!Array.isArray(messages)) return []
++  return messages.filter((message) => message && typeof message === "object").map((message) => {
++    const content = (Array.isArray(message.content) ? message.content : []).filter(Boolean).map((part) =>
++      part.type === "tool-result" && part.result?.type === "content" && !Array.isArray(part.result.value)
++        ? copyWith(part, { result: copyWith(part.result, { value: [] }) }) : part)
++    return Array.isArray(message.content) && content.length === message.content.length && content.every((part, i) => part === message.content[i])
++      ? message : copyWith(message, { content })
++  })
++}
++
++export function historyMessages(messages: readonly SessionMessage.Info[]): SessionMessage.Info[] {
++  return messages.map((message) => {
++    const content = (Array.isArray(message.content) ? message.content : []).filter(Boolean).map((part) =>
++      part.type === "tool" && part.state?.status === "completed" && !Array.isArray(part.state.content)
++        ? copyWith(part, { state: copyWith(part.state, { content: [] }) }) : part)
++    return Array.isArray(message.content) && content.length === message.content.length && content.every((part, i) => part === message.content[i])
++      ? message : copyWith(message, { content })
++  })
++}
+diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1075ed09aa1de59786c95590314ece1ad25bd769
+--- /dev/null
++++ b/packages/core/src/personalize/database.ts
+@@ -0,0 +1,35 @@
++import path from "node:path"
++import { Cause, Effect, Exit, Layer, Scope } from "effect"
++import { Global } from "@opencode/util/global"
++import { Flock } from "@opencode/util/flock"
++import { sqliteBusy, updateBoot } from "@opencode/util/personalize-boot"
++
++export function decorate(stock: typeof import("../database/database")) {
++  const layer: typeof stock.layer = (options = { path: ":memory:" }) => {
++    const filename = options.path ?? ":memory:"
++    if (filename === ":memory:") return stock.layer(options)
++    return Layer.effectContext(Effect.gen(function* () {
++      const global = yield* Global.Service
++      const file = path.isAbsolute(filename) ? filename : path.join(global.data, filename)
++      const parent = yield* Scope.Scope
++      return yield* Effect.acquireUseRelease(
++        Effect.promise((signal) => Flock.acquire(file, { dir: path.join(global.state, "locks"), signal })),
++        () => Effect.gen(function* () {
++          for (let attempt = 0; ; attempt++) {
++            const scope = yield* Scope.make()
++            yield* Scope.addFinalizerExit(parent, (exit) => Scope.close(scope, exit))
++            const exit = yield* Effect.exit(Layer.buildWithScope(stock.layer({ ...options, path: file }), scope))
++            if (Exit.isSuccess(exit)) return exit.value
++            yield* Scope.close(scope, exit)
++            if (attempt >= 6 || !sqliteBusy(Cause.pretty(exit.cause))) return yield* Effect.failCause(exit.cause)
++            yield* updateBoot("retry")
++            yield* Effect.sleep((attempt + 1) * 200)
++          }
++        }),
++        (lease) => Effect.promise(() => lease.release()),
++      )
++    }))
++  }
++  const configured: typeof stock.configured = (options) => stock.configured(options).mapLayer(() => layer(options))
++  return { layer, configured, node: configured({ path: ":memory:" }) }
++}
+diff --git a/packages/core/src/personalize/hooks.ts b/packages/core/src/personalize/hooks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e0025b65220b87f18a016f4c1c144b294ad4898
+--- /dev/null
++++ b/packages/core/src/personalize/hooks.ts
+@@ -0,0 +1,32 @@
++import { Context, Effect, Layer } from "effect"
++import { canonicalMessages, copyWith } from "./content"
++import { personalizeSystem } from "./model-request"
++
++export function decorate(stock: typeof import("../plugin/hooks")) {
++  return { node: stock.node.mapLayer((layer) => Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
++    const original = Context.get(context, stock.Service)
++    const trigger: typeof original.trigger = (domain, name, event) => Effect.suspend(() => {
++      if (domain !== "session" || !["context", "compaction", "generate", "title"].includes(String(name))) {
++        return original.trigger(domain, name, event)
++      }
++      const before = event as unknown as { system?: unknown; messages?: unknown }
++      const system = Array.isArray(before.system) ? [...before.system] : []
++      const messages = canonicalMessages(before.messages)
++      return original.trigger(domain, name, event).pipe(Effect.map((result) => {
++        const value = result as unknown as { system?: unknown; messages?: unknown; result?: unknown }
++        const shaped = copyWith(value, {
++          system: personalizeSystem(Array.isArray(value.system) ? value.system : system),
++          messages: canonicalMessages(Array.isArray(value.messages) ? value.messages : messages),
++        })
++        if (name === "title" && typeof shaped.result !== "string") {
++          const first = canonicalMessages(shaped.messages).find((message) => message.role === "user")
++          const text = first?.content.filter((part) => part.type === "text").map((part) => part.text).join(" ") || "New session"
++          const title = text.replace(/\s+/g, " ").trim()
++          shaped.result = title.length > 50 ? title.slice(0, 50) + "…" : title
++        }
++        return shaped as typeof result
++      }))
++    })
++    return Context.add(context, stock.Service, { ...original, trigger })
++  }))) }
++}
+diff --git a/packages/core/src/personalize/markdown.ts b/packages/core/src/personalize/markdown.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfb1489f5102edcc989a16f226e449219ce5676f
+--- /dev/null
++++ b/packages/core/src/personalize/markdown.ts
+@@ -0,0 +1,87 @@
++import matter from "gray-matter"
++export function sanitize(content: string) {
 +  const stripped = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
 +  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-   if (!match) return content
-   const frontmatter = match[1]
--  const result = frontmatter.split(/\r?\n/).flatMap((line) => {
--    if (line.trim().startsWith("#") || line.trim() === "" || /^\s+/.test(line)) return [line]
--    const entry = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/)
--    if (!entry) return [line]
--    const value = entry[2].trim()
--    if (value === "" || value === ">" || value === "|" || value.startsWith('"') || value.startsWith("'")) return [line]
--    if (!value.includes(":")) return [line]
--    return [`${entry[1]}: |-`, `  ${value}`]
--  })
--  return content.replace(frontmatter, () => result.join("\n"))
++  if (!match) return content
++  const frontmatter = match[1]
 +
 +  // top-level "key:" or "key: value" (hyphen/dot keys allowed; space after ":" optional)
 +  const KEY = /^([A-Za-z0-9][\w.-]*)[ \t]*:(?:[ \t]*(.*))?$/
@@ -203,178 +722,147 @@ index 8093ff7e7..beafc6234 100644
 +    return content
 +  }
 +  return result
- }
-diff --git a/packages/core/src/database/database.ts b/packages/core/src/database/database.ts
-index 93724052f..48b6fb724 100644
---- a/packages/core/src/database/database.ts
-+++ b/packages/core/src/database/database.ts
-@@ -5,7 +5,7 @@ import { sqliteLayer, supportsForeignKeyToggle, supportsTuningPragmas } from "#s
- import { Context, Effect, Layer, Schema, Semaphore } from "effect"
- import type { SqlClient } from "effect/sql"
- import { Global } from "@opencode/util/global"
--import { closeSync, existsSync, openSync } from "node:fs"
-+import { closeSync, existsSync, openSync, statSync, unlinkSync } from "node:fs"
- import { chmod } from "node:fs/promises"
- import { isAbsolute, join } from "path"
- import { DatabaseMigration } from "./migration.js"
-@@ -30,28 +30,83 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/st
- // releasing a shared semaphore resumes the waiting object's fiber inside the
- // releasing object's I/O context, where its first storage call is rejected as
- // cross-object I/O.
--const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>) =>
-+const databaseLayer = (
-+  lock: Effect.Effect<Semaphore.Semaphore>,
-+  guard?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>,
-+) =>
-   Layer.effect(
-     Service,
-     Effect.gen(function* () {
-       const db = yield* makeDatabase
- 
--      if (supportsTuningPragmas) {
--        yield* db.run("PRAGMA journal_mode = WAL")
--        yield* db.run("PRAGMA synchronous = NORMAL")
--        yield* db.run("PRAGMA busy_timeout = 5000")
--        yield* db.run("PRAGMA cache_size = -64000")
--        yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
--      }
--      // Durable Object SQLite always enforces foreign keys and rejects the pragma.
--      if (supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
--      const semaphore = yield* lock
--      yield* semaphore.withPermit(DatabaseMigration.apply(db))
-+      const bootstrap = Effect.gen(function* () {
-+        if (supportsTuningPragmas) {
-+          yield* db.run("PRAGMA journal_mode = WAL")
-+          yield* db.run("PRAGMA synchronous = NORMAL")
-+          yield* db.run("PRAGMA busy_timeout = 5000")
-+          yield* db.run("PRAGMA cache_size = -64000")
-+          yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
-+        }
-+        // Durable Object SQLite always enforces foreign keys and rejects the pragma.
-+        if (supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
-+        const semaphore = yield* lock
-+        yield* semaphore.withPermit(DatabaseMigration.apply(db))
-+      })
-+      yield* (guard ? guard(bootstrap) : bootstrap)
- 
-       return { db }
-     }).pipe(Effect.orDie),
-   )
- 
-+// The in-process semaphore above cannot serialize two PROCESSES. Two instances
-+// launched in the same second race first-boot setup of a shared database file:
-+// `PRAGMA journal_mode = WAL` runs before busy_timeout is set, and the
-+// migration's first write after a shared read snapshot fails with SQLITE_BUSY
-+// immediately (a snapshot upgrade is not retried by busy_timeout). The loser
-+// then dies -- or, in the TUI, hangs as an unrendered pane. File-backed
-+// databases therefore guard first-boot setup with an exclusive lockfile next to
-+// the database. Only `layer()` (a filesystem runtime) constructs the guard;
-+// workerd goes through layerFromClient and never touches node:fs here.
-+const BOOT_LOCK_STALE_MS = 60_000
-+const BOOT_LOCK_WAIT_MS = 120_000
-+
-+async function acquireBootLock(lockfile: string) {
-+  const started = Date.now()
-+  for (;;) {
-+    try {
-+      return openSync(lockfile, "wx", 0o600)
-+    } catch (error) {
-+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-+    }
-+    try {
-+      // A holder that crashed before unlinking leaves the lockfile behind: steal it
-+      // once stale. On Windows the unlink fails while a live holder keeps the file
-+      // open, which is exactly the keep-waiting case.
-+      if (Date.now() - statSync(lockfile).mtimeMs > BOOT_LOCK_STALE_MS) unlinkSync(lockfile)
-+    } catch {}
-+    if (Date.now() - started > BOOT_LOCK_WAIT_MS)
-+      throw new Error(`timed out waiting for database bootstrap lock: ${lockfile}`)
-+    await new Promise((resolve) => setTimeout(resolve, 100 + Math.floor(Math.random() * 150)))
-+  }
 +}
 +
-+const withBootLock =
-+  (lockfile: string) =>
-+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-+    Effect.acquireUseRelease(
-+      Effect.promise(() => acquireBootLock(lockfile)),
-+      () => effect,
-+      (fd) =>
-+        Effect.sync(() => {
-+          try {
-+            closeSync(fd)
-+          } catch {}
-+          try {
-+            unlinkSync(lockfile)
-+          } catch {}
-+        }),
-+    )
++export const decorate = (_stock: typeof import("../config/markdown")) => ({ sanitize })
+diff --git a/packages/core/src/personalize/model-request.ts b/packages/core/src/personalize/model-request.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb62642d090aec73947a2b848b8ff3ab0534c4c4
+--- /dev/null
++++ b/packages/core/src/personalize/model-request.ts
+@@ -0,0 +1,18 @@
++import { canonicalMessages, copyWith } from "./content"
++import { personaLead, stripStockIdentity } from "./persona"
 +
- // Two instances over one file bootstrap the same schema, so file databases
- // share a lock per path. Each in-memory database is its own connection.
- const locks = new Map<string, Semaphore.Semaphore>()
-@@ -68,9 +123,10 @@ export function layer(options: Options = { path: ":memory:" }) {
-   return Layer.unwrap(
-     Effect.gen(function* () {
-       const provide = (filename: string) =>
--        databaseLayer(filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename))).pipe(
--          Layer.provide(sqliteLayer({ filename })),
--        )
-+        databaseLayer(
-+          filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename)),
-+          filename === ":memory:" ? undefined : withBootLock(`${filename}.boot.lock`),
-+        ).pipe(Layer.provide(sqliteLayer({ filename })))
-       const filename = options.path ?? ":memory:"
-       if (filename === ":memory:") return provide(filename)
-       const file = isAbsolute(filename) ? filename : join((yield* Global.Service).data, filename)
-diff --git a/packages/core/src/plugin/skill.ts b/packages/core/src/plugin/skill.ts
-index dc2f72cc0..050814b6c 100644
---- a/packages/core/src/plugin/skill.ts
-+++ b/packages/core/src/plugin/skill.ts
-@@ -8,13 +8,24 @@ import { Effect } from "effect"
- import { AbsolutePath } from "../schema.js"
- import { Skill } from "../skill.js"
- import { Config } from "../config.js"
++export function personalizeSystem<T extends { readonly content: string }>(system: readonly T[]): T[] {
++  const persona = personaLead()
++  if (!persona || !system[0]) return [...system]
++  return [copyWith(system[0], { content: [persona, stripStockIdentity(system[0].content)].filter(Boolean).join("\n") }), ...system.slice(1)]
++}
++
++export function decorate(stock: typeof import("../session/model-request")) {
++  const baseTranscript: typeof stock.baseTranscript = (...args) => {
++    const result = stock.baseTranscript(...args)
++    return { ...result, system: personalizeSystem(result.system) }
++  }
++  const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)
++  const boundImages: typeof stock.boundImages = (messages, ...rest) => stock.boundImages(canonicalMessages(messages), ...rest)
++  return { baseTranscript, unsupportedParts, boundImages }
++}
+diff --git a/packages/core/src/personalize/persona.ts b/packages/core/src/personalize/persona.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d0f3669589b67f28f3d9f2d07fa594ca8f1b9a1
+--- /dev/null
++++ b/packages/core/src/personalize/persona.ts
+@@ -0,0 +1,21 @@
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
++import { dirname, join, resolve } from "node:path"
++
++export function personaLead(): string {
++  const file = process.env.OPENCODE_ROLE_FILE ? resolve(process.env.OPENCODE_ROLE_FILE) : join(process.cwd(), ".opencode", "role.json")
++  try {
++    mkdirSync(dirname(file), { recursive: true })
++    if (!existsSync(file)) {
++      writeFileSync(file, JSON.stringify({ usersystem: "", assistant_system: "" }, null, 2) + "\n", "utf8")
++      return ""
++    }
++    const role: unknown = JSON.parse(readFileSync(file, "utf8"))
++    return role && typeof role === "object" && "assistant_system" in role && typeof role.assistant_system === "string" ? role.assistant_system : ""
++  } catch { return "" }
++}
++
++export function stripStockIdentity(prompt: string): string {
++  if (prompt.startsWith("You are opencode, an agent")) return prompt
++  return prompt.replace(/^You are an AI agent running in OpenCode,[^.]*\.\s*/, "")
++    .replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
+diff --git a/packages/core/src/personalize/skill.ts b/packages/core/src/personalize/skill.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c63f96c02929fcdebb9105f025d26874101ff0b8
+--- /dev/null
++++ b/packages/core/src/personalize/skill.ts
+@@ -0,0 +1,20 @@
++import path from "node:path"
 +import { Global } from "@opencode/util/global"
- import os from "os"
-+import path from "path"
- import opencodeContent from "./skill/opencode.md" with { type: "text" }
- import reportContent from "./skill/report.md" with { type: "text" }
-+import playwrightDepthContent from "./skill/playwright-depth.md" with { type: "text" }
- 
- export const OpencodeContent = opencodeContent
- export const ReportContent = reportContent
- 
-+// Resolved at import time rather than written into the markdown, so the cache path is
-+// correct on every platform instead of whichever machine authored the file.
++import { Effect } from "effect"
++import { Skill } from "../skill"
++import { AbsolutePath } from "../schema"
++import template from "../plugin/skill/playwright-depth.md" with { type: "text" }
++
 +export const PlaywrightDepthCachePath = path.join(Global.Path.state, "playwright-depth-cache.json")
-+export const PlaywrightDepthContent = playwrightDepthContent.replaceAll("{{CACHE_PATH}}", PlaywrightDepthCachePath)
++export const PlaywrightDepthContent = template.replaceAll("{{CACHE_PATH}}", PlaywrightDepthCachePath)
++const description = "Use when taking Playwright or browser MCP snapshots: picks snapshot depth from per-site memory instead of defaulting to full depth."
 +
-+export const PLAYWRIGHT_DEPTH_DESCRIPTION =
-+  "Use when taking Playwright or browser MCP snapshots: picks snapshot depth from per-site memory instead of defaulting to full depth."
++export function decorate(stock: typeof import("../plugin/skill")) {
++  return { Plugin: { ...stock.Plugin, effect: Effect.fn(function* (ctx: Parameters<typeof stock.Plugin.effect>[0]) {
++    yield* stock.Plugin.effect(ctx)
++    yield* ctx.skill.transform((editor) => editor.add(Skill.Info.make({
++      id: Skill.ID.make("playwright-depth"), name: Skill.Name.make("Playwright Depth"), description,
++      path: AbsolutePath.make("/builtin/playwright-depth.md"), content: PlaywrightDepthContent,
++    })))
++  }) } }
++}
+diff --git a/packages/core/src/personalize/to-llm-message.ts b/packages/core/src/personalize/to-llm-message.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..40b1c9b3a15038662cacae229ec9a31730b344b8
+--- /dev/null
++++ b/packages/core/src/personalize/to-llm-message.ts
+@@ -0,0 +1,13 @@
++import { Message } from "@opencode/ai/effect"
++import { decay, indexBlock } from "../session/runner/context-decay"
++import { historyMessages } from "./content"
 +
- export const OpencodeDescription =
-   "Use this skill for any question about OpenCode itself, including how OpenCode works, using or configuring it, migrating from V1 to V2, troubleshooting it, developing plugins or integrations, using the OpenCode SDK, clients, server, or API, and contributing to the OpenCode codebase. Also use it for OpenCode agents, commands, skills, tools, permissions, MCP servers, providers, models, themes, keybinds, formatters, the CLI, TUI, desktop app, and web app."
- const REPORT_DESCRIPTION =
-@@ -43,6 +54,15 @@ export const Plugin = define({
-           content: reportContent,
-         }),
-       )
-+      editor.add(
-+        Skill.Info.make({
-+          id: Skill.ID.make("playwright-depth"),
-+          name: Skill.Name.make("Playwright Depth"),
-+          description: PLAYWRIGHT_DEPTH_DESCRIPTION,
-+          path: AbsolutePath.make("/builtin/playwright-depth.md"),
-+          content: PlaywrightDepthContent,
-+        }),
-+      )
-     })
-   }),
- })
++export function decorate(stock: typeof import("../session/runner/to-llm-message")) {
++  const toLLMMessages: typeof stock.toLLMMessages = (messages, ...rest) => {
++    const decayed = decay(historyMessages(messages))
++    const lowered = stock.toLLMMessages(decayed.messages, ...rest)
++    const index = indexBlock(decayed.archive)
++    return index === undefined ? lowered : [...lowered, Message.user(index)]
++  }
++  return { toLLMMessages }
++}
+diff --git a/packages/core/src/personalize/v1-migration.ts b/packages/core/src/personalize/v1-migration.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d70d2b83f21a2e17995877a118baefbe8ba44248
+--- /dev/null
++++ b/packages/core/src/personalize/v1-migration.ts
+@@ -0,0 +1,33 @@
++import { Effect, Layer } from "effect"
++import { sql } from "drizzle-orm"
++import { Database } from "../database/database"
++import { Project } from "@opencode/schema/project"
++
++export function decorate(stock: typeof import("../database/v1-migration.bun")) {
++  const run: typeof stock.run = (options) => Effect.gen(function* () {
++    const result = yield* stock.run(options)
++    const db = (yield* Database.Service).db
++    yield* db.transaction((tx) => tx.run(sql`
++      UPDATE session_v2 SET
++        project_id = (SELECT w.project_id FROM worktree w
++          WHERE session_v2.directory = w.directory
++             OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
++          ORDER BY length(w.directory) DESC LIMIT 1),
++        path = (SELECT ltrim(substr(session_v2.directory, length(w.directory) + 1), '/') FROM worktree w
++          WHERE session_v2.directory = w.directory
++             OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
++          ORDER BY length(w.directory) DESC LIMIT 1)
++      WHERE project_id = ${Project.ID.global} AND workspace_id IS NULL AND EXISTS (
++        SELECT 1 FROM worktree w WHERE session_v2.directory = w.directory
++          OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/')
++    `)).pipe(Effect.orDie)
++    return result
++  })
++  // Keep upstream's progress/status layer. Its migration lock makes the second
++  // call idempotent; this tail always performs adoption, including already-imported V1 data.
++  const layer = Layer.merge(stock.layer, Layer.effectDiscard(run().pipe(
++    Effect.catchCause((cause) => Effect.logError("Personalize V1 adoption failed", { cause })),
++    Effect.forkScoped({ startImmediately: true }),
++  )))
++  return { run, layer }
++}
 diff --git a/packages/core/src/plugin/skill/playwright-depth.md b/packages/core/src/plugin/skill/playwright-depth.md
 new file mode 100644
-index 000000000..379dc1864
+index 0000000000000000000000000000000000000000..379dc1864c068da95e7ab8b24f47936901696349
 --- /dev/null
 +++ b/packages/core/src/plugin/skill/playwright-depth.md
 @@ -0,0 +1,60 @@
@@ -438,137 +926,9 @@ index 000000000..379dc1864
 +Tool names and parameters follow `@playwright/mcp`. If your server's `browser_snapshot`
 +exposes no `depth` parameter, narrow by `ref`/selector to the subtree you need instead
 +and record that selector as `anchor` — the memory protocol above is unchanged.
-diff --git a/packages/core/src/session/model-request.ts b/packages/core/src/session/model-request.ts
-index 293c93a5e..512995a6f 100644
---- a/packages/core/src/session/model-request.ts
-+++ b/packages/core/src/session/model-request.ts
-@@ -97,6 +97,59 @@
-   return Math.min(requested, Math.max(OUTPUT_TOKEN_MIN, room))
- }
- 
-+//PATCH START to custom ROLE>
-+// 2.0.29 re-anchor: the old request.ts:60 (`input.agent.prompt ? [...] : SystemPrompt.provider(model)`)
-+// became `input.agent.system ? ... : SessionSystemPrompt.make(...)` below — the single read-site for the
-+// lead system prompt, shared by runner/llm.ts, generate.ts and compaction.ts. Persona LEADS and the stock
-+// identity opener is stripped; empty persona => byte-identical stock behavior. role.json root: the old
-+// InstanceState.context worktree is not threaded into this pure helper, so we use OPENCODE_ROLE_FILE,
-+// else <cwd>/.opencode/role.json (server cwd is the project directory).
-+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-+import { dirname, join, resolve as resolvePath } from "node:path"
-+
-+type RoleEvalConfig = {
-+  usersystem: string
-+  assistant_system: string
-+}
-+
-+function loadRoleEvalConfig(): RoleEvalConfig {
-+  const file = process.env.OPENCODE_ROLE_FILE
-+    ? resolvePath(process.env.OPENCODE_ROLE_FILE)
-+    : join(process.cwd(), ".opencode", "role.json")
-+
-+  const stock: RoleEvalConfig = {
-+    usersystem: "",
-+    assistant_system: "",
-+  }
-+
-+  try {
-+    mkdirSync(dirname(file), { recursive: true })
-+    if (!existsSync(file)) {
-+      writeFileSync(file, JSON.stringify(stock, null, 2) + "\n", "utf8")
-+      return stock
-+    }
-+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleEvalConfig>
-+    return {
-+      usersystem: typeof parsed.usersystem === "string" ? parsed.usersystem : "",
-+      assistant_system: typeof parsed.assistant_system === "string" ? parsed.assistant_system : "",
-+    }
-+  } catch {
-+    return stock
-+  }
-+}
-+
-+function stripIdentity(prompt: string) {
-+  // beast.txt fused identity with the "keep going until resolved" instruction in sentence one - leave it intact.
-+  if (prompt.startsWith("You are opencode, an agent")) return prompt
-+  // 2.0.29 stock opener (runner/prompt/system.txt): "You are an AI agent running in OpenCode, a coding agent
-+  // harness." — identity-only sentence; instruction starts at sentence two ("Help the user accomplish...").
-+  // trinity.txt ("You are opencode, an interactive CLI tool...") is caught by the generic rule below.
-+  return prompt
-+    .replace(/^You are an AI agent running in OpenCode,[^.]*\.\s*/, "")
-+    .replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
-+}
-+//PATCH END,P1.P2 is the CUSTOM-ROLE-SYSTEM block inside baseTranscript.
-+
- export const baseTranscript = (input: {
-   readonly agent: Agent.Info
-   readonly model: SessionRunnerModel.Resolved
-@@ -105,14 +158,18 @@
-   readonly messages: ReadonlyArray<SessionMessage.Info>
- }) => {
-   const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
-+  // CUSTOM-ROLE-SYSTEM START
-+  const persona = loadRoleEvalConfig().assistant_system
-+  const stock = input.agent.system
-+    ? input.agent.system
-+    : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name))
-+  const lead = persona
-+    ? [persona, stripIdentity(stock)].filter((part) => part.length > 0).join("\n")
-+    : stock
-+  // CUSTOM-ROLE-SYSTEM END
-   return {
-     providerMetadataKey,
--    system: [
--      input.agent.system
--        ? input.agent.system
--        : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
--      input.initial,
--    ]
-+    system: [lead, input.initial]
-       .filter((part) => part.length > 0)
-       .map(SystemPart.make),
-     messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
-@@ -159,7 +216,8 @@
-   replace: (media: { mime: string; name: string | undefined; bytes: () => number }) => string | undefined,
- ) =>
-   messages.map((message) => {
--    const content = message.content.map((part) => {
-+    const parts = Array.isArray(message.content) ? message.content : []
-+    const content = parts.map((part) => {
-       if (part.type === "media") {
-         const text = replace({ mime: part.media.mediaType, name: part.filename, bytes: () => mediaBytes(part.media) })
-         return text === undefined ? part : Message.text(text)
-@@ -175,7 +233,7 @@
-         ? part
-         : { ...part, result: { ...result, value } }
-     })
--    return content.every((part, index) => part === message.content[index])
-+    return content.every((part, index) => part === parts[index])
-       ? message
-       : new Message({ ...message, content })
-   })
-@@ -188,7 +246,7 @@
- export const boundImages = (messages: LLMRequest["messages"]) => {
-   const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
-   const sizes = messages.flatMap((message) =>
--    message.content.flatMap((part) => {
-+    (Array.isArray(message.content) ? message.content : []).flatMap((part) => {
-       if (part.type === "media") return isImage(part.media.mediaType) ? [mediaBytes(part.media)] : []
-       if (part.type !== "tool-result" || part.result.type !== "content") return []
-       return part.result.value.flatMap((item: Content) =>
-@@ -263,6 +321,10 @@
-         },
-         Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
-       )
-+      // PATCH hook null-safety: a plugin that nulls system/messages must never reach the LLM request —
-+      // fall back to the pre-hook draft. A hook REPLACING either field is untouched.
-+      if (shaped.system == null) shaped.system = input.system
-+      if (shaped.messages == null) shaped.messages = input.messages
-       // Match by identity first, then by key. Entries matching neither were invented by a
-       // hook and are dropped. `t.name` stays the real name so execution can map renames back.
-       const byName = new Map(tools.definitions.map((t) => [t.name, t]))
 diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
 new file mode 100644
-index 000000000..a3eeb7c1c
+index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a806697badd017
 --- /dev/null
 +++ b/packages/core/src/session/runner/context-decay.ts
 @@ -0,0 +1,401 @@
@@ -973,232 +1333,6 @@ index 000000000..a3eeb7c1c
 +    "</archived-tool-output>",
 +  ].join("\n")
 +}
-diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
-index 8d03c824e..4acccaa70 100644
---- a/packages/core/src/session/runner/to-llm-message.ts
-+++ b/packages/core/src/session/runner/to-llm-message.ts
-@@ -11,7 +11,8 @@ import type { Model } from "@opencode/schema/model"
- import { Option, Schema } from "effect"
- import { fileURLToPath } from "url"
- import { SessionMessage } from "../message.js"
-+import { decay, indexBlock } from "./context-decay.js"
- import { SessionHistory } from "../history.js"
- import { SessionRecentText } from "../recent-text.js"
- import type { FileAttachment } from "@opencode/schema/prompt"
- 
-@@ -154,10 +155,11 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
-   const sameProvider = message.model.providerID === model.providerID
-   const sameModel = sameProvider && message.model.id === model.id
-   const reuseProviderMetadata = sameModel && message.error === undefined
--  const reasoningInterrupted = message.content.some(
-+  const items = Array.isArray(message.content) ? message.content : []
-+  const reasoningInterrupted = items.some(
-     (item) => item.type === "reasoning" && item.time !== undefined && item.time.completed === undefined,
-   )
--  const content = message.content.flatMap((item): ContentPart[] => {
-+  const content = items.flatMap((item): ContentPart[] => {
-     if (item.type === "text")
-       return [
-         {
-@@ -326,9 +328,19 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
-   }
- }
- 
--/** Translate projected Session history into canonical @opencode/ai context. */
-+/**
-+ * Translate projected Session history into canonical @opencode/ai context. Decay runs first, on Session messages
-+ * rather than lowered ones, so it can see tool inputs/paths and rewrite a tool's own body in place. The retrieval index
-+ * is appended last, never prepended: it grows every time something is archived, and a growing prefix would cold-cache
-+ * the whole request on every turn.
-+ */
- export const toLLMMessages = (
-   messages: readonly SessionMessage.Info[],
-   model: Model.Ref,
-   providerMetadataKey: string = model.providerID,
--) => messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey))
-+) => {
-+  const decayed = decay(messages)
-+  const lowered = decayed.messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey))
-+  const index = indexBlock(decayed.archive)
-+  return index === undefined ? lowered : [...lowered, Message.user(index)]
-+}
-diff --git a/packages/core/test/plugin/skill.test.ts b/packages/core/test/plugin/skill.test.ts
-index ff117800f..7905c006c 100644
---- a/packages/core/test/plugin/skill.test.ts
-+++ b/packages/core/test/plugin/skill.test.ts
-@@ -79,4 +79,37 @@ describe("SkillPlugin.Plugin", () => {
-       ),
-     ),
-   )
-+
-+  it.effect("registers the built-in playwright-depth skill", () =>
-+    Effect.gen(function* () {
-+      const skill = yield* Skill.Service
-+      yield* SkillPlugin.Plugin.effect(
-+        host({
-+          skill: {
-+            list: () => Effect.die("unused skill.list"),
-+            transform: skill.transform,
-+            reload: skill.reload,
-+          },
-+        }),
-+      ).pipe(Effect.provide(config()))
-+
-+      expect(yield* skill.list()).toContainEqual(
-+        expect.objectContaining({
-+          id: "playwright-depth",
-+          name: "Playwright Depth",
-+          description: expect.stringContaining("per-site memory"),
-+        }),
-+      )
-+    }),
-+  )
-+
-+  it.effect("resolves the playwright-depth cache path instead of shipping the placeholder", () =>
-+    Effect.gen(function* () {
-+      // Guards the real failure mode: a hardcoded authoring-machine path, or a
-+      // {{CACHE_PATH}} token that never got substituted, silently shipping to users.
-+      expect(SkillPlugin.PlaywrightDepthContent).not.toContain("{{CACHE_PATH}}")
-+      expect(SkillPlugin.PlaywrightDepthContent).toContain(SkillPlugin.PlaywrightDepthCachePath)
-+      expect(SkillPlugin.PlaywrightDepthCachePath).toContain("playwright-depth-cache.json")
-+    }),
-+  )
- })
-diff --git a/packages/script/src/index.ts b/packages/script/src/index.ts
-index 40dc28dca..29935f5e3 100644
---- a/packages/script/src/index.ts
-+++ b/packages/script/src/index.ts
-@@ -27,8 +27,16 @@ const CHANNEL = await (async () => {
-   if (env.OPENCODE_CHANNEL) return env.OPENCODE_CHANNEL
-   if (env.OPENCODE_BUMP) return "latest"
-   if (env.OPENCODE_VERSION && !env.OPENCODE_VERSION.startsWith("0.0.0-")) return "latest"
--  const branch = await $`git branch --show-current`.text().then((x) => x.trim())
--  if (!branch) return "detached"
-+  // `git branch --show-current` prints an empty line when HEAD is detached, and fails
-+  // outright outside a work tree. Never let that become the channel: it is baked into the
-+  // OPENCODE_CHANNEL build define and an empty channel yields artifacts like `opencode-.db`.
-+  const branch = await $`git branch --show-current`
-+    .nothrow()
-+    .quiet()
-+    .text()
-+    .then((x) => x.trim())
-+    .catch(() => "")
-+  if (!branch) return "local"
-   const channel = branch.replace(/[^a-zA-Z0-9._-]/g, "-")
-   if (/^[a-zA-Z0-9]/.test(channel)) return channel
-   return `branch-${channel}`
-diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
-index 8c570fb93..8e8365f34 100644
---- a/packages/tui/src/logo.ts
-+++ b/packages/tui/src/logo.ts
-@@ -1,5 +1,5 @@
- export const logo = {
--  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
-+  left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"],
-   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
- }
- 
-diff --git a/packages/core/src/database/v1-migration.bun.ts b/packages/core/src/database/v1-migration.bun.ts
-index 2a78031ad..b88de419d 100644
---- a/packages/core/src/database/v1-migration.bun.ts
-+++ b/packages/core/src/database/v1-migration.bun.ts
-@@ -680,6 +680,43 @@ export function run(options: Options = {}): Effect.Effect<RunResult, never, Data
-           }
-         yield* Effect.yieldNow
-       }
-+      // PERSONALIZE(v1-adoption): sessions imported into Project.ID.global are
-+      // normally re-homed by the session projector when Worktree.Event.Resolved
-+      // fires — but persist() publishes that event only when the worktree row is
-+      // first inserted. Any directory resolved BEFORE this import finished (e.g.
-+      // the directory opencode was launched in) has already consumed its one-shot
-+      // event, stranding its V1 sessions in global forever. Replay that adoption
-+      // here for every already-resolved worktree before marking completion,
-+      // using the same semantics as the projector: longest matching worktree
-+      // wins, path becomes the directory relative to it, recency untouched.
-+      yield* db
-+        .transaction((tx) =>
-+          Effect.gen(function* () {
-+            yield* tx.run(sql`
-+              UPDATE session_v2 SET
-+                project_id = (
-+                  SELECT w.project_id FROM worktree w
-+                  WHERE session_v2.directory = w.directory
-+                     OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
-+                  ORDER BY length(w.directory) DESC LIMIT 1
-+                ),
-+                path = (
-+                  SELECT ltrim(substr(session_v2.directory, length(w.directory) + 1), '/') FROM worktree w
-+                  WHERE session_v2.directory = w.directory
-+                     OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
-+                  ORDER BY length(w.directory) DESC LIMIT 1
-+                )
-+              WHERE project_id = ${Project.ID.global}
-+                AND workspace_id IS NULL
-+                AND EXISTS (
-+                  SELECT 1 FROM worktree w
-+                  WHERE session_v2.directory = w.directory
-+                     OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
-+                )
-+            `)
-+          }),
-+        )
-+        .pipe(Effect.orDie)
-       yield* db
-         .transaction((tx) =>
-           Effect.gen(function* () {
-diff --git a/packages/core/test/session-model-request-hooks.test.ts b/packages/core/test/session-model-request-hooks.test.ts
-index 8e7612066344ea31aeff6a8edbcc6688eb6db413..f262eda8c120cff69019563536abf1a5a0695eb3 100644
---- a/packages/core/test/session-model-request-hooks.test.ts
-+++ b/packages/core/test/session-model-request-hooks.test.ts
-@@ -1,4 +1,5 @@
- import { describe, expect } from "bun:test"
-+import { Message, SystemPart } from "@opencode/ai"
- import { OpenAIChat } from "@opencode/ai/protocols"
- import { Agent } from "@opencode/schema/agent"
- import { Money } from "@opencode/schema/money"
-@@ -154,3 +155,42 @@
-     }),
-   )
- })
-+
-+describe("SessionModelRequest hook null-safety", () => {
-+  it.effect("falls back to the pre-hook draft when a hook nulls system/messages", () =>
-+    Effect.gen(function* () {
-+      const hooks = yield* PluginHooks.Service
-+      const wiped: string[] = []
-+      for (const name of ["context", "compaction", "generate", "title"] as const) {
-+        yield* hooks.register("session", name, (event) =>
-+          Effect.sync(() => {
-+            wiped.push(name)
-+            // Simulate a buggy plugin wiping the draft — must never reach the LLM request.
-+            Object.assign(event, { system: undefined, messages: undefined })
-+          }),
-+        )
-+      }
-+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
-+      const system = [SystemPart.make("Stay terse.")]
-+      const messages = [Message.user("hello")]
-+
-+      for (const kind of KINDS) {
-+        const prepared = yield* requests[kind]({
-+          session,
-+          agent: Agent.ID.make("build"),
-+          model,
-+          system,
-+          messages,
-+        })
-+        expect(prepared.request.system).toBeDefined()
-+        expect(prepared.request.messages).toBeDefined()
-+        expect(prepared.request.system.length).toBe(1)
-+        expect(prepared.request.messages.length).toBe(1)
-+        for (const message of prepared.request.messages) {
-+          expect(message.content).toBeDefined()
-+        }
-+      }
-+      expect(wiped.sort()).toEqual(["compaction", "context", "generate", "title"])
-+    }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
-+  )
-+})
 diff --git a/packages/core/test/session-context-decay.test.ts b/packages/core/test/session-context-decay.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b027140c29
@@ -1440,37 +1574,12 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +  expect(state.content.length).toBe(2)
 +  expect(() => compactionRead(state)).not.toThrow()
 +})
-diff --git a/packages/core/src/session/title.ts b/packages/core/src/session/title.ts
-index 816cc45..4cf5bdd 100644
---- a/packages/core/src/session/title.ts
-+++ b/packages/core/src/session/title.ts
-@@ -132,11 +132,15 @@ export const layer = Layer.effect(
-         : messagePrompt(firstUser.text)
-       const selection = yield* context.selectTitle(session)
-       if (!selection) return
--      const title =
--        (yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
--        (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
--          ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
--          : undefined)
-+      // PERSONALIZE: NO-TITLE-LLM — minimal deterministic local name ("NewSession-YYYYMMDD-HHMMSS"),
-+      // zero tokens, no API call ever. LLM branch kept dead below (same hard-force idiom as the
-+      // updater gate) so every helper/import stays referenced and the diff stays minimal.
-+      const title = (true as boolean)
-+        ? `NewSession-${new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-")}`
-+        : ((yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
-+          (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
-+            ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
-+            : undefined))
-       if (!title) return
-       const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
-       const current = yield* store.get(sessionID)
 diff --git a/packages/core/test/session/content-guards.test.ts b/packages/core/test/session/content-guards.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4593833286af0a6fee619a60ea5f19c1cebba6f2
+index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22516bed06
 --- /dev/null
 +++ b/packages/core/test/session/content-guards.test.ts
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,47 @@
 +import { describe, expect, test } from "bun:test"
 +import { readFileSync } from "node:fs"
 +import path from "node:path"
@@ -1479,15 +1588,19 @@ index 0000000000000000000000000000000000000000..4593833286af0a6fee619a60ea5f19c1
 +// Array.isArray guard. Upstream has shipped messages whose `content` is undefined/non-array mid-stream;
 +// an unguarded `.content.map(...)` there is exactly the TypeError that broke context-decay. Scope is the
 +// patch-owned files only - upstream files are taken as-is and are not rewritten by this check.
++// Isolated architecture: our runtime logic lives in src/personalize/* (plus context-decay.ts);
++// stock modules are byte-identical upstream files and must never be listed here.
 +const OWNED = [
-+  "src/config/markdown.ts",
-+  "src/database/database.ts",
-+  "src/database/v1-migration.bun.ts",
-+  "src/plugin/skill.ts",
-+  "src/session/model-request.ts",
++  "src/personalize/content.ts",
++  "src/personalize/database.ts",
++  "src/personalize/hooks.ts",
++  "src/personalize/markdown.ts",
++  "src/personalize/model-request.ts",
++  "src/personalize/persona.ts",
++  "src/personalize/skill.ts",
++  "src/personalize/to-llm-message.ts",
++  "src/personalize/v1-migration.ts",
 +  "src/session/runner/context-decay.ts",
-+  "src/session/runner/to-llm-message.ts",
-+  "src/session/title.ts",
 +]
 +
 +const ACCESS =
@@ -1514,114 +1627,107 @@ index 0000000000000000000000000000000000000000..4593833286af0a6fee619a60ea5f19c1
 +    expect(errors).toEqual([])
 +  })
 +})
-diff --git a/packages/server/src/service-status.ts b/packages/server/src/service-status.ts
---- a/packages/server/src/service-status.ts
-+++ b/packages/server/src/service-status.ts
-@@ -6,12 +6,12 @@
-   | { readonly type: "starting" }
-   | { readonly type: "ready" }
-   | { readonly type: "stopping" }
--  | { readonly type: "failed" }
-+  | { readonly type: "failed"; readonly reason?: string }
- 
- export interface Interface {
-   readonly current: Effect.Effect<State>
-   readonly ready: Effect.Effect<void>
--  readonly fail: Effect.Effect<void>
-+  readonly fail: (reason?: string) => Effect.Effect<void>
-   readonly beginStopping: Effect.Effect<void>
- }
- 
-@@ -24,7 +24,12 @@
-   return {
-     current: Ref.get(current),
-     ready: Ref.update(current, (status) => (status.type === "starting" ? ({ type: "ready" } satisfies State) : status)),
--    fail: Ref.update(current, (status) => (status.type === "starting" ? ({ type: "failed" } satisfies State) : status)),
-+    fail: (reason?: string) =>
-+      Ref.update(current, (status) =>
-+        status.type === "starting"
-+          ? ((reason === undefined ? { type: "failed" } : { type: "failed", reason }) satisfies State)
-+          : status,
-+      ),
-     beginStopping,
-   } satisfies Interface
- })
-diff --git a/packages/server/src/process.ts b/packages/server/src/process.ts
---- a/packages/server/src/process.ts
-+++ b/packages/server/src/process.ts
-@@ -122,7 +122,8 @@
-   }).pipe(
-     Effect.catchCause((cause) => {
-       if (!lifecycle || Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause)
--      return status.fail.pipe(
-+      // Keep the first line of the failure so /api/info and the 503 can report why boot failed.
-+      return status.fail(Cause.pretty(cause).split("\n", 1)[0]).pipe(
-         Effect.andThen(
-           Scope.close(applicationScope, Exit.failCause(cause)).pipe(
-             Effect.catchCause((cleanupCause) =>
-@@ -208,7 +209,13 @@
- ) {
-   const state = yield* status.current
-   return HttpServerResponse.jsonUnsafe(
--    { version, pid: process.pid, urls: urls(), paths: { tmp } },
-+    {
-+      version,
-+      pid: process.pid,
-+      urls: urls(),
-+      paths: { tmp },
-+      ...(state.type === "failed" && state.reason !== undefined ? { error: state.reason } : {}),
-+    },
-     {
-       status: state.type === "ready" ? 200 : state.type === "failed" ? 500 : 503,
-       headers: state.type === "starting" || state.type === "stopping" ? { "retry-after": "1" } : undefined,
-@@ -221,7 +228,8 @@
-     return HttpServerResponse.jsonUnsafe(
-       {
-         code: "service_failed",
--        message: "The background service could not start.",
-+        message:
-+          "The background service could not start." + (status.reason === undefined ? "" : " " + status.reason),
-         action: "Run `opencode service restart` after checking the service logs.",
-       },
-       { status: 503 },
-diff --git a/packages/client/src/service-probe.ts b/packages/client/src/service-probe.ts
---- a/packages/client/src/service-probe.ts
-+++ b/packages/client/src/service-probe.ts
-@@ -13,6 +13,7 @@
-   readonly version?: string
-   readonly state: "ready" | "waiting" | "failed"
-   readonly compatible: boolean
-+  readonly error?: string
- }
- 
- /**
-@@ -27,7 +28,12 @@
-       "Background service uses an incompatible health protocol. Update this client or explicitly restart the service.",
-     )
-   if (service.state === "ready") return { _tag: "reuse" } as const
--  if (service.state === "failed") return fail("Background service failed to start")
-+  if (service.state === "failed")
-+    return fail(
-+      service.error === undefined
-+        ? "Background service failed to start"
-+        : "Background service failed to start: " + service.error,
-+    )
-   return { _tag: "wait" } as const
- }
- 
-@@ -84,6 +90,7 @@
-       version: serverInfo.version,
-       state: response.ok ? "ready" : response.status === 500 ? "failed" : "waiting",
-       compatible: true,
-+      error: serverInfo.error,
-     } satisfies LocalService,
-     timedOut: false,
-   }
-@@ -101,5 +108,6 @@
-   if (typeof input !== "object" || input === null) return
-   if (!("version" in input) || typeof input.version !== "string") return
-   if (!("pid" in input) || typeof input.pid !== "number" || !Number.isInteger(input.pid) || input.pid < 0) return
--  return { version: input.version, pid: input.pid }
-+  const error = "error" in input && typeof input.error === "string" ? input.error : undefined
-+  return { version: input.version, pid: input.pid, error }
- }
+diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7dfc5274c0a9a21ed3f1ebcfda8c1d9e75b95480
+--- /dev/null
++++ b/packages/server/src/personalize/process.ts
+@@ -0,0 +1,18 @@
++import os from "node:os"
++import path from "node:path"
++import { Effect } from "effect"
++import { Flock } from "@opencode/util/flock"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++
++export function decorate(stock: typeof import("../process")) {
++  const start: typeof stock.start = (options) => Effect.acquireUseRelease(
++    Effect.promise((signal) => Flock.acquire("service-bootstrap", {
++      dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++    })),
++    (lease) => stock.start(options).pipe(Effect.provideService(PersonalizeBoot, {
++      retry: Effect.void, release: Effect.promise(() => lease.release()),
++    })),
++    (lease) => Effect.promise(() => lease.release()),
++  )
++  return { start }
++}
+diff --git a/packages/server/src/personalize/service-status.ts b/packages/server/src/personalize/service-status.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8204b91e9d0433dca619c879198b3827d43e9582
+--- /dev/null
++++ b/packages/server/src/personalize/service-status.ts
+@@ -0,0 +1,23 @@
++import { Effect, Option, Ref } from "effect"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++
++export function decorate(stock: typeof import("../service-status")) {
++  const make: typeof stock.make = (options) => Effect.gen(function* () {
++    type State = import("../service-status").State | { readonly type: "retrying" }
++    const state = yield* Ref.make<State>({ type: options.starting ? "starting" : "ready" })
++    const boot = yield* Effect.serviceOption(PersonalizeBoot)
++    const release = Option.isSome(boot) ? boot.value.release : Effect.void
++    if (Option.isSome(boot)) boot.value.retry = Ref.update(state, (value) =>
++      value.type === "starting" || value.type === "retrying" ? { type: "retrying" } : value)
++    return {
++      // The wire may expose retrying; the owned Promise client normalizes it to waiting.
++      current: Ref.get(state) as Effect.Effect<import("../service-status").State>,
++      ready: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "ready" } : value)
++        .pipe(Effect.andThen(release)),
++      fail: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "failed" } : value)
++        .pipe(Effect.andThen(release)),
++      beginStopping: Ref.modify(state, (value) => value.type === "stopping" ? [false, value] : [true, { type: "stopping" }]),
++    }
++  })
++  return { make }
++}
+diff --git a/packages/tui/src/personalize/logo.ts b/packages/tui/src/personalize/logo.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6197a6376aafc2093e03df84d6fe4667ab099173
+--- /dev/null
++++ b/packages/tui/src/personalize/logo.ts
+@@ -0,0 +1,3 @@
++export function decorate(stock: typeof import("../logo")) {
++  return { logo: { ...stock.logo, left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"] } }
++}
+diff --git a/packages/util/src/personalize-boot.ts b/packages/util/src/personalize-boot.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d599cc7ea1f8c5c2f38c35f6c2e1e2a483bb9176
+--- /dev/null
++++ b/packages/util/src/personalize-boot.ts
+@@ -0,0 +1,26 @@
++import { Context, Effect, Option } from "effect"
++
++export interface BootState {
++  retry: Effect.Effect<void>
++  release: Effect.Effect<void>
++}
++export class PersonalizeBoot extends Context.Service<PersonalizeBoot, BootState>()("@personalize/Boot") {}
++
++export const updateBoot = (kind: "retry" | "release") => Effect.serviceOption(PersonalizeBoot).pipe(
++  Effect.flatMap((state) => Option.isSome(state) ? state.value[kind] : Effect.void),
++)
++
++export function sqliteBusy(input: unknown): boolean {
++  const seen = new Set<unknown>()
++  const visit = (value: unknown): boolean => {
++    if (value === null || value === undefined || seen.has(value)) return false
++    seen.add(value)
++    if (typeof value === "string") return /SQLITE_(?:BUSY|LOCKED)|database (?:is )?(?:locked|busy)/i.test(value)
++    if (typeof value !== "object") return false
++    const record = value as Record<string, unknown>
++    if ([record.message, record.code, record.errno].some((part) => typeof part === "string" && visit(part))) return true
++    return [record.cause, record.error, record.reason, record.reasons, record.left, record.right]
++      .some((part) => Array.isArray(part) ? part.some(visit) : visit(part))
++  }
++  return visit(input)
++}
+diff --git a/packages/util/src/personalize-observability.ts b/packages/util/src/personalize-observability.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aab581801cea150ba26cc34085f10325bd9506c7
+--- /dev/null
++++ b/packages/util/src/personalize-observability.ts
+@@ -0,0 +1,4 @@
++export function decorate(stock: typeof import("./observability")) {
++  const layer: typeof stock.layer = (options = {}) => stock.layer({ ...options, endpoint: undefined, headers: undefined })
++  return { layer }
++}

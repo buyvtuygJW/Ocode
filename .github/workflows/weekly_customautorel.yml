@@ -8,18 +8,43 @@ on:
         description: "Upstream branch/ref/tag"
         required: true
         default: "production"
+      cleanup_only:
+        description: "Clean old Actions artifacts only; do not build or delete Releases"
+        type: boolean
+        default: false
   schedule:
     - cron: "0 3 * * 1"
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: patched-opencode-build
   cancel-in-progress: false
 
 jobs:
+  cleanup_artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test storage retention safeguards
+        run: node --test .github/scripts/cleanup-storage.test.cjs
+      - name: Clean old Actions artifacts (independent of build success)
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { cleanupArtifacts } = require('./.github/scripts/cleanup-storage.cjs');
+            await cleanupArtifacts({ github, context, core });
+
   build:
+    needs: cleanup_artifacts
+    if: ${{ !cancelled() && inputs.cleanup_only != true }}
     runs-on: ubuntu-latest
 
     env:
@@ -75,6 +100,21 @@ jobs:
           fi
 
           echo "Patch validation OK."
+
+      - name: Personalize isolation checks (hook budget, owned modules, shims)
+        # Hard gate: the patch set must keep the isolation contract (max 4 upstream
+        # hook hunks, only packages/cli/script/build.ts; everything else owned files)
+        # BEFORE any clone/build work is spent. Patches are self-contained; this step
+        # needs only the committed checker, its test, and patches/ on disk.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Running checker unit tests..."
+          node --test .github/scripts/personalize-hooks.test.cjs
+
+          echo "Checking patch-set isolation contract..."
+          node .github/scripts/check-personalize-hooks.cjs
 
       - name: Load last successful upstream ref
         id: load_state
@@ -384,12 +424,15 @@ jobs:
           }
 
           run_patch_tests() {
-            # Unit tests shipped inside FinalPERSONALIZE.patch. They pin the two
-            # behaviors a bad merge keeps breaking:
-            #  - context-decay reader: archived turns may NEVER surface undefined
-            #    content/system into compaction (TypeError: e.content.map crash),
-            #  - model-request hooks: a hook wiping system/messages falls back to
-            #    the original input instead of returning undefined.
+            # Unit tests shipped inside the patches (isolated architecture: owned
+            # new files only -- stock modules are never modified). They pin:
+            #  - context-decay reader (owned): archived turns may NEVER surface
+            #    undefined content/system into compaction (TypeError: e.content.map),
+            #  - content guards (owned): every .content array access in
+            #    src/personalize/* stays Array.isArray-guarded,
+            #  - upstream's own model-request hook suite (stock, unmodified):
+            #    shim-level decoration is enforced at build time by
+            #    check-personalize-hooks.cjs + the PersonalizeBuild plugin, not here.
             local tests=() f found
             for f in \
               packages/core/test/session-context-decay.test.ts \
@@ -503,6 +546,15 @@ jobs:
 
             UPSTREAM_SHA="$(git rev-parse HEAD)"
             echo "Checked out upstream SHA: $UPSTREAM_SHA"
+
+            # Isolation contract against the LIVE upstream: manifest-declared exports
+            # and every stock.X access must still resolve on this exact tree. Latest
+            # attempt only -- the fallback SHA predates refactors and is already
+            # guarded by the 3-way apply plus the shipped unit tests.
+            if [ "$label" = "latest" ]; then
+              echo "Checking personalization isolation against pristine upstream..."
+              node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches --upstream .
+            fi
 
             git config user.name "claudedbuildbot"
             git config user.email "claudedbuildbot@example.local"
@@ -652,16 +704,8 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Upload all CLI artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: oc-${{ steps.build.outputs.built_label }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            out/*.zip
-            out/*.tar.gz
-            out/SHA256SUMS.txt
-
       - name: Create or update GitHub Release
+        id: release
         if: steps.build.outputs.built_label == 'latest'
         shell: bash
         env:
@@ -813,7 +857,24 @@ jobs:
               --notes-file "$NOTES_FILE"
           fi
 
+      # Releases are primary storage. A full quota must never block publishing.
+      # Keep a short-lived download only for fallback builds / failed publishing.
+      - name: Upload fallback CLI artifacts (best-effort, one day)
+        if: ${{ always() && !cancelled() && steps.package.outcome == 'success' && steps.release.outcome != 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc-${{ steps.build.outputs.built_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/*.zip
+            out/*.tar.gz
+            out/SHA256SUMS.txt
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
       - name: Sync patched upstream source to dev
+        id: sync
         if: steps.build.outputs.built_label == 'latest'
         shell: bash
         env:
@@ -869,6 +930,15 @@ jobs:
           mkdir -p .github/workflows
           cp "../$SELF" "$SELF"
 
+          # The workflow is also used from dev, so retain its tested cleanup helper.
+          mkdir -p .github/scripts
+          cp ../.github/scripts/cleanup-storage.cjs .github/scripts/cleanup-storage.cjs
+          cp ../.github/scripts/cleanup-storage.test.cjs .github/scripts/cleanup-storage.test.cjs
+          # Same for the isolation-contract validator: the dev tree carries the
+          # patched sources it checks, so it stays runnable wherever the workflow runs.
+          cp ../.github/scripts/check-personalize-hooks.cjs .github/scripts/check-personalize-hooks.cjs
+          cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
+
           if [ ! -s "$SELF" ]; then
             echo "ERROR: $SELF missing from automation checkout; refusing to push"
             echo "(pushing without it deletes the workflow and kills the weekly cron)"
@@ -898,3 +968,24 @@ jobs:
           echo "  $STATE_BRANCH"
 
           git push --force target "HEAD:$STATE_BRANCH"
+
+      - name: Prune old Releases only after a current upstream build and dev sync
+        if: ${{ success() && needs.cleanup_artifacts.result == 'success' && steps.build.outputs.built_label == 'latest' && steps.release.outcome == 'success' && steps.sync.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          BUILT_SHA: ${{ steps.build.outputs.built_sha }}
+          BUILT_LABEL: ${{ steps.build.outputs.built_label }}
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
+        with:
+          script: |
+            const { cleanupReleases } = require('./.github/scripts/cleanup-storage.cjs');
+            await cleanupReleases({
+              github, context, core,
+              builtSha: process.env.BUILT_SHA,
+              builtLabel: process.env.BUILT_LABEL,
+              releaseOutcome: process.env.RELEASE_OUTCOME,
+              syncOutcome: process.env.SYNC_OUTCOME,
+              upstreamRef: process.env.UPSTREAM_REF,
+            });
