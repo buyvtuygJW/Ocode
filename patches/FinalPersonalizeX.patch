@@ -95,14 +95,14 @@ index 0000000000000000000000000000000000000000..c8be4e343725a9e9b3f6cba385537606
 +}
 diff --git a/packages/tui/src/personalize/theme.ts b/packages/tui/src/personalize/theme.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e675d3b67008898458acf7a47ab2efc13f64a50c
+index 0000000000000000000000000000000000000000..342ee297f7097f40992fdd4db8f1f5691d2e66da
 --- /dev/null
 +++ b/packages/tui/src/personalize/theme.ts
 @@ -0,0 +1,59 @@
 +import { RGBA } from "@opentui/core"
 +import { useRenderer } from "@opentui/solid"
 +import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
-+import { createComponentTheme } from "../config/theme"
++import { createComponentTheme } from "../theme/component"
 +import { useStorageOptional } from "../context/storage"
 +
 +type Themes = ReturnType<typeof import("../context/theme").useThemes>

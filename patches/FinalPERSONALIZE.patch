@@ -28,25 +28,23 @@ index 80a67fe..7daf404 100755
      minify: true,
 diff --git a/.personalize/build.d.mts b/.personalize/build.d.mts
 new file mode 100644
-index 0000000000000000000000000000000000000000..45c9e3f36716615138498518598515c46b516639
+index 0000000000000000000000000000000000000000..bc05d0d68a8c3f46c027cfb7b190a25b2fbcb487
 --- /dev/null
 +++ b/.personalize/build.d.mts
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,7 @@
 +import type { BunPlugin } from "bun"
 +
 +export function normalizeChannel(value: unknown): string
 +export function personalizationPlugins(plugins: BunPlugin[], options?: {
 +  root?: string
-+  resolve?: (specifier: string, from: string) => string
 +}): BunPlugin[]
 +export const PersonalizeBuild: { plugins: typeof personalizationPlugins }
 diff --git a/.personalize/build.mjs b/.personalize/build.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb2840e87d
+index 0000000000000000000000000000000000000000..a82f635eff1e8108137a47cb378116dd4456350a
 --- /dev/null
 +++ b/.personalize/build.mjs
-@@ -0,0 +1,126 @@
-+import { builtinModules } from "node:module"
+@@ -0,0 +1,127 @@
 +import { existsSync, readFileSync } from "node:fs"
 +import path from "node:path"
 +import { fileURLToPath } from "node:url"
@@ -55,7 +53,11 @@ index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb
 +
 +const ORIGINAL = "personalize-original"
 +const PREFIX = "personalize:original:"
-+const builtins = new Set([...builtinModules, "bun"])
++// Bun dedupes modules by path while ignoring the namespace, so the original must never
++// collide with the shim's real file path. The marker sits in the basename, keeping the
++// real directory so Bun's default resolver (extensions, index files, tsconfig) resolves
++// the stock module's imports exactly like upstream.
++const VIRTUAL = ".personalize-original~"
 +const directory = path.dirname(fileURLToPath(import.meta.url))
 +
 +// This module is the FIRST build-script import, before Script computes its constants.
@@ -122,7 +124,7 @@ index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb
 +        value(options, callback) {
 +          build[method]({ namespace: "file", ...options }, callback)
 +          if (!options.namespace || options.namespace === "file") {
-+            build[method]({ ...options, namespace: ORIGINAL }, (args) => callback({ ...args, namespace: "file" }))
++            build[method]({ ...options, namespace: ORIGINAL }, (args) => callback({ ...args, namespace: "file", path: args.path.replaceAll(VIRTUAL, ""), importer: args.importer?.replaceAll(VIRTUAL, "") }))
 +          }
 +        },
 +      })
@@ -133,7 +135,6 @@ index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb
 +
 +export function personalizationPlugins(plugins, options = {}) {
 +  const root = options.root || path.resolve(directory, "..")
-+  const resolve = options.resolve || ((specifier, from) => Bun.resolveSync(specifier, from))
 +  const manifest = loadManifest(root)
 +  const aliases = {
 +    name: "personalize-owned-module-boundaries",
@@ -141,7 +142,9 @@ index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb
 +      const original = (args) => {
 +        const filename = decodeURIComponent(args.path.slice(PREFIX.length))
 +        if (!manifest.has(key(filename))) throw new Error(`Unregistered Personalize original: ${filename}`)
-+        return { path: filename, namespace: ORIGINAL }
++        const normalized = filename.replaceAll("\\", "/")
++        const slash = normalized.lastIndexOf("/")
++        return { path: normalized.slice(0, slash + 1) + VIRTUAL + normalized.slice(slash + 1), namespace: ORIGINAL }
 +      }
 +      build.onResolve({ filter: /^personalize:original:/, namespace: "file" }, original)
 +      build.onResolve({ filter: /^personalize:original:/, namespace: ORIGINAL }, original)
@@ -155,17 +158,14 @@ index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb
 +  const originals = {
 +    name: "personalize-stock-modules-unchanged",
 +    setup(build) {
-+      build.onResolve({ filter: /.*/, namespace: ORIGINAL }, (args) => {
-+        if (args.path.startsWith("node:") || args.path.startsWith("bun:") || builtins.has(args.path)) {
-+          return { path: args.path, external: true }
++      build.onLoad({ filter: /.*/, namespace: ORIGINAL }, (args) => {
++        const filename = args.path.replaceAll("\\", "/").replaceAll(VIRTUAL, "")
++        return {
++          // No substitutions, AST edits, copied framework implementations, or source anchors.
++          contents: readFileSync(filename, "utf8"),
++          loader: args.path.endsWith(".tsx") ? "tsx" : args.path.endsWith(".jsx") ? "jsx" : "ts",
 +        }
-+        return { path: resolve(args.path, path.dirname(args.importer)), namespace: "file" }
 +      })
-+      build.onLoad({ filter: /.*/, namespace: ORIGINAL }, (args) => ({
-+        // No substitutions, AST edits, copied framework implementations, or source anchors.
-+        contents: readFileSync(args.path, "utf8"),
-+        loader: args.path.endsWith(".tsx") ? "tsx" : args.path.endsWith(".jsx") ? "jsx" : "ts",
-+      }))
 +    },
 +  }
 +  return [aliases, ...plugins.map(forwardPlugin), originals]
@@ -174,7 +174,7 @@ index 0000000000000000000000000000000000000000..c35a5ea872b67264ed0aa2ba2c51abfb
 +export const PersonalizeBuild = { plugins: personalizationPlugins }
 diff --git a/.personalize/build.test.mjs b/.personalize/build.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..18225049db3dda39d5cc0e2672d8f3d58b92ae01
+index 0000000000000000000000000000000000000000..f889883cdc027a5ab1e74e3fd3a5cb1e1fd5f299
 --- /dev/null
 +++ b/.personalize/build.test.mjs
 @@ -0,0 +1,103 @@
@@ -236,7 +236,7 @@ index 0000000000000000000000000000000000000000..18225049db3dda39d5cc0e2672d8f3d5
 +
 +test("original module bytes stay byte-for-byte untouched", () => {
 +  const root = fixture()
-+  const hooks = registrations(personalizationPlugins([], { root, resolve: () => "unused" }))
++  const hooks = registrations(personalizationPlugins([], { root }))
 +  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
 +  assert.equal(original.callback({ path: path.join(root, "stock.ts") }).contents,
 +    readFileSync(path.join(root, "stock.ts"), "utf8"))
