@@ -1995,10 +1995,10 @@ index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22
 +})
 diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..65006af29a3c9ca4d63ce0074351b9ef60964df9
+index 0000000000000000000000000000000000000000..fec1da32d0591eb608e53e12ecf4153036946e40
 --- /dev/null
 +++ b/packages/server/src/personalize/process.ts
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,37 @@
 +import os from "node:os"
 +import path from "node:path"
 +import { Effect } from "effect"
@@ -2006,7 +2006,13 @@ index 0000000000000000000000000000000000000000..65006af29a3c9ca4d63ce0074351b9ef
 +import { PersonalizeBoot } from "@opencode/util/personalize-boot"
 +
 +export function decorate(stock: typeof import("../process")) {
-+  const start: typeof stock.start = (options) => Effect.acquireUseRelease(
++  // Forward every argument. Upstream's `start(options, lifecycle?, transform?,
++  // remoteURLs?)` registers the service through `lifecycle.onListen`; binding
++  // only `options` here dropped the registration callback, so spawned service
++  // contenders bound the port but never registered — their CLIs timed out and
++  // left detached port-squatting zombies behind ("Managed service port ...
++  // already in use", no instance ever becoming the host).
++  const start: typeof stock.start = (options, ...rest) => Effect.acquireUseRelease(
 +    Effect.promise((signal) =>
 +      Flock.acquire("service-bootstrap", {
 +        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
@@ -2023,7 +2029,7 @@ index 0000000000000000000000000000000000000000..65006af29a3c9ca4d63ce0074351b9ef
 +        return { release }
 +      })
 +    ),
-+    (boot) => stock.start(options).pipe(Effect.provideService(PersonalizeBoot, {
++    (boot) => stock.start(options, ...rest).pipe(Effect.provideService(PersonalizeBoot, {
 +      retry: Effect.void, release: Effect.promise(() => boot.release()),
 +    })),
 +    (boot) => Effect.promise(() => boot.release()),
