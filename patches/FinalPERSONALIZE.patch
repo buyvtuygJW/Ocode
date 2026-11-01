@@ -1,0 +1,2118 @@
+diff --git a/.personalize/build.d.mts b/.personalize/build.d.mts
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc05d0d68a8c3f46c027cfb7b190a25b2fbcb487
+--- /dev/null
++++ b/.personalize/build.d.mts
+@@ -0,0 +1,7 @@
++import type { BunPlugin } from "bun"
++
++export function normalizeChannel(value: unknown): string
++export function personalizationPlugins(plugins: BunPlugin[], options?: {
++  root?: string
++}): BunPlugin[]
++export const PersonalizeBuild: { plugins: typeof personalizationPlugins }
+diff --git a/.personalize/build.mjs b/.personalize/build.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a82f635eff1e8108137a47cb378116dd4456350a
+--- /dev/null
++++ b/.personalize/build.mjs
+@@ -0,0 +1,127 @@
++import { existsSync, readFileSync } from "node:fs"
++import path from "node:path"
++import { fileURLToPath } from "node:url"
++import { normalizeChannel } from "./channel.mjs"
++export { normalizeChannel } from "./channel.mjs"
++
++const ORIGINAL = "personalize-original"
++const PREFIX = "personalize:original:"
++// Bun dedupes modules by path while ignoring the namespace, so the original must never
++// collide with the shim's real file path. The marker sits in the basename, keeping the
++// real directory so Bun's default resolver (extensions, index files, tsconfig) resolves
++// the stock module's imports exactly like upstream.
++const VIRTUAL = ".personalize-original~"
++const directory = path.dirname(fileURLToPath(import.meta.url))
++
++// This module is the FIRST build-script import, before Script computes its constants.
++if (process.env.OPENCODE_CHANNEL !== undefined) {
++  process.env.OPENCODE_CHANNEL = normalizeChannel(process.env.OPENCODE_CHANNEL)
++}
++
++const key = (value) => {
++  const normalized = path.resolve(value).replaceAll("\\", "/")
++  return process.platform === "win32" ? normalized.toLowerCase() : normalized
++}
++
++export function loadManifest(root) {
++  const result = new Map()
++  for (const name of ["manifest.json", "R.json", "S.json", "X.json"]) {
++    const filename = path.join(root, ".personalize", name)
++    if (!existsSync(filename)) continue
++    const manifest = JSON.parse(readFileSync(filename, "utf8"))
++    for (const item of manifest.modules) {
++      const target = path.resolve(root, item.target)
++      if (!existsSync(target)) throw new Error(`Personalize target missing: ${item.target}`)
++      for (const filename of [...(item.before || []), ...(item.factory ? [item.factory] : [])]) {
++        if (!existsSync(path.resolve(root, filename))) throw new Error(`Personalize owned module missing: ${filename}`)
++      }
++      const current = result.get(key(target)) || { target, modules: [] }
++      current.modules.push(item)
++      result.set(key(target), current)
++    }
++  }
++  return result
++}
++
++export function moduleShim(root, entry) {
++  const original = PREFIX + encodeURIComponent(entry.target)
++  const code = []
++  for (const item of entry.modules) for (const filename of item.before || []) {
++    code.push(`import ${JSON.stringify(path.resolve(root, filename).replaceAll("\\", "/"))}`)
++  }
++  code.push(`export * from ${JSON.stringify(original)}`)
++  const factories = entry.modules.filter((item) => item.factory)
++  if (!factories.length) return code.join("\n") + "\n"
++  code.push(`import * as original from ${JSON.stringify(original)}`)
++  const names = new Set()
++  factories.forEach((item, index) => {
++    for (const name of item.exports) {
++      if (!/^[A-Za-z_$][\w$]*$/.test(name) || name === "default") throw new Error(`Invalid Personalize export: ${name}`)
++      names.add(name)
++    }
++    code.push(`import { decorate as decorate${index} } from ${JSON.stringify(path.resolve(root, item.factory).replaceAll("\\", "/"))}`)
++    for (const name of item.exports) code.push(`if (!(${JSON.stringify(name)} in original)) throw new Error(${JSON.stringify(`Personalize public export changed: ${entry.target}#${name}`)})`)
++    code.push(`const stage${index} = { ...${index ? `stage${index - 1}` : "original"}, ...decorate${index}(${index ? `stage${index - 1}` : "original"}) }`)
++  })
++  for (const name of names) code.push(`export const ${name} = stage${factories.length - 1}.${name}`)
++  return code.join("\n") + "\n"
++}
++
++/** Adapt normal plugin registrations so original TSX still uses the STOCK Solid compiler. */
++export function forwardPlugin(plugin) {
++  return {
++    ...plugin,
++    setup(build) {
++      const facade = Object.create(build)
++      for (const method of ["onLoad", "onResolve"]) Object.defineProperty(facade, method, {
++        value(options, callback) {
++          build[method]({ namespace: "file", ...options }, callback)
++          if (!options.namespace || options.namespace === "file") {
++            build[method]({ ...options, namespace: ORIGINAL }, (args) => callback({ ...args, namespace: "file", path: args.path.replaceAll(VIRTUAL, ""), importer: args.importer?.replaceAll(VIRTUAL, "") }))
++          }
++        },
++      })
++      return plugin.setup(facade)
++    },
++  }
++}
++
++export function personalizationPlugins(plugins, options = {}) {
++  const root = options.root || path.resolve(directory, "..")
++  const manifest = loadManifest(root)
++  const aliases = {
++    name: "personalize-owned-module-boundaries",
++    setup(build) {
++      const original = (args) => {
++        const filename = decodeURIComponent(args.path.slice(PREFIX.length))
++        if (!manifest.has(key(filename))) throw new Error(`Unregistered Personalize original: ${filename}`)
++        const normalized = filename.replaceAll("\\", "/")
++        const slash = normalized.lastIndexOf("/")
++        return { path: normalized.slice(0, slash + 1) + VIRTUAL + normalized.slice(slash + 1), namespace: ORIGINAL }
++      }
++      build.onResolve({ filter: /^personalize:original:/, namespace: "file" }, original)
++      build.onResolve({ filter: /^personalize:original:/, namespace: ORIGINAL }, original)
++      build.onLoad({ filter: /\.[cm]?[jt]sx?$/, namespace: "file" }, (args) => {
++        const entry = manifest.get(key(args.path))
++        if (!entry) return
++        return { loader: "js", contents: moduleShim(root, entry) }
++      })
++    },
++  }
++  const originals = {
++    name: "personalize-stock-modules-unchanged",
++    setup(build) {
++      build.onLoad({ filter: /.*/, namespace: ORIGINAL }, (args) => {
++        const filename = args.path.replaceAll("\\", "/").replaceAll(VIRTUAL, "")
++        return {
++          // No substitutions, AST edits, copied framework implementations, or source anchors.
++          contents: readFileSync(filename, "utf8"),
++          loader: args.path.endsWith(".tsx") ? "tsx" : args.path.endsWith(".jsx") ? "jsx" : "ts",
++        }
++      })
++    },
++  }
++  return [aliases, ...plugins.map(forwardPlugin), originals]
++}
++
++export const PersonalizeBuild = { plugins: personalizationPlugins }
+diff --git a/.personalize/build.test.mjs b/.personalize/build.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f889883cdc027a5ab1e74e3fd3a5cb1e1fd5f299
+--- /dev/null
++++ b/.personalize/build.test.mjs
+@@ -0,0 +1,103 @@
++import { afterEach, test } from "node:test"
++import assert from "node:assert/strict"
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { forwardPlugin, loadManifest, moduleShim, normalizeChannel, personalizationPlugins } from "./build.mjs"
++
++const directories = []
++afterEach(() => {
++  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
++})
++
++function fixture() {
++  const temporary = path.join(tmpdir(), "opencode")
++  mkdirSync(temporary, { recursive: true })
++  const root = mkdtempSync(path.join(temporary, "personalize-resolver-"))
++  directories.push(root)
++  mkdirSync(path.join(root, ".personalize"))
++  writeFileSync(path.join(root, "stock.ts"), "// deliberately unlike ANY old source\nexport const value = 1\n")
++  writeFileSync(path.join(root, "owned.ts"), "export const decorate = stock => ({ value: stock.value + 1 })\n")
++  writeFileSync(path.join(root, ".personalize/manifest.json"), JSON.stringify({ modules: [
++    { target: "stock.ts", factory: "owned.ts", exports: ["value"] },
++  ] }))
++  return root
++}
++
++function registrations(plugins) {
++  const registrations = { onLoad: [], onResolve: [] }
++  for (const plugin of plugins) plugin.setup({
++    onLoad(options, callback) { registrations.onLoad.push({ options, callback }) },
++    onResolve(options, callback) { registrations.onResolve.push({ options, callback }) },
++  })
++  return registrations
++}
++
++test("channel normalization handles null/undefined/bad names without trim crashes", () => {
++  for (const value of [undefined, null, "", "undefined", " null ", "a/b", 1]) assert.equal(normalizeChannel(value), "local")
++  assert.equal(normalizeChannel(" custom "), "custom")
++})
++
++test("wrapper delegates every untouched export and contains no stock implementation", () => {
++  const root = fixture()
++  const shim = moduleShim(root, [...loadManifest(root).values()][0])
++  assert.match(shim, /export \* from "personalize:original:/)
++  assert.match(shim, /export const value = stage0.value/)
++  assert(!shim.includes("value = 1"))
++  assert(!shim.includes("deliberately unlike"))
++})
++
++test("unknown optional files are not invented and missing owned modules fail closed", () => {
++  const root = fixture()
++  assert.equal(loadManifest(root).size, 1)
++  rmSync(path.join(root, "owned.ts"))
++  assert.throws(() => loadManifest(root), /owned module missing/)
++})
++
++test("original module bytes stay byte-for-byte untouched", () => {
++  const root = fixture()
++  const hooks = registrations(personalizationPlugins([], { root }))
++  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
++  assert.equal(original.callback({ path: path.join(root, "stock.ts") }).contents,
++    readFileSync(path.join(root, "stock.ts"), "utf8"))
++})
++
++test("private originals cannot address arbitrary unregistered files", () => {
++  const root = fixture()
++  const hooks = registrations(personalizationPlugins([], { root }))
++  const resolve = hooks.onResolve.find((h) => h.options.namespace === "file")
++  assert.throws(() => resolve.callback({ path: "personalize:original:" + encodeURIComponent(path.join(root, "secret.ts")) }), /Unregistered/)
++})
++
++test("stock Solid/virtual/native callbacks receive originals in their expected file namespace", () => {
++  const seen = []
++  const hooks = registrations([forwardPlugin({ name: "stock-solid", setup(build) {
++    build.onLoad({ filter: /\.tsx$/ }, (args) => { seen.push(args); return { contents: "compiled-by-stock-solid", loader: "js" } })
++  } })])
++  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
++  assert.equal(original.callback({ path: "stock.tsx", namespace: "personalize-original" }).contents, "compiled-by-stock-solid")
++  assert.equal(seen[0].namespace, "file")
++})
++
++test("custom upstream plugin namespaces are not duplicated or rewritten", () => {
++  const hooks = registrations([forwardPlugin({ name: "stock-virtual", setup(build) {
++    build.onLoad({ filter: /.*/, namespace: "opencode" }, () => ({ contents: "embedded" }))
++  } })])
++  assert.equal(hooks.onLoad.length, 1)
++  assert.equal(hooks.onLoad[0].options.namespace, "opencode")
++})
++
++test("non-writable SDK methods can be adapted without assigning to inherited fields", () => {
++  const calls = []
++  const build = Object.freeze({ onLoad: (...args) => calls.push(args), onResolve() {} })
++  forwardPlugin({ name: "frozen-sdk", setup(api) { api.onLoad({ filter: /x/ }, () => undefined) } }).setup(build)
++  assert.equal(calls.length, 2)
++  assert.equal(calls[0][0].namespace, "file")
++  assert.equal(calls[1][0].namespace, "personalize-original")
++})
++
++test("plugin order intercepts the selected file, then delegates original transforms before raw fallback", () => {
++  const root = fixture()
++  const plugins = personalizationPlugins([{ name: "stock", setup() {} }], { root })
++  assert.deepEqual(plugins.map((p) => p.name), ["personalize-owned-module-boundaries", "stock", "personalize-stock-modules-unchanged"])
++})
+diff --git a/.personalize/channel.d.mts b/.personalize/channel.d.mts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a59a3b4927c3e812455eb43034be464e1c155fc
+--- /dev/null
++++ b/.personalize/channel.d.mts
+@@ -0,0 +1 @@
++export function normalizeChannel(value: unknown): string
+diff --git a/.personalize/channel.mjs b/.personalize/channel.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..58d7470b10d17a195eee07fd2ac8fde633cd7952
+--- /dev/null
++++ b/.personalize/channel.mjs
+@@ -0,0 +1,4 @@
++export function normalizeChannel(value) {
++  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*$/i.test(value.trim()) &&
++    !["undefined", "null"].includes(value.trim().toLowerCase()) ? value.trim() : "local"
++}
+diff --git a/.personalize/content.test.mjs b/.personalize/content.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..56bff6ccfd5593c5db2676603f65e4f7ff197d3e
+--- /dev/null
++++ b/.personalize/content.test.mjs
+@@ -0,0 +1,75 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { canonicalMessages, historyMessages, copyWith } from "../packages/core/src/personalize/content.ts"
++import { personaLead, stripStockIdentity } from "../packages/core/src/personalize/persona.ts"
++
++test("valid messages retain their exact object identity and metadata", () => {
++  const message = { role: "user", content: [{ type: "text", text: "hello" }], metadata: { instruction: [1] } }
++  assert.equal(canonicalMessages([message])[0], message)
++})
++
++test("missing content is repaired without losing prototypes, symbols, readonly or hidden metadata", () => {
++  const marker = Symbol("metadata")
++  class Message { content = undefined; role = "user"; get kind() { return "original" } }
++  const message = new Message()
++  Object.defineProperty(message, marker, { value: { instructions: [1] }, enumerable: false })
++  Object.defineProperty(message, "content", { value: undefined, writable: false, enumerable: true })
++  const result = canonicalMessages([message])[0]
++  assert(result instanceof Message)
++  assert.equal(result.kind, "original")
++  assert.equal(result[marker], message[marker])
++  assert.equal(Object.getOwnPropertyDescriptor(result, marker).enumerable, false)
++  assert.equal(Object.getOwnPropertyDescriptor(result, "content").writable, false)
++  assert.deepEqual(result.content, [])
++  assert.equal(message.content, undefined)
++})
++
++test("nullish arrays and tool-result values are repaired, not mutated", () => {
++  assert.deepEqual(canonicalMessages(undefined), [])
++  const message = { role: "tool", content: [{ type: "tool-result", result: { type: "content", value: undefined } }] }
++  const result = canonicalMessages([message])[0]
++  assert.deepEqual(result.content[0].result.value, [])
++  assert.equal(message.content[0].result.value, undefined)
++})
++
++test("history repair keeps completed-tool metadata and leaves healthy records alone", () => {
++  const good = { role: "assistant", content: [] }
++  assert.equal(historyMessages([good])[0], good)
++  const bad = { role: "assistant", content: [{ type: "tool", state: { status: "completed", content: undefined, metadata: { id: 1 } } }] }
++  const result = historyMessages([bad])[0]
++  assert.deepEqual(result.content[0].state.content, [])
++  assert.equal(result.content[0].state.metadata, bad.content[0].state.metadata)
++})
++
++test("system-part replacement preserves instruction/cache metadata", () => {
++  const part = { content: "stock", metadata: { experimental: { instructions: [{ id: 1 }] } } }
++  const result = copyWith(part, { content: "persona\nstock" })
++  assert.equal(result.metadata, part.metadata)
++  assert.equal(part.content, "stock")
++})
++
++test("persona seeds the existing role schema and reads only assistant_system", () => {
++  const root = path.join(tmpdir(), "opencode")
++  mkdirSync(root, { recursive: true })
++  const directory = mkdtempSync(path.join(root, "personalize-role-"))
++  const previous = process.env.OPENCODE_ROLE_FILE
++  try {
++    const file = path.join(directory, "role.json")
++    process.env.OPENCODE_ROLE_FILE = file
++    assert.equal(personaLead(), "")
++    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { usersystem: "", assistant_system: "" })
++    writeFileSync(file, JSON.stringify({ usersystem: "not this", assistant_system: "exact persona" }))
++    assert.equal(personaLead(), "exact persona")
++    writeFileSync(file, "{broken")
++    assert.equal(personaLead(), "")
++    assert.equal(stripStockIdentity("You are OpenCode, a coding assistant. Keep tools."), "Keep tools.")
++    assert.equal(stripStockIdentity("You are opencode, an agent of change."), "You are opencode, an agent of change.")
++  } finally {
++    if (previous === undefined) delete process.env.OPENCODE_ROLE_FILE
++    else process.env.OPENCODE_ROLE_FILE = previous
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
+diff --git a/.personalize/dedup.test.mjs b/.personalize/dedup.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..51840663b5834c957854b20f7af4476405a7ee78
+--- /dev/null
++++ b/.personalize/dedup.test.mjs
+@@ -0,0 +1,92 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import {
++  bumpLedger,
++  callSignature,
++  dedupeText,
++  estimateTokens,
++  ledgerState,
++  normalizeSentence,
++  punchLine,
++  resetLedger,
++  slapReceipt,
++  splitSentences,
++  stableStringify,
++} from "../packages/core/src/personalize/dedup.ts"
++
++test("stableStringify is key-order invariant and array-order exact", () => {
++  assert.equal(stableStringify({ b: 1, a: 2 }), stableStringify({ a: 2, b: 1 }))
++  assert.equal(
++    stableStringify({ a: { y: 1, x: 2 }, b: [3, 4] }),
++    stableStringify({ b: [3, 4], a: { x: 2, y: 1 } }),
++  )
++  assert.notEqual(stableStringify([1, 2]), stableStringify([2, 1]))
++  assert.equal(stableStringify(undefined), "null")
++})
++
++test("callSignature collides only for calls differing in argument key order", () => {
++  assert.equal(callSignature("read", { path: "a", limit: 5 }), callSignature("read", { limit: 5, path: "a" }))
++  assert.notEqual(callSignature("read", { path: "a" }), callSignature("read", { path: "b" }))
++  assert.notEqual(callSignature("read", {}), callSignature("glob", {}))
++})
++
++test("slapReceipt carries the call number, waste estimate and optional punch", () => {
++  assert.equal(
++    slapReceipt(7, 12, ""),
++    "*Systemslap* DUPLICATE of call #7 this turn — result already in context. wasted: ~12 tkn",
++  )
++  assert.equal(
++    slapReceipt(2, 4, "\n*SystemPunch* duplicates this session: 2 (≈8 tkn wasted)"),
++    "*Systemslap* DUPLICATE of call #2 this turn — result already in context. wasted: ~4 tkn\n*SystemPunch* duplicates this session: 2 (≈8 tkn wasted)",
++  )
++})
++
++test("punch line appears only from the second duplicate onward and counts both kinds", () => {
++  resetLedger()
++  assert.equal(punchLine(ledgerState("s1")), "")
++  bumpLedger("s1", "calls", 10)
++  assert.equal(punchLine(ledgerState("s1")), "")
++  bumpLedger("s1", "prose", 30)
++  assert.match(punchLine(ledgerState("s1")), /\*SystemPunch\* duplicates this session: 2 \(≈40 tkn wasted\)/)
++  assert.equal(ledgerState("nope"), undefined)
++  resetLedger()
++  assert.equal(ledgerState("s1"), undefined)
++})
++
++test("dedupeText strips adjacent duplicate sentences, keeps the first, leaves a marker", () => {
++  const text = "Build finished with exit zero. Build finished with exit zero. Now running the serve test."
++  const result = dedupeText(text)
++  assert.ok(result)
++  assert.equal(result.removed, 1)
++  assert.match(result.text, /\[duplicate removed ×1: "Build finished[^"]*"\]/)
++  assert.ok(result.text.includes("Now running the serve test."))
++  assert.ok(result.wastedTokens > 0)
++  const withoutMarker = result.text.replace(/\[duplicate[^\]]*\]/, "")
++  assert.ok(!withoutMarker.includes("Build finished with exit zero. Build"))
++})
++
++test("dedupeText collapses longer runs into one marker", () => {
++  const text = "Alpha beta gamma delta epsilon. Alpha beta gamma delta epsilon. Alpha beta gamma delta epsilon."
++  const result = dedupeText(text)
++  assert.ok(result)
++  assert.equal(result.removed, 2)
++  assert.match(result.text, /×2/)
++})
++
++test("dedupeText leaves non-adjacent repeats, short sentences and healthy text alone", () => {
++  assert.equal(dedupeText("Just one sentence, nothing repeated here at all."), undefined)
++  assert.equal(dedupeText("Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine."), undefined)
++  const nonAdjacent =
++    "Alpha beta gamma delta epsilon zeta. A completely different sentence follows here. Alpha beta gamma delta epsilon zeta."
++  assert.equal(dedupeText(nonAdjacent), undefined)
++})
++
++test("sentence normalization ignores case, punctuation and whitespace", () => {
++  assert.equal(normalizeSentence("  Build, FINISHED!!  "), normalizeSentence("build finished"))
++  assert.deepEqual(splitSentences("One. Two!\nThree?"), ["One.", "Two!", "Three?"])
++})
++
++test("estimateTokens is a deterministic chars/4 ceiling", () => {
++  assert.equal(estimateTokens("1234"), 1)
++  assert.equal(estimateTokens("12345"), 2)
++})
+diff --git a/.personalize/manifest.json b/.personalize/manifest.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2ed71f92217b854898665b536aea24707bde4e8
+--- /dev/null
++++ b/.personalize/manifest.json
+@@ -0,0 +1,20 @@
++{
++  "modules": [
++    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
++    { "target": "packages/cli/src/version.ts", "factory": "packages/cli/src/personalize/version.ts", "exports": ["OPENCODE_CHANNEL", "OPENCODE_LOCAL"] },
++    { "target": "packages/util/src/observability.ts", "factory": "packages/util/src/personalize-observability.ts", "exports": ["layer"] },
++    { "target": "packages/ai/src/protocols/open-responses.ts", "factory": "packages/ai/src/personalize/open-responses.ts", "exports": ["lowerGeneration", "fromRequest", "fromRequestWithAdapter", "protocol"] },
++    { "target": "packages/core/src/config/markdown.ts", "factory": "packages/core/src/personalize/markdown.ts", "exports": ["sanitize"] },
++    { "target": "packages/core/src/database/database.ts", "factory": "packages/core/src/personalize/database.ts", "exports": ["layer", "configured", "node"] },
++    { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
++    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
++    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
++    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
++    { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },
++    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
++    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
++    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
++    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
++    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
++  ]
++}
+diff --git a/.personalize/preload.ts b/.personalize/preload.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..001ba8ad13e8a7ede81538bd447b7d97dd091dd6
+--- /dev/null
++++ b/.personalize/preload.ts
+@@ -0,0 +1,7 @@
++import path from "node:path"
++import { PersonalizeBuild } from "./build.mjs"
++
++const root = path.resolve(import.meta.dirname, "..")
++const solidPath = Bun.resolveSync("@opentui/solid/bun-plugin", path.join(root, "packages/cli"))
++const { createSolidTransformPlugin } = await import(solidPath)
++for (const plugin of PersonalizeBuild.plugins([createSolidTransformPlugin()])) Bun.plugin(plugin)
+diff --git a/packages/ai/src/personalize/open-responses.ts b/packages/ai/src/personalize/open-responses.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97f8683166
+--- /dev/null
++++ b/packages/ai/src/personalize/open-responses.ts
+@@ -0,0 +1,13 @@
++import { Effect } from "effect"
++
++export function decorate(stock: typeof import("../protocols/open-responses")) {
++  const lowerGeneration: typeof stock.lowerGeneration = (...args) => ({ ...stock.lowerGeneration(...args), store: false })
++  const fromRequest: typeof stock.fromRequest = (...args) =>
++    stock.fromRequest(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
++  const fromRequestWithAdapter: typeof stock.fromRequestWithAdapter = (...args) =>
++    stock.fromRequestWithAdapter(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
++  return {
++    lowerGeneration, fromRequest, fromRequestWithAdapter,
++    protocol: { ...stock.protocol, body: { ...stock.protocol.body, from: fromRequest } },
++  }
++}
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index 80a67fe75589d35a68f803ae2ffdab35e48715a6..7daf40430eae26b2e61239f5d79593ab1719c6ad 100644
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env bun
++import { PersonalizeBuild } from "../../../.personalize/build.mjs"
+ 
+ import { $ } from "bun"
+ import { createHash } from "node:crypto"
+@@ -160,7 +161,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+   const result = await Bun.build({
+     entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [
++    plugins: PersonalizeBuild.plugins([
+       appAssetsPlugin,
+       solidPlugin,
+       parcelWatcherPlugin,
+@@ -168,7 +169,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       pluginRuntimePlugin,
+       simulationGraphPlugin,
+       modelsSnapshot,
+-    ],
++    ]),
+     external: ["node-gyp"],
+     format: "esm",
+     minify: true,
+diff --git a/packages/cli/src/personalize/bootstrap.ts b/packages/cli/src/personalize/bootstrap.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..35a8bb34eb5a8da0d024683fa49f1c2e488267af
+--- /dev/null
++++ b/packages/cli/src/personalize/bootstrap.ts
+@@ -0,0 +1,9 @@
++// Loaded before the unmodified CLI entry point by the owned module boundary.
++// Explicit upgrades still work; background update inspection and telemetry do not.
++process.env.OPENCODE_DISABLE_AUTOUPDATE = "1"
++process.env.OTEL_SDK_DISABLED = "true"
++delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_HEADERS
++delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+diff --git a/packages/cli/src/personalize/version.ts b/packages/cli/src/personalize/version.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..552e669cfaa7a25bdecdb6630c9add9114ca5e5c
+--- /dev/null
++++ b/packages/cli/src/personalize/version.ts
+@@ -0,0 +1,6 @@
++import { normalizeChannel } from "../../../../.personalize/channel.mjs"
++
++export function decorate(stock: typeof import("../version")) {
++  const OPENCODE_CHANNEL = normalizeChannel(stock.OPENCODE_CHANNEL)
++  return { OPENCODE_CHANNEL, OPENCODE_LOCAL: OPENCODE_CHANNEL === "local" }
++}
+diff --git a/packages/client/src/personalize/service-probe.ts b/packages/client/src/personalize/service-probe.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdc87b287e133b9800da89fa7277e8c53cc07753
+--- /dev/null
++++ b/packages/client/src/personalize/service-probe.ts
+@@ -0,0 +1,29 @@
++import type { Info } from "../service"
++
++export function decorate(stock: typeof import("../service-probe")) {
++  const decide: typeof stock.decide = (service, options) => {
++    const state = service && typeof service === "object" ? Reflect.get(service, "state") : undefined
++    return state === "waiting" || state === "retrying" ? { _tag: "wait" } : stock.decide(service, options)
++  }
++  const probeResult: typeof stock.probeResult = async (info: Info, timeout) => {
++    const result = await stock.probeResult(info, timeout)
++    if (result.service || result.timedOut) return result
++    // A registered owner must not be killed merely because the published version
++    // changes while that same PID is starting. All other stock health rules stay intact.
++    const endpoint = { url: info.url, auth: info.password === undefined ? undefined : {
++      type: "basic" as const, username: "opencode", password: info.password,
++    } }
++    try {
++      const response = await fetch(new URL("/api/info", info.url), {
++        headers: stock.headers(endpoint), signal: AbortSignal.timeout(timeout ?? 1000),
++      })
++      if (response.status !== 503) return result
++      const body: unknown = await response.json()
++      if (!body || typeof body !== "object" || !("pid" in body) || body.pid !== info.pid ||
++          !("version" in body) || typeof body.version !== "string") return result
++      return { timedOut: false, service: { info, endpoint, version: body.version,
++        state: "waiting" as const, compatible: true } }
++    } catch { return result }
++  }
++  return { decide, probeResult }
++}
+diff --git a/packages/core/src/personalize/content.ts b/packages/core/src/personalize/content.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..031c11b3c2aa19dbbc190db469d7432c3abcced8
+--- /dev/null
++++ b/packages/core/src/personalize/content.ts
+@@ -0,0 +1,35 @@
++import type { Message } from "@opencode/ai/effect"
++import type { SessionMessage } from "../session/message"
++
++export function copyWith<T extends object>(value: T, changes: Partial<T>): T {
++  const descriptors = Object.getOwnPropertyDescriptors(value)
++  for (const [key, replacement] of Object.entries(changes)) {
++    const before = Object.getOwnPropertyDescriptor(value, key)
++    Object.defineProperty(descriptors, key, { enumerable: true, configurable: true, value: {
++      value: replacement, enumerable: before?.enumerable ?? true,
++      configurable: before?.configurable ?? true, writable: before && "writable" in before ? before.writable : true,
++    } })
++  }
++  return Object.create(Object.getPrototypeOf(value), descriptors)
++}
++
++export function canonicalMessages(messages: unknown): Message[] {
++  if (!Array.isArray(messages)) return []
++  return messages.filter((message) => message && typeof message === "object").map((message) => {
++    const content = (Array.isArray(message.content) ? message.content : []).filter(Boolean).map((part) =>
++      part.type === "tool-result" && part.result?.type === "content" && !Array.isArray(part.result.value)
++        ? copyWith(part, { result: copyWith(part.result, { value: [] }) }) : part)
++    return Array.isArray(message.content) && content.length === message.content.length && content.every((part, i) => part === message.content[i])
++      ? message : copyWith(message, { content })
++  })
++}
++
++export function historyMessages(messages: readonly SessionMessage.Info[]): SessionMessage.Info[] {
++  return messages.map((message) => {
++    const content = (Array.isArray(message.content) ? message.content : []).filter(Boolean).map((part) =>
++      part.type === "tool" && part.state?.status === "completed" && !Array.isArray(part.state.content)
++        ? copyWith(part, { state: copyWith(part.state, { content: [] }) }) : part)
++    return Array.isArray(message.content) && content.length === message.content.length && content.every((part, i) => part === message.content[i])
++      ? message : copyWith(message, { content })
++  })
++}
+diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e362747a9694ad5c049894e7944650f72aeae689
+--- /dev/null
++++ b/packages/core/src/personalize/database.ts
+@@ -0,0 +1,40 @@
++import path from "node:path"
++import { Cause, Effect, Exit, Layer, Scope } from "effect"
++import { Global } from "@opencode/util/global"
++import { Flock } from "@opencode/util/flock"
++import { sqliteBusy, updateBoot } from "@opencode/util/personalize-boot"
++import { guardSessionSchema } from "./schema-guard"
++
++export function decorate(stock: typeof import("../database/database")) {
++  const layer: typeof stock.layer = (options = { path: ":memory:" }) => {
++    const filename = options.path ?? ":memory:"
++    if (filename === ":memory:") return stock.layer(options)
++    return Layer.effectContext(Effect.gen(function* () {
++      const global = yield* Global.Service
++      const file = path.isAbsolute(filename) ? filename : path.join(global.data, filename)
++      const parent = yield* Scope.Scope
++      return yield* Effect.acquireUseRelease(
++        Effect.promise((signal) => Flock.acquire(file, { dir: path.join(global.state, "locks"), signal })),
++        () => Effect.gen(function* () {
++          for (let attempt = 0; ; attempt++) {
++            const scope = yield* Scope.make()
++            yield* Scope.addFinalizerExit(parent, (exit) => Scope.close(scope, exit))
++            const exit = yield* Effect.exit(Layer.buildWithScope(stock.layer({ ...options, path: file }), scope))
++            if (Exit.isSuccess(exit)) {
++              // Schema drift guard: runs after migrations settle; never throws (see schema-guard.ts).
++              guardSessionSchema(file)
++              return exit.value
++            }
++            yield* Scope.close(scope, exit)
++            if (attempt >= 6 || !sqliteBusy(Cause.pretty(exit.cause))) return yield* Effect.failCause(exit.cause)
++            yield* updateBoot("retry")
++            yield* Effect.sleep((attempt + 1) * 200)
++          }
++        }),
++        (lease) => Effect.promise(() => lease.release()),
++      )
++    }))
++  }
++  const configured: typeof stock.configured = (options) => stock.configured(options).mapLayer(() => layer(options))
++  return { layer, configured, node: configured({ path: ":memory:" }) }
++}
+diff --git a/packages/core/src/personalize/dedup.ts b/packages/core/src/personalize/dedup.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d19c6de113494da4bbf7cbced7f6d10875e1228
+--- /dev/null
++++ b/packages/core/src/personalize/dedup.ts
+@@ -0,0 +1,134 @@
++// ============================================================================
++// PERSONALIZATION (deltav11) — duplicate guards.
++// Deterministic detection of the two provable waste shapes:
++//   1. call echo: adjacent identical tool calls inside one step
++//   2. prose echo: adjacent duplicate sentences inside one text part
++// Hard punishment only where waste is provable (adjacent identical);
++// everything contextual is counted in the ledger, never blocked.
++// Pure module: no imports, no effects — unit-tested in .personalize/dedup.test.mjs.
++// ============================================================================
++
++export interface LedgerEntry {
++  readonly calls: number
++  readonly prose: number
++  readonly wastedTokens: number
++}
++
++const ledgers = new Map<string, LedgerEntry>()
++
++export function resetLedger(): void {
++  ledgers.clear()
++}
++
++export function ledgerState(key: string): LedgerEntry | undefined {
++  return ledgers.get(key)
++}
++
++export function estimateTokens(text: string): number {
++  return Math.max(1, Math.ceil(text.length / 4))
++}
++
++export function bumpLedger(key: string, kind: "calls" | "prose", wastedTokens: number): LedgerEntry {
++  const entry = ledgers.get(key) ?? { calls: 0, prose: 0, wastedTokens: 0 }
++  const next: LedgerEntry = {
++    calls: entry.calls + (kind === "calls" ? 1 : 0),
++    prose: entry.prose + (kind === "prose" ? 1 : 0),
++    wastedTokens: entry.wastedTokens + wastedTokens,
++  }
++  ledgers.set(key, next)
++  return next
++}
++
++/** Cumulative punch line, injected once the session has two or more duplicates total. */
++export function punchLine(entry: LedgerEntry | undefined): string {
++  if (!entry) return ""
++  const total = entry.calls + entry.prose
++  if (total < 2) return ""
++  return `\n*SystemPunch* duplicates this session: ${total} (≈${entry.wastedTokens} tkn wasted)`
++}
++
++// --- guard 1: call echo ------------------------------------------------------
++
++export function stableStringify(value: unknown): string {
++  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
++  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`
++  const record = value as Record<string, unknown>
++  const keys = Object.keys(record).sort()
++  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`
++}
++
++/** Signature of one tool call; calls differing only in argument key order collide by design. */
++export function callSignature(name: unknown, args: unknown): string {
++  return `${String(name ?? "")}(${stableStringify(args)})`
++}
++
++export function slapReceipt(callNumber: number, wastedTokens: number, punch: string): string {
++  return `*Systemslap* DUPLICATE of call #${callNumber} this turn — result already in context. wasted: ~${wastedTokens} tkn${punch}`
++}
++
++// --- guard 2: prose echo -----------------------------------------------------
++
++/** Sentences shorter than this (normalized) are structural noise — never compared. */
++const MIN_SENTENCE_CHARS = 24
++
++export function normalizeSentence(sentence: string): string {
++  return sentence
++    .toLowerCase()
++    .replace(/\s+/g, " ")
++    .replace(/[^\p{L}\p{N} ]/gu, "")
++    .trim()
++}
++
++export function splitSentences(text: string): string[] {
++  return text
++    .split(/(?<=[.!?])\s+|\n+/)
++    .map((sentence) => sentence.trim())
++    .filter((sentence) => sentence.length > 0)
++}
++
++export interface DedupeTextResult {
++  readonly text: string
++  readonly removed: number
++  readonly wastedTokens: number
++}
++
++/**
++ * Strips runs of adjacent duplicate sentences from ONE text part. The first
++ * occurrence is kept, each stripped run leaves one inline marker. Everything
++ * else — short sentences, non-adjacent repeats, cross-part or cross-turn
++ * repetition — is deliberately left alone.
++ */
++export function dedupeText(text: string): DedupeTextResult | undefined {
++  if (text.length < MIN_SENTENCE_CHARS * 2) return undefined
++  const sentences = splitSentences(text)
++  if (sentences.length < 2) return undefined
++  const out: string[] = []
++  let removed = 0
++  let wastedTokens = 0
++  let changed = false
++  let index = 0
++  while (index < sentences.length) {
++    const kept = sentences[index]!
++    out.push(kept)
++    const normalized = normalizeSentence(kept)
++    let run = 0
++    while (
++      index + 1 + run < sentences.length &&
++      normalized.length >= MIN_SENTENCE_CHARS &&
++      normalizeSentence(sentences[index + 1 + run]!) === normalized
++    ) {
++      run++
++    }
++    if (run > 0) {
++      changed = true
++      removed += run
++      wastedTokens += run * estimateTokens(kept)
++      const preview = kept.length > 60 ? `${kept.slice(0, 60)}…` : kept
++      out.push(`[duplicate removed ×${run}: "${preview}"]`)
++      index += run
++    }
++    index++
++  }
++  if (!changed) return undefined
++  return { text: out.join(" "), removed, wastedTokens }
++}
+diff --git a/packages/core/src/personalize/hooks.ts b/packages/core/src/personalize/hooks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e0025b65220b87f18a016f4c1c144b294ad4898
+--- /dev/null
++++ b/packages/core/src/personalize/hooks.ts
+@@ -0,0 +1,32 @@
++import { Context, Effect, Layer } from "effect"
++import { canonicalMessages, copyWith } from "./content"
++import { personalizeSystem } from "./model-request"
++
++export function decorate(stock: typeof import("../plugin/hooks")) {
++  return { node: stock.node.mapLayer((layer) => Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
++    const original = Context.get(context, stock.Service)
++    const trigger: typeof original.trigger = (domain, name, event) => Effect.suspend(() => {
++      if (domain !== "session" || !["context", "compaction", "generate", "title"].includes(String(name))) {
++        return original.trigger(domain, name, event)
++      }
++      const before = event as unknown as { system?: unknown; messages?: unknown }
++      const system = Array.isArray(before.system) ? [...before.system] : []
++      const messages = canonicalMessages(before.messages)
++      return original.trigger(domain, name, event).pipe(Effect.map((result) => {
++        const value = result as unknown as { system?: unknown; messages?: unknown; result?: unknown }
++        const shaped = copyWith(value, {
++          system: personalizeSystem(Array.isArray(value.system) ? value.system : system),
++          messages: canonicalMessages(Array.isArray(value.messages) ? value.messages : messages),
++        })
++        if (name === "title" && typeof shaped.result !== "string") {
++          const first = canonicalMessages(shaped.messages).find((message) => message.role === "user")
++          const text = first?.content.filter((part) => part.type === "text").map((part) => part.text).join(" ") || "New session"
++          const title = text.replace(/\s+/g, " ").trim()
++          shaped.result = title.length > 50 ? title.slice(0, 50) + "…" : title
++        }
++        return shaped as typeof result
++      }))
++    })
++    return Context.add(context, stock.Service, { ...original, trigger })
++  }))) }
++}
+diff --git a/packages/core/src/personalize/markdown.ts b/packages/core/src/personalize/markdown.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfb1489f5102edcc989a16f226e449219ce5676f
+--- /dev/null
++++ b/packages/core/src/personalize/markdown.ts
+@@ -0,0 +1,87 @@
++import matter from "gray-matter"
++export function sanitize(content: string) {
++  const stripped = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
++  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---/)
++  if (!match) return content
++  const frontmatter = match[1]
++
++  // top-level "key:" or "key: value" (hyphen/dot keys allowed; space after ":" optional)
++  const KEY = /^([A-Za-z0-9][\w.-]*)[ \t]*:(?:[ \t]*(.*))?$/
++  // an intentional block-scalar header ("|", ">", "|-", ">2", ...) — leave alone
++  const BLOCK_HEADER = /^[|>][+-]?\d*$/
++  const isComment = (line: string) => /^\s*#/.test(line)
++
++  // tabs are illegal as YAML indentation -> spaces
++  const detab = (line: string) => {
++    const m = line.match(/^[ \t]+/)
++    return m ? m[0].replace(/\t/g, "  ") + line.slice(m[0].length) : line
++  }
++
++  const lines = frontmatter.split(/\r?\n/).map(detab)
++
++  const groups: { key: string; value: string; children: string[] }[] = []
++  const preface: string[] = []
++  let current: { key: string; value: string; children: string[] } | null = null
++  for (const line of lines) {
++    const entry = /^[ \t]/.test(line) || isComment(line) ? null : line.match(KEY)
++    if (entry) {
++      current = { key: entry[1], value: (entry[2] ?? "").trim(), children: [] }
++      groups.push(current)
++    } else if (current) {
++      current.children.push(line)
++    } else {
++      preface.push(line)
++    }
++  }
++
++  const needsBlock = (v: string) => v.includes(":") || / #/.test(v)
++
++  const out: string[] = [...preface]
++  for (const g of groups) {
++    // content lines that belong to this key's value (drop blanks and comments)
++    const body = g.children.filter((c) => c.trim() !== "" && !isComment(c))
++    const structured = g.children.some((c) => /^[ \t]+\S/.test(c) || /^\s*- /.test(c))
++    const quoted = g.value.startsWith('"') || g.value.startsWith("'")
++
++    // keep verbatim: a real block/list (empty value + indented block), an
++    // explicit block-scalar header, or a clean single-line quoted value
++    if ((g.value === "" && structured) || BLOCK_HEADER.test(g.value) || (quoted && body.length === 0)) {
++      out.push(g.value ? `${g.key}: ${g.value}` : `${g.key}:`)
++      for (const c of g.children) out.push(c)
++      continue
++    }
++
++    // empty value followed only by loose unindented text -> fold it in
++    if (g.value === "") {
++      if (body.length === 0) {
++        out.push(`${g.key}:`)
++        for (const c of g.children) out.push(c)
++      } else {
++        out.push(`${g.key}: |-`)
++        for (const c of body) out.push(`  ${c.trim()}`)
++      }
++      continue
++    }
++
++    // inline value: block-scalar it if it wraps onto more lines or needs escaping
++    if (body.length > 0 || needsBlock(g.value)) {
++      out.push(`${g.key}: |-`)
++      out.push(`  ${g.value}`)
++      for (const c of body) out.push(`  ${c.trim()}`)
++    } else {
++      out.push(`${g.key}: ${g.value}`)
++    }
++  }
++
++  const result = stripped.replace(frontmatter, () => out.join("\n"))
++  // the rewrite must parse -- otherwise return the input untouched so the
++  // strict parse error propagates and callers skip the file
++  try {
++    matter(result, {})
++  } catch {
++    return content
++  }
++  return result
++}
++
++export const decorate = (_stock: typeof import("../config/markdown")) => ({ sanitize })
+diff --git a/packages/core/src/personalize/message-updater.ts b/packages/core/src/personalize/message-updater.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eff6f79388ce8d3c00c2ed3a17e3cee38e5b233a
+--- /dev/null
++++ b/packages/core/src/personalize/message-updater.ts
+@@ -0,0 +1,25 @@
++// PERSONALIZATION (deltav11) — guard 2: prose echo.
++// Strips runs of adjacent duplicate sentences from ONE assistant text part
++// before the message is projected and stored, so both the display and the
++// next request's context carry the deduped text. The first occurrence is
++// kept; each stripped run leaves one inline marker. Cross-part and
++// cross-turn repetition is deliberately untouched (it may be deliberate).
++import { bumpLedger, dedupeText, punchLine } from "./dedup"
++
++export function decorate(stock: typeof import("../session/message-updater")) {
++  const update: typeof stock.update = (adapter, event) => {
++    if (event.type === "session.text.ended") {
++      const data = event.data as { readonly text: string; readonly sessionID?: unknown; readonly assistantMessageID?: unknown }
++      const result = dedupeText(data.text)
++      if (result) {
++        const key = String(data.sessionID ?? data.assistantMessageID ?? "session")
++        const entry = bumpLedger(key, "prose", result.wastedTokens)
++        const punch = punchLine(entry)
++        const text = punch ? `${result.text}\n${punch}` : result.text
++        event = { ...event, data: { ...data, text } }
++      }
++    }
++    return stock.update(adapter, event)
++  }
++  return { update }
++}
+diff --git a/packages/core/src/personalize/model-request.ts b/packages/core/src/personalize/model-request.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..35631623b123525f91db362169c86c89bec866e8
+--- /dev/null
++++ b/packages/core/src/personalize/model-request.ts
+@@ -0,0 +1,67 @@
++import { Context, Effect, Layer } from "effect"
++import { canonicalMessages, copyWith } from "./content"
++import { personaLead, stripStockIdentity } from "./persona"
++import { bumpLedger, callSignature, estimateTokens, punchLine, slapReceipt } from "./dedup"
++
++export function personalizeSystem<T extends { readonly content: string }>(system: readonly T[]): T[] {
++  const persona = personaLead()
++  if (!persona || !system[0]) return [...system]
++  return [copyWith(system[0], { content: [persona, stripStockIdentity(system[0].content)].filter(Boolean).join("\n") }), ...system.slice(1)]
++}
++
++export function decorate(stock: typeof import("../session/model-request")) {
++  const baseTranscript: typeof stock.baseTranscript = (...args) => {
++    const result = stock.baseTranscript(...args)
++    return { ...result, system: personalizeSystem(result.system) }
++  }
++  const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)
++  const boundImages: typeof stock.boundImages = (messages, ...rest) => stock.boundImages(canonicalMessages(messages), ...rest)
++
++  // Guard 1 (deltav11): adjacent duplicate tool calls get a *Systemslap*
++  // receipt instead of execution. executeTool runs once per tool-call event
++  // in stream order, so a closure over the previous signature flags exactly
++  // the blind-echo shape: the model re-emitted a call before any result
++  // could exist. A different call in between, or a later step (fresh
++  // Prepared), is informed repetition and stays legal.
++  const guardPrepared = <P extends { readonly executeTool: (input: any) => any; readonly [key: string]: unknown }>(prepared: P): P => {
++    let lastSignature: string | undefined
++    let callNumber = 0
++    return {
++      ...prepared,
++      executeTool: (input: any) => {
++        callNumber += 1
++        const signature = callSignature(input?.call?.name, input?.call?.arguments)
++        if (signature === lastSignature) {
++          const wasted = estimateTokens(signature)
++          const entry = bumpLedger(String(input?.sessionID ?? ""), "calls", wasted)
++          const receipt = slapReceipt(callNumber, wasted, punchLine(entry))
++          return Effect.succeed({ content: [{ type: "text" as const, text: receipt }] })
++        }
++        lastSignature = signature
++        return prepared.executeTool(input)
++      },
++    } as P
++  }
++
++  // Same node-wrapping pattern as the owned hooks factory: build the stock
++  // layer, wrap the service inside its context, keep dependency wiring and
++  // the service contract intact (mapLayer preserves the node's deps).
++  const node: typeof stock.node = stock.node.mapLayer((layer) =>
++    Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
++      const original = Context.get(context, stock.Service)
++      return Context.add(
++        context,
++        stock.Service,
++        {
++          ...original,
++          primary: (input: Parameters<typeof original.primary>[0]) => Effect.map(original.primary(input), guardPrepared),
++          compaction: (input: Parameters<typeof original.compaction>[0]) => Effect.map(original.compaction(input), guardPrepared),
++          generate: (input: Parameters<typeof original.generate>[0]) => Effect.map(original.generate(input), guardPrepared),
++          title: (input: Parameters<typeof original.title>[0]) => Effect.map(original.title(input), guardPrepared),
++        },
++      )
++    })),
++  )
++
++  return { baseTranscript, unsupportedParts, boundImages, node }
++}
+diff --git a/packages/core/src/personalize/persona.ts b/packages/core/src/personalize/persona.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d0f3669589b67f28f3d9f2d07fa594ca8f1b9a1
+--- /dev/null
++++ b/packages/core/src/personalize/persona.ts
+@@ -0,0 +1,21 @@
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
++import { dirname, join, resolve } from "node:path"
++
++export function personaLead(): string {
++  const file = process.env.OPENCODE_ROLE_FILE ? resolve(process.env.OPENCODE_ROLE_FILE) : join(process.cwd(), ".opencode", "role.json")
++  try {
++    mkdirSync(dirname(file), { recursive: true })
++    if (!existsSync(file)) {
++      writeFileSync(file, JSON.stringify({ usersystem: "", assistant_system: "" }, null, 2) + "\n", "utf8")
++      return ""
++    }
++    const role: unknown = JSON.parse(readFileSync(file, "utf8"))
++    return role && typeof role === "object" && "assistant_system" in role && typeof role.assistant_system === "string" ? role.assistant_system : ""
++  } catch { return "" }
++}
++
++export function stripStockIdentity(prompt: string): string {
++  if (prompt.startsWith("You are opencode, an agent")) return prompt
++  return prompt.replace(/^You are an AI agent running in OpenCode,[^.]*\.\s*/, "")
++    .replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
+diff --git a/packages/core/src/personalize/schema-guard.ts b/packages/core/src/personalize/schema-guard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbdf76ccd78541cf6d4929449394c4a09b401a0d
+--- /dev/null
++++ b/packages/core/src/personalize/schema-guard.ts
+@@ -0,0 +1,50 @@
++import { Database as RawDatabase } from "bun:sqlite"
++import { getTableColumns } from "drizzle-orm"
++import { SessionTable } from "../session/sql"
++
++// Upstream once shipped a migration that drops a column other builds on the
++// same machine still select, which turns into "no such column: session_v2.x"
++// boot crash loops (2026-10-24: session_v2.allowance). After the stock layer
++// settles (migrations included), re-add any column this build's schema
++// declares but the table no longer has. Add-only: never drops, never renames,
++// no-op when the table is absent. Best effort: any failure is logged and
++// skipped so boot never breaks because of the guard itself.
++export function guardSessionSchema(file: string | undefined) {
++  if (!file || file === ":memory:") return
++  let db: RawDatabase
++  try {
++    db = new RawDatabase(file)
++  } catch {
++    return
++  }
++  try {
++    const table = db
++      .query<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`)
++      .get()
++    if (!table) return
++    const present = new Set(
++      db.query<{ name: string }>(`PRAGMA table_info("session_v2")`).all().map((row) => row.name),
++    )
++    for (const [name, column] of Object.entries(getTableColumns(SessionTable))) {
++      if (present.has(name)) continue
++      const type = column.getSQLType()
++      const literal =
++        typeof column.default === "number" || typeof column.default === "string" || typeof column.default === "boolean"
++          ? column.default
++          : undefined
++      const notNull = literal !== undefined && column.notNull ? " NOT NULL" : ""
++      const fallback =
++        literal === undefined
++          ? ""
++          : ` DEFAULT ${typeof literal === "string" ? `'${literal.replaceAll("'", "''")}'` : literal}`
++      db.run(`ALTER TABLE "session_v2" ADD COLUMN "${name}" ${type}${notNull}${fallback};`)
++      console.warn(
++        `[personalize schema-guard] session_v2.${name} was missing (dropped by an upstream migration); re-added as ${type}${notNull}${fallback}`,
++      )
++    }
++  } catch (error) {
++    console.warn(`[personalize schema-guard] skipped: ${error instanceof Error ? error.message : String(error)}`)
++  } finally {
++    db.close()
++  }
++}
+diff --git a/packages/core/src/personalize/skill.ts b/packages/core/src/personalize/skill.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c63f96c02929fcdebb9105f025d26874101ff0b8
+--- /dev/null
++++ b/packages/core/src/personalize/skill.ts
+@@ -0,0 +1,20 @@
++import path from "node:path"
++import { Global } from "@opencode/util/global"
++import { Effect } from "effect"
++import { Skill } from "../skill"
++import { AbsolutePath } from "../schema"
++import template from "../plugin/skill/playwright-depth.md" with { type: "text" }
++
++export const PlaywrightDepthCachePath = path.join(Global.Path.state, "playwright-depth-cache.json")
++export const PlaywrightDepthContent = template.replaceAll("{{CACHE_PATH}}", PlaywrightDepthCachePath)
++const description = "Use when taking Playwright or browser MCP snapshots: picks snapshot depth from per-site memory instead of defaulting to full depth."
++
++export function decorate(stock: typeof import("../plugin/skill")) {
++  return { Plugin: { ...stock.Plugin, effect: Effect.fn(function* (ctx: Parameters<typeof stock.Plugin.effect>[0]) {
++    yield* stock.Plugin.effect(ctx)
++    yield* ctx.skill.transform((editor) => editor.add(Skill.Info.make({
++      id: Skill.ID.make("playwright-depth"), name: Skill.Name.make("Playwright Depth"), description,
++      path: AbsolutePath.make("/builtin/playwright-depth.md"), content: PlaywrightDepthContent,
++    })))
++  }) } }
++}
+diff --git a/packages/core/src/personalize/to-llm-message.ts b/packages/core/src/personalize/to-llm-message.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..40b1c9b3a15038662cacae229ec9a31730b344b8
+--- /dev/null
++++ b/packages/core/src/personalize/to-llm-message.ts
+@@ -0,0 +1,13 @@
++import { Message } from "@opencode/ai/effect"
++import { decay, indexBlock } from "../session/runner/context-decay"
++import { historyMessages } from "./content"
++
++export function decorate(stock: typeof import("../session/runner/to-llm-message")) {
++  const toLLMMessages: typeof stock.toLLMMessages = (messages, ...rest) => {
++    const decayed = decay(historyMessages(messages))
++    const lowered = stock.toLLMMessages(decayed.messages, ...rest)
++    const index = indexBlock(decayed.archive)
++    return index === undefined ? lowered : [...lowered, Message.user(index)]
++  }
++  return { toLLMMessages }
++}
+diff --git a/packages/core/src/personalize/v1-migration.ts b/packages/core/src/personalize/v1-migration.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d70d2b83f21a2e17995877a118baefbe8ba44248
+--- /dev/null
++++ b/packages/core/src/personalize/v1-migration.ts
+@@ -0,0 +1,33 @@
++import { Effect, Layer } from "effect"
++import { sql } from "drizzle-orm"
++import { Database } from "../database/database"
++import { Project } from "@opencode/schema/project"
++
++export function decorate(stock: typeof import("../database/v1-migration.bun")) {
++  const run: typeof stock.run = (options) => Effect.gen(function* () {
++    const result = yield* stock.run(options)
++    const db = (yield* Database.Service).db
++    yield* db.transaction((tx) => tx.run(sql`
++      UPDATE session_v2 SET
++        project_id = (SELECT w.project_id FROM worktree w
++          WHERE session_v2.directory = w.directory
++             OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
++          ORDER BY length(w.directory) DESC LIMIT 1),
++        path = (SELECT ltrim(substr(session_v2.directory, length(w.directory) + 1), '/') FROM worktree w
++          WHERE session_v2.directory = w.directory
++             OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
++          ORDER BY length(w.directory) DESC LIMIT 1)
++      WHERE project_id = ${Project.ID.global} AND workspace_id IS NULL AND EXISTS (
++        SELECT 1 FROM worktree w WHERE session_v2.directory = w.directory
++          OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/')
++    `)).pipe(Effect.orDie)
++    return result
++  })
++  // Keep upstream's progress/status layer. Its migration lock makes the second
++  // call idempotent; this tail always performs adoption, including already-imported V1 data.
++  const layer = Layer.merge(stock.layer, Layer.effectDiscard(run().pipe(
++    Effect.catchCause((cause) => Effect.logError("Personalize V1 adoption failed", { cause })),
++    Effect.forkScoped({ startImmediately: true }),
++  )))
++  return { run, layer }
++}
+diff --git a/packages/core/src/plugin/skill/playwright-depth.md b/packages/core/src/plugin/skill/playwright-depth.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..379dc1864c068da95e7ab8b24f47936901696349
+--- /dev/null
++++ b/packages/core/src/plugin/skill/playwright-depth.md
+@@ -0,0 +1,60 @@
++# Playwright snapshot depth
++
++A full-depth `browser_snapshot` on a busy page is the most expensive single call in a
++browser session. Depth-limit it, and remember the depth that worked per site so the
++second visit is cheap.
++
++## Observed cost (one busy docs page)
++
++| call | tokens |
++|---|---|
++| `browser_navigate` | ~80 — returns a snapshot **file link**, not the tree |
++| `browser_snapshot` full depth | **~8,676** — worst case |
++| `browser_snapshot` depth=3 | ~600 — 14x cheaper |
++| `browser_take_screenshot` | ~969, inline PNG — quiet, looks harmless, is not |
++| `browser_network_requests` / `browser_console_messages` | 10–20 — bulk suppressed |
++
++Full depth costs roughly **14x** depth=3. One careless snapshot is worth fourteen
++careful ones. Treat these as the right order of magnitude, not a guarantee.
++
++## Memory file
++
++`{{CACHE_PATH}}`
++
++```json
++{ "example.com": { "depth": 3, "anchor": "main", "hits": 2, "updated": "2026-10-04" } }
++```
++
++Keyed by hostname only — no scheme, no path. `anchor` records the container the useful
++content sat under, so the next visit can go straight there. Create the file with `{}`
++if it does not exist.
++
++## Protocol
++
++1. **Before** the first snapshot of a hostname, read the memory file.
++2. **Hit** → snapshot at the stored depth. State the five-word hint, verbatim:
++   `cached depth=N, escalate if missing`
++3. **Miss** → start at `depth=3`. Never open above 3 on a first visit.
++   Hint: `no cache, starting depth=3`
++4. **Escalate only on failure**, one step at a time: 3 → 5 → full. "Failure" means the
++   node you actually need is absent — not that the tree merely looks small.
++5. **Write back** the depth that worked, incrementing `hits`. A site that genuinely
++   needed full depth is worth recording too: that is a real finding, not a failure.
++6. Prefer the file link `browser_navigate` already returned over re-snapshotting.
++   Prefer `browser_console_messages` / `browser_network_requests` over a screenshot
++   when you only need to know *state*.
++
++## Do not
++
++- **Do not truncate, cap, or post-process snapshot output.** Depth is the only lever
++  here. A capped snapshot silently drops the node you were looking for and costs a
++  retry, which is worse than the tokens it saved.
++- Do not write a cache entry for a site you have not actually snapshotted. An invented
++  depth is worse than no entry, because the next run will trust it.
++- Do not escalate straight from 3 to full. The 5 step resolves most misses.
++
++## If `depth` is rejected
++
++Tool names and parameters follow `@playwright/mcp`. If your server's `browser_snapshot`
++exposes no `depth` parameter, narrow by `ref`/selector to the subtree you need instead
++and record that selector as `anchor` — the memory protocol above is unchanged.
+diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a806697badd017
+--- /dev/null
++++ b/packages/core/src/session/runner/context-decay.ts
+@@ -0,0 +1,401 @@
++import { SessionMessage } from "../message.js"
++
++/**
++ * Relevance-segmented context decay. Replaces fixed-budget compaction with a policy keyed on *which task you are on*:
++ * the live task gets the big budget - including, especially, when it only just started - the task before it keeps a
++ * small shared pot in case we bounce back, and everything older collapses to a retrieval ref. So a boundary cuts both
++ * ways at once: it shrinks everything behind it and hands the fresh task a full budget.
++ *
++ * Tool output decays hard. Message text never decays; it is the reasoning thread, it is cheap, and losing it is what
++ * makes agents repeat themselves. It is also why archived tools need no label - the chat around the call already says
++ * what it did.
++ */
++
++// ---------------------------------------------------------------------------------------------------- tunables
++
++/** Tool-output budget for the task we are on now. */
++export const BUDGET_LIVE_TASK = 20_000
++/** Shared pot for the task immediately before this one, in case we bounce back. */
++export const BUDGET_PRIOR_TASK = 2_000
++/** Turns compared either side of a candidate boundary. */
++export const TASK_WINDOW = 3
++/** Drift at or above which a new task provably began. */
++export const TASK_DRIFT_THRESHOLD = 0.6
++/** Share of drift owed to file paths; the remainder is vocabulary. */
++export const PATH_WEIGHT = 0.6
++/** Turns after which everything collapses into the single index block. */
++export const ARCHIVE_AFTER_TURNS = 20
++/** Head/tail retained when stubbing live-task output that overflowed. */
++export const STUB_HEAD_CHARS = 400
++export const STUB_TAIL_CHARS = 200
++/** Consecutive tool calls with no reasoning between them that force a label. */
++export const CHAIN_NARRATION_FLOOR = 5
++/**
++ * Re-evaluation quantum. Every drifting input is rounded down to a multiple of this, so the decision can only change
++ * every N turns (or on a provable task switch). Without it the archive frontier advances one turn at a time, every turn
++ * rewrites a different slice of the prefix, and the prompt cache misses forever - paying more than doing nothing at all.
++ */
++export const REEVAL_QUANTUM = 10
++
++/**
++ * Floor on what a replacement must actually free. The elision note alone runs ~115 chars and the archive path costs a
++ * marker plus a line in the index block, so a short tool output "collapses" into something *larger* than it was. Same
++ * reasoning as REEVAL_QUANTUM: under this margin, acting rewrites the cached prefix to make the request bigger, and
++ * doing nothing is strictly cheaper. Below it the body is left verbatim.
++ */
++export const MIN_DECAY_SAVING = 200
++
++/** Rough token estimate. Deliberately cheap - this gates trimming, not billing. */
++const tokens = (text: string) => Math.ceil(text.length / 4)
++
++/** Whether swapping `body` for `replacement` (plus any per-entry overhead it adds elsewhere) frees enough to be worth it. */
++const worthwhile = (body: string, replacement: string, overhead = 0) =>
++  body.length - replacement.length - overhead >= MIN_DECAY_SAVING
++
++// ------------------------------------------------------------------------------------------------- path probes
++
++const ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\/)[^\s]*$/
++
++/** Pull absolute filesystem paths out of arbitrary tool input JSON. */
++export const absolutePaths = (input: unknown, found: string[] = []): string[] => {
++  if (typeof input === "string") {
++    if (ABSOLUTE.test(input)) found.push(input.replaceAll("\\", "/"))
++    return found
++  }
++  if (Array.isArray(input)) {
++    for (const item of input) absolutePaths(item, found)
++    return found
++  }
++  if (input && typeof input === "object") {
++    for (const value of Object.values(input)) absolutePaths(value, found)
++  }
++  return found
++}
++
++const segments = (path: string) => path.split("/").filter(Boolean)
++
++/**
++ * Depth of the deepest shared ancestor. Two paths on the same drive but in unrelated trees (`D:/tmp/a` vs
++ * `D:/Prog/Actdev/...`) share only the drive, which is depth 1 - a provable project boundary with no filesystem access.
++ */
++export const commonAncestorDepth = (left: string, right: string) => {
++  const a = segments(left)
++  const b = segments(right)
++  let depth = 0
++  while (depth < a.length && depth < b.length && a[depth]!.toLowerCase() === b[depth]!.toLowerCase()) depth++
++  return depth
++}
++
++/** Paths are in the same project when they agree beyond the drive/filesystem root. */
++const sameProject = (left: readonly string[], right: readonly string[]) => {
++  if (left.length === 0 || right.length === 0) return true // no evidence is not evidence of change
++  return left.some((l) => right.some((r) => commonAncestorDepth(l, r) > 1))
++}
++
++// ----------------------------------------------------------------------------------------------------- keywords
++
++const WORD = /[a-z][a-z0-9_]{2,}/g
++
++/** Filler that survives every topic switch and would mask real drift. */
++const STOPWORD = new Set(
++  `the and for you this that with not are was but have has from then than into out off now just like what why how when
++   where which who will can should would could does done need want file files code line lines run running use used
++   using add added fix fixed make made get got look looks next also only same still very much more most here there`
++    .split(/\s+/)
++    .filter(Boolean),
++)
++
++/** Content words of a turn. Short words and filler carry no topic signal. */
++export const keywords = (text: string): ReadonlySet<string> =>
++  new Set((text.match(WORD) ?? []).filter((word) => word.length >= 4 && !STOPWORD.has(word)))
++
++// -------------------------------------------------------------------------------------------------------- turns
++
++interface Turn {
++  readonly message: SessionMessage.Info
++  readonly tools: readonly SessionMessage.AssistantTool[]
++  readonly paths: readonly string[]
++  readonly text: string
++  readonly words: ReadonlySet<string>
++}
++
++// Info is a tagged union: only `assistant` is declared with a content array, but in-flight records and
++// tool `error` states carry no/optional `content` — treat "no array" as "no content", never throw.
++const contentOf = (message: SessionMessage.Info) =>
++  "content" in message && Array.isArray(message.content) ? message.content : []
++
++const toolsOf = (message: SessionMessage.Info): SessionMessage.AssistantTool[] => {
++  if (message.type !== "assistant") return []
++  return contentOf(message).filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++}
++
++// user/synthetic/system/etc. carry a plain `text`; everything else reads through the guarded content array.
++const textOf = (message: SessionMessage.Info): string => {
++  if ("text" in message && typeof message.text === "string") return message.text.toLowerCase()
++  return contentOf(message)
++    .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
++    .join(" ")
++    .toLowerCase()
++}
++
++const toTurn = (message: SessionMessage.Info): Turn => {
++  const tools = toolsOf(message)
++  const text = textOf(message)
++  // `streaming` holds the raw unparsed input string; every settled state holds the parsed input record.
++  const paths = tools.flatMap((tool) => absolutePaths(tool.state.status === "streaming" ? {} : tool.state.input))
++  return { message, tools, paths, text, words: keywords(text) }
++}
++
++// ------------------------------------------------------------------------------------------------ task boundaries
++
++interface Window {
++  readonly paths: readonly string[]
++  readonly pathSet: ReadonlySet<string>
++  readonly words: ReadonlySet<string>
++}
++
++const windowOf = (turns: readonly Turn[]): Window => {
++  const paths = turns.flatMap((turn) => [...turn.paths])
++  return { paths, pathSet: new Set(paths), words: new Set(turns.flatMap((turn) => [...turn.words])) }
++}
++
++/** 1 - overlap coefficient. Zero when either side offers no evidence. */
++const overlapDrift = (left: ReadonlySet<string>, right: ReadonlySet<string>) => {
++  if (left.size === 0 || right.size === 0) return 0
++  const shared = [...right].filter((item) => left.has(item)).length
++  return 1 - shared / Math.min(left.size, right.size)
++}
++
++/**
++ * How far the work moved between two windows: 0 same task, 1 unrelated. Progressive on purpose - a repo change is a hard
++ * 1 and needs no judgement, everything else is a blend of which files are touched and which words are used, so moving
++ * from auth work to log trimming *inside one repo* scores high without anyone maintaining a list of magic keywords.
++ */
++export const drift = (prior: Window, live: Window): number => {
++  if (!sameProject(prior.paths, live.paths)) return 1
++  const paths = overlapDrift(prior.pathSet, live.pathSet)
++  const words = overlapDrift(prior.words, live.words)
++  return paths * PATH_WEIGHT + words * (1 - PATH_WEIGHT)
++}
++
++/**
++ * Indices where a new task provably began, oldest first. A boundary needs a full window on both sides, so the newest
++ * turns cannot mint one until the evidence exists - which is also what stops the newest turn from re-cutting the prefix
++ * and missing the prompt cache every turn.
++ */
++export const taskBoundaries = (turns: readonly Turn[]): readonly number[] => {
++  const marks: number[] = []
++  for (let index = TASK_WINDOW; index + TASK_WINDOW <= turns.length; index++) {
++    const last = marks[marks.length - 1]
++    if (last !== undefined && index - last < TASK_WINDOW) continue
++    if (drift(windowOf(turns.slice(index - TASK_WINDOW, index)), windowOf(turns.slice(index, index + TASK_WINDOW))) >= TASK_DRIFT_THRESHOLD)
++      marks.push(index)
++  }
++  return marks
++}
++
++/** 0 for the task we are on, 1 for the one before it, and so on back. */
++export const taskRank = (index: number, marks: readonly number[]) => marks.filter((mark) => mark > index).length
++
++/**
++ * Budget as a function of rank - the whole policy in three lines. Rank 0 is the live task and is never penalised for
++ * being new; rank 2 and older hold no verbatim output at all, they are a ref you can pull back on demand.
++ */
++export const taskBudget = (rank: number) => {
++  if (rank === 0) return BUDGET_LIVE_TASK
++  if (rank === 1) return BUDGET_PRIOR_TASK
++  return 0
++}
++
++/**
++ * Tools inside an unnarrated chain: CHAIN_NARRATION_FLOOR or more consecutive calls with no reasoning text between
++ * them. Everywhere else the surrounding chat already says what the call did, so the archive carries a bare ref and pays
++ * ~10 tokens instead of a redundant label.
++ */
++export const unnarrated = (turns: readonly Turn[]): ReadonlySet<string> => {
++  const marked = new Set<string>()
++  let run: string[] = []
++  const flush = () => {
++    if (run.length >= CHAIN_NARRATION_FLOOR) for (const id of run) marked.add(id)
++    run = []
++  }
++  for (const turn of turns) {
++    if (turn.text.trim().length > 0) flush()
++    for (const tool of turn.tools) run.push(tool.id)
++  }
++  flush()
++  return marked
++}
++
++/**
++ * Everything that can change what the decayed prefix looks like, reduced to three ints. Equal key => byte-identical
++ * output => skip the work and keep the provider cache hot. This is the loop-breaker: the expensive decision is made on
++ * a boundary, not on every turn.
++ */
++export interface ContextKey {
++  /** Count of provable task boundaries seen. Monotonic. */
++  readonly segment: number
++  /** Archive frontier, quantized so it steps rather than slides. */
++  readonly frontier: number
++  /** First turn of the live task. */
++  readonly live: number
++}
++
++const quantize = (value: number) => Math.max(0, Math.floor(value / REEVAL_QUANTUM) * REEVAL_QUANTUM)
++
++export const contextKey = (turns: readonly Turn[]): ContextKey => {
++  const marks = taskBoundaries(turns)
++  return { segment: marks.length, frontier: quantize(turns.length - ARCHIVE_AFTER_TURNS), live: marks[marks.length - 1] ?? 0 }
++}
++
++export const sameKey = (left: ContextKey | undefined, right: ContextKey) =>
++  left !== undefined && left.segment === right.segment && left.frontier === right.frontier && left.live === right.live
++
++// -------------------------------------------------------------------------------------------------------- decay
++
++const contentText = (tool: SessionMessage.AssistantTool) => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return ""
++  // ToolStateError.content is optional in the V2 schema — error states may carry no content (see compaction.ts, which guards the same way)
++  return (tool.state.content ?? [])
++    .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
++    .join("\n")
++}
++
++const stub = (tool: SessionMessage.AssistantTool, body: string) => {
++  const head = body.slice(0, STUB_HEAD_CHARS)
++  const tail = body.length > STUB_HEAD_CHARS + STUB_TAIL_CHARS ? body.slice(-STUB_TAIL_CHARS) : ""
++  const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
++  const handle = paths[0] ?? tool.id
++  const note = `\n…[${tool.name} output elided — ${body.length} chars. ref ${handle} — name it and the harness reinjects it locally]…\n`
++  return [head, note, tail].join("")
++}
++
++/** An elided tool keeps outputPaths so the harness can refetch without a provider call. */
++const elide = (tool: SessionMessage.AssistantTool, text: string): SessionMessage.AssistantTool => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
++  return { ...tool, state: { ...tool.state, content: [{ type: "text", text }] } } as SessionMessage.AssistantTool
++}
++
++/**
++ * Superseded/old output collapses to a bare ref - the consolidated index block carries the detail, so repeating it
++ * per-tool would defeat the point. Content is never emptied outright: an empty tool result trips provider-side
++ * tool_call/tool_result pairing checks.
++ */
++const markerText = (ref: string) => `[archived — ref ${ref}]`
++
++const archivedMarker = (tool: SessionMessage.AssistantTool, ref: string): SessionMessage.AssistantTool => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
++  return { ...tool, state: { ...tool.state, content: [{ type: "text", text: markerText(ref) }] } } as SessionMessage.AssistantTool
++}
++
++export interface ArchiveEntry {
++  readonly id: string
++  readonly ref: string
++  /** Carried only for unnarrated chains; elsewhere the chat is the label. */
++  readonly name?: string
++  readonly chars?: number
++}
++
++/** One entry's line in the index block. Shared with `indexBlock` so the cost model cannot drift from what is emitted. */
++const indexLine = (entry: ArchiveEntry) =>
++  entry.name ? `  ${entry.ref} — ${entry.name}, ${entry.chars} chars` : `  ${entry.ref}`
++
++export interface DecayResult {
++  readonly messages: readonly SessionMessage.Info[]
++  readonly archive: readonly ArchiveEntry[]
++  readonly key: ContextKey
++  /** False when the short-circuit fired and the prefix was left byte-identical. */
++  readonly rewritten: boolean
++}
++
++/**
++ * Decay a projected history immediately before it is lowered to provider messages. Pure and synchronous: no filesystem,
++ * no git, no Effect, so it can sit inside `toLLMMessages` without changing its signature.
++ */
++export const decay = (messages: readonly SessionMessage.Info[], previous?: ContextKey): DecayResult => {
++  const turns = messages.map(toTurn)
++  const key = contextKey(turns)
++
++  // Loop-breaker. Nothing affecting the lowered bytes changed, so hand back the same references and let the cache hit.
++  if (sameKey(previous, key)) return { messages, archive: [], key, rewritten: false }
++
++  const marks = taskBoundaries(turns)
++  const labelled = unnarrated(turns)
++  const archiveBefore = key.frontier
++  const archive: ArchiveEntry[] = []
++
++  // Decide every tool's fate newest-first so the freshest output claims budget first, then rebuild in original order.
++  const verdict = new Map<string, SessionMessage.AssistantTool>()
++  const spent = new Map<number, number>()
++
++  for (let index = turns.length - 1; index >= 0; index--) {
++    const turn = turns[index]!
++    const rank = taskRank(index, marks)
++    const allowance = taskBudget(rank)
++    const archived = index < archiveBefore
++
++    for (const tool of turn.tools) {
++      const body = contentText(tool)
++      if (body.length === 0) continue
++
++      const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
++      const ref = paths[0] ?? tool.id
++      const label = labelled.has(tool.id)
++      const entry: ArchiveEntry = label ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref }
++      const retire = () => {
++        archive.push(entry)
++        verdict.set(tool.id, archivedMarker(tool, ref))
++      }
++      // Retiring is not free: the marker replaces the body *and* the tool buys a line in the index block. For a short
++      // output that total exceeds what it reclaims, so the body stays - cheaper on tokens and it keeps the thread whole.
++      const retires = worthwhile(body, markerText(ref), indexLine(entry).length + 1)
++
++      if (archived || allowance === 0) {
++        if (retires) retire()
++        continue
++      }
++
++      const cost = tokens(body)
++      const used = spent.get(rank) ?? 0
++      if (used + cost <= allowance) {
++        spent.set(rank, used + cost)
++        continue // keep verbatim
++      }
++
++      // Overflow in the live task keeps a head/tail so the thread still reads; an older task is cold, so it goes to a ref.
++      if (rank === 0) {
++        const stubbed = stub(tool, body)
++        if (worthwhile(body, stubbed)) verdict.set(tool.id, elide(tool, stubbed))
++        continue // the note would outweigh the body - leave it verbatim
++      }
++      if (retires) retire()
++    }
++  }
++
++  archive.reverse() // filled newest-first; present it oldest-first like the transcript
++
++  const next = messages.map((message) => {
++    if (message.type !== "assistant") return message
++    const items = Array.isArray(message.content) ? message.content : []
++    if (!items.some((item) => item.type === "tool" && verdict.has(item.id))) return message
++    const content = items.map((item) => (item.type === "tool" && verdict.has(item.id) ? verdict.get(item.id)! : item))
++    return { ...message, content } as SessionMessage.Info
++  })
++
++  return { messages: next, archive, key, rewritten: true }
++}
++
++/**
++ * Single consolidated block standing in for everything archived. Bare refs: the chat above each call already says what
++ * it was for, and a label per entry would cost more than the entries it describes.
++ */
++export const indexBlock = (archive: readonly ArchiveEntry[]) => {
++  if (archive.length === 0) return undefined
++  const lines = archive.map(indexLine)
++  return [
++    `<archived-tool-output count="${archive.length}">`,
++    "Tool output elided. Name any ref to have the harness reinject it locally.",
++    ...lines,
++    "</archived-tool-output>",
++  ].join("\n")
++}
+diff --git a/packages/core/test/session-context-decay.test.ts b/packages/core/test/session-context-decay.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b027140c29
+--- /dev/null
++++ b/packages/core/test/session-context-decay.test.ts
+@@ -0,0 +1,235 @@
++import { expect, test } from "bun:test"
++import { SessionMessage } from "@opencode/schema/session-message"
++import {
++  ARCHIVE_AFTER_TURNS,
++  REEVAL_QUANTUM,
++  decay,
++  indexBlock,
++} from "@opencode/core/session/runner/context-decay"
++import { Schema } from "effect"
++
++// ------------------------------------------------------------------------------------------------- fixtures
++
++let counter = 0
++const callID = () => `call_${counter++}`
++
++const user = (text: string) =>
++  Schema.decodeUnknownSync(SessionMessage.User)({
++    id: SessionMessage.ID.create(),
++    type: "user",
++    text,
++    time: { created: 0 },
++  })
++
++const assistant = (content: readonly unknown[]) =>
++  Schema.decodeUnknownSync(SessionMessage.Assistant)({
++    id: SessionMessage.ID.create(),
++    type: "assistant",
++    agent: "build", // Agent.defaultID — decode validates it against the Agent.ID brand
++
++    model: { id: "test-model", providerID: "test" },
++    content,
++    time: { created: 0, completed: 0 },
++  })
++
++const tool = (state: Record<string, unknown>, id = callID()) => ({
++  type: "tool",
++  id,
++  name: "read",
++  state,
++  time: { created: 0 },
++})
++
++const text = (value: string) => ({ type: "text", text: value })
++
++const err = { type: "unknown", message: "tool blew up" }
++
++/** Every tool part in a projected history, across every assistant message. */
++const toolsOf = (messages: readonly SessionMessage.Info[]) =>
++  messages.flatMap((message) =>
++    message.type === "assistant"
++      ? message.content.filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++      : [],
++  )
++
++/**
++ * The exact read compaction/lowering performs on a tool result. This is the line that crashed in production
++ * (`e.content.map` on an error state that carried no content) — it must never see `undefined` on a completed
++ * state and must never be handed an emptied array on a rewritten one.
++ */
++const compactionRead = (state: SessionMessage.ToolState) => {
++  if (state.status === "completed") return state.content.map((part) => ("text" in part ? part.text : "")).join("\n")
++  if (state.status === "error") return (state.content ?? []).map((part) => ("text" in part ? part.text : "")).join("\n")
++  return ""
++}
++
++// ----------------------------------------------------------------------------------------------------- tests
++
++test("reader survives every tool state — including an error state with no content", () => {
++  const noContentID = callID()
++  const messages = [
++    user("please read the file"),
++    assistant([
++      text("running the tools"),
++      tool({ status: "streaming", input: '{"filePath": "D:/tmp/a' }),
++      tool({ status: "running", input: { filePath: "D:/tmp/a/x.ts" }, metadata: {} }),
++      tool({ status: "completed", input: {}, content: [text("short output")] }),
++      tool({ status: "error", input: {}, error: err, content: [text("stack trace")] }),
++      // The regression: ToolStateError.content is optional — V2 rows can legally omit it entirely.
++      tool({ status: "error", input: {}, error: err }, noContentID),
++    ]),
++  ]
++
++  expect(() => decay(messages)).not.toThrow()
++  const result = decay(messages)
++
++  for (const item of toolsOf(result.messages)) {
++    // The reader itself must come back as a string for every state, never undefined, never a throw.
++    expect(() => compactionRead(item.state)).not.toThrow()
++    expect(typeof compactionRead(item.state)).toBe("string")
++    // Completed content is a NonEmptyArray in the schema; decay must never have emptied or dropped it.
++    if (item.state.status === "completed") {
++      expect(Array.isArray(item.state.content)).toBe(true)
++      expect(item.state.content.length).toBeGreaterThan(0)
++    }
++    // Error content stays either absent (untouched) or a non-empty array — never null, never [].
++    if (item.state.status === "error" && item.state.content !== undefined) {
++      expect(item.state.content.length).toBeGreaterThan(0)
++    }
++  }
++
++  // The no-content error tool passed through untouched: no fabricated body, no crash, content still absent.
++  const untouched = toolsOf(result.messages).find((item) => item.id === noContentID)
++  expect(untouched).toBeDefined()
++  expect(untouched!.state.status).toBe("error")
++  expect((untouched!.state as SessionMessage.ToolStateError).content).toBeUndefined()
++})
++
++test("archived tools keep a non-empty marker — content is never emptied or undefined", () => {
++  const big = "x".repeat(5_000)
++  const oldCompleted = callID()
++  const oldErrored = callID()
++
++  const history: SessionMessage.Info[] = [
++    user("task one"),
++    assistant([
++      text("reading the big files"),
++      tool({ status: "completed", input: { filePath: "D:/tmp/a/big.ts" }, content: [text(big)] }, oldCompleted),
++      tool({ status: "error", input: { filePath: "D:/tmp/a/gone.ts" }, error: err, content: [text(big)] }, oldErrored),
++    ]),
++  ]
++  // Push the first turns behind the archive frontier: frontier = quantize(length - ARCHIVE_AFTER_TURNS) >= 2.
++  const padding = ARCHIVE_AFTER_TURNS + REEVAL_QUANTUM * 2
++  for (let i = 0; i < padding; i++) history.push(user(`filler turn ${i}`), assistant([text(`noted ${i}`)]))
++
++  const result = decay(history)
++  expect(result.rewritten).toBe(true)
++  expect(result.archive.length).toBeGreaterThanOrEqual(2)
++
++  const byID = new Map(toolsOf(result.messages).map((item) => [item.id, item]))
++  for (const id of [oldCompleted, oldErrored]) {
++    const item = byID.get(id)!
++    expect(item).toBeDefined()
++    const state = item.state as SessionMessage.ToolStateCompleted | SessionMessage.ToolStateError
++    // Never emptied outright — an empty tool result trips provider tool_call/tool_result pairing checks,
++    // and an undefined one is exactly the `e.content.map` crash this test pins down.
++    expect(Array.isArray(state.content)).toBe(true)
++    expect(state.content!.length).toBeGreaterThan(0)
++    const body = compactionRead(state)
++    expect(body).toMatch(/^\[archived — ref .+\]$/)
++    expect(body.length).toBeGreaterThan(0)
++  }
++
++  // Every surviving tool in the whole history still reads cleanly through the compaction path.
++  for (const item of toolsOf(result.messages)) {
++    expect(typeof compactionRead(item.state)).toBe("string")
++  }
++
++  // The index block mirrors the archive and stays a plain string.
++  const block = indexBlock(result.archive)
++  expect(block).toBeDefined()
++  expect(block!).toContain(`count="${result.archive.length}"`)
++  expect(indexBlock([])).toBeUndefined()
++})
++
++test("content-less V2 variants (idle, compaction, marker turns) pass through decay untouched — no crash, no fabricated content", () => {
++  // The production crash: `undefined is not an object (evaluating 'e.content.map')` inside SessionCompaction.compact.
++  // V2 `Info` is an 11-variant union and these variants have NO `content` field and NO `role` field at all.
++  const idle = Schema.decodeUnknownSync(SessionMessage.Info)({
++    id: SessionMessage.ID.create(),
++    type: "idle",
++    outcome: "succeeded",
++    time: { created: 0 },
++  })
++  const compaction = Schema.decodeUnknownSync(SessionMessage.Info)({
++    id: SessionMessage.ID.create(),
++    type: "compaction",
++    status: "completed",
++    reason: "auto",
++    summary: "compacted earlier work",
++    recent: "recent tail",
++    time: { created: 0 },
++  })
++
++  const toolID = callID()
++  const messages = [
++    user("do the thing"),
++    assistant([text("on it"), tool({ status: "completed", input: {}, content: [text("ok")] }, toolID)]),
++    idle,
++    compaction,
++    user("next task"),
++  ]
++
++  // Must not throw on any variant, with or without a prior key.
++  expect(() => decay(messages)).not.toThrow()
++  const result = decay(messages)
++  expect(() => decay(result.messages, result.key)).not.toThrow()
++
++  // Markers come back as the exact same references — decay never rewrites, clones, or invents `content` on them.
++  expect(result.messages).toHaveLength(messages.length)
++  expect(result.messages[2]).toBe(idle)
++  expect(result.messages[3]).toBe(compaction)
++  expect("content" in result.messages[2]!).toBe(false)
++  expect("content" in result.messages[3]!).toBe(false)
++
++  // The assistant turn's tool still reads cleanly through the compaction path.
++  const item = toolsOf(result.messages).find((entry) => entry.id === toolID)!
++  expect(item).toBeDefined()
++  expect(typeof compactionRead(item.state)).toBe("string")
++})
++
++test("short-circuit hands back identical references, not re-read copies", () => {
++  const messages = [
++    user("hello"),
++    assistant([text("done"), tool({ status: "completed", input: {}, content: [text("ok")] })]),
++  ]
++  const first = decay(messages)
++  const second = decay(first.messages, first.key)
++  expect(second.rewritten).toBe(false)
++  expect(second.messages).toBe(first.messages)
++  expect(second.archive).toEqual([])
++})
++
++test("mixed text and file parts read without crashing and short output is left verbatim", () => {
++  const mixedID = callID()
++  const messages = [
++    user("read the image"),
++    assistant([
++      text("reading"),
++      tool(
++        {
++          status: "completed",
++          input: {},
++          content: [text("tiny"), { type: "file", mime: "image/png", uri: "data:image/png;base64,QUJD" }],
++        },
++        mixedID,
++      ),
++    ]),
++  ]
++  const result = decay(messages)
++  const item = toolsOf(result.messages).find((entry) => entry.id === mixedID)!
++  const state = item.state as SessionMessage.ToolStateCompleted
++  // Too short to be worth touching: body, including the non-text part, survives byte-identical.
++  expect(state.content.length).toBe(2)
++  expect(() => compactionRead(state)).not.toThrow()
++})
+diff --git a/packages/core/test/session/content-guards.test.ts b/packages/core/test/session/content-guards.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22516bed06
+--- /dev/null
++++ b/packages/core/test/session/content-guards.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import path from "node:path"
++
++// CI guard checker: every array-style access of `.content` in patch-owned files must sit behind an
++// Array.isArray guard. Upstream has shipped messages whose `content` is undefined/non-array mid-stream;
++// an unguarded `.content.map(...)` there is exactly the TypeError that broke context-decay. Scope is the
++// patch-owned files only - upstream files are taken as-is and are not rewritten by this check.
++// Isolated architecture: our runtime logic lives in src/personalize/* (plus context-decay.ts);
++// stock modules are byte-identical upstream files and must never be listed here.
++const OWNED = [
++  "src/personalize/content.ts",
++  "src/personalize/database.ts",
++  "src/personalize/hooks.ts",
++  "src/personalize/markdown.ts",
++  "src/personalize/model-request.ts",
++  "src/personalize/persona.ts",
++  "src/personalize/skill.ts",
++  "src/personalize/to-llm-message.ts",
++  "src/personalize/v1-migration.ts",
++  "src/session/runner/context-decay.ts",
++]
++
++const ACCESS =
++  /\.content(\?\.|\.)(map|flatMap|filter|some|every|find|findLast|findIndex|forEach|reduce|reduceRight|slice|concat|join|at|indexOf|lastIndexOf|includes|entries|keys|values|length)\b|\.content\[/
++const GUARD = /Array\.isArray\(/
++const LOOKBACK = 12
++
++describe("content guards", () => {
++  test("every .content array access in patch-owned files is guarded", () => {
++    const root = path.join(import.meta.dir, "..", "..")
++    const errors: string[] = []
++    for (const rel of OWNED) {
++      const lines = readFileSync(path.join(root, rel), "utf8").split("\n")
++      lines.forEach((line, index) => {
++        if (!ACCESS.test(line)) return
++        const from = Math.max(0, index - LOOKBACK)
++        if (lines.slice(from, index + 1).some((near) => GUARD.test(near))) return
++        errors.push(
++          `${rel}:${index + 1} unguarded .content access -> add: const items = Array.isArray(x.content) ? x.content : [] and use items`,
++        )
++      })
++    }
++    if (errors.length) throw new Error(`unguarded .content array access:\n${errors.join("\n")}`)
++    expect(errors).toEqual([])
++  })
++})
+diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fec1da32d0591eb608e53e12ecf4153036946e40
+--- /dev/null
++++ b/packages/server/src/personalize/process.ts
+@@ -0,0 +1,37 @@
++import os from "node:os"
++import path from "node:path"
++import { Effect } from "effect"
++import { Flock } from "@opencode/util/flock"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++
++export function decorate(stock: typeof import("../process")) {
++  // Forward every argument. Upstream's `start(options, lifecycle?, transform?,
++  // remoteURLs?)` registers the service through `lifecycle.onListen`; binding
++  // only `options` here dropped the registration callback, so spawned service
++  // contenders bound the port but never registered — their CLIs timed out and
++  // left detached port-squatting zombies behind ("Managed service port ...
++  // already in use", no instance ever becoming the host).
++  const start: typeof stock.start = (options, ...rest) => Effect.acquireUseRelease(
++    Effect.promise((signal) =>
++      Flock.acquire("service-bootstrap", {
++        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++      }).then((lease) => {
++        // Flock refuses a second release (metadata is deleted on the first);
++        // the boot-service release and the finalizer share one guarded
++        // release so whichever fires first wins and the other no-ops.
++        let done = false
++        const release = () => {
++          if (done) return Promise.resolve()
++          done = true
++          return lease.release()
++        }
++        return { release }
++      })
++    ),
++    (boot) => stock.start(options, ...rest).pipe(Effect.provideService(PersonalizeBoot, {
++      retry: Effect.void, release: Effect.promise(() => boot.release()),
++    })),
++    (boot) => Effect.promise(() => boot.release()),
++  )
++  return { start }
++}
+diff --git a/packages/server/src/personalize/service-status.ts b/packages/server/src/personalize/service-status.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..059c8b413b8f0b6c47935e291fa43a0b0b160e05
+--- /dev/null
++++ b/packages/server/src/personalize/service-status.ts
+@@ -0,0 +1,23 @@
++import { Effect, Option, Ref } from "effect"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++
++export function decorate(stock: typeof import("../service-status")) {
++  const make: typeof stock.make = (options = {}) => Effect.gen(function* () {
++    type State = import("../service-status").State | { readonly type: "retrying" }
++    const state = yield* Ref.make<State>(options.initial ?? { type: "starting" })
++    const boot = yield* Effect.serviceOption(PersonalizeBoot)
++    const release = Option.isSome(boot) ? boot.value.release : Effect.void
++    if (Option.isSome(boot)) boot.value.retry = Ref.update(state, (value) =>
++      value.type === "starting" || value.type === "retrying" ? { type: "retrying" } : value)
++    return {
++      // The wire may expose retrying; the owned Promise client normalizes it to waiting.
++      current: Ref.get(state) as Effect.Effect<import("../service-status").State>,
++      ready: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "ready" } : value)
++        .pipe(Effect.andThen(release)),
++      fail: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "failed" } : value)
++        .pipe(Effect.andThen(release)),
++      beginStopping: Ref.update(state, (value) => value.type === "stopping" ? value : { type: "stopping" }),
++    }
++  })
++  return { make }
++}
+diff --git a/packages/tui/src/personalize/logo.ts b/packages/tui/src/personalize/logo.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6197a6376aafc2093e03df84d6fe4667ab099173
+--- /dev/null
++++ b/packages/tui/src/personalize/logo.ts
+@@ -0,0 +1,3 @@
++export function decorate(stock: typeof import("../logo")) {
++  return { logo: { ...stock.logo, left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"] } }
++}
+diff --git a/packages/util/src/personalize-boot.ts b/packages/util/src/personalize-boot.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d599cc7ea1f8c5c2f38c35f6c2e1e2a483bb9176
+--- /dev/null
++++ b/packages/util/src/personalize-boot.ts
+@@ -0,0 +1,26 @@
++import { Context, Effect, Option } from "effect"
++
++export interface BootState {
++  retry: Effect.Effect<void>
++  release: Effect.Effect<void>
++}
++export class PersonalizeBoot extends Context.Service<PersonalizeBoot, BootState>()("@personalize/Boot") {}
++
++export const updateBoot = (kind: "retry" | "release") => Effect.serviceOption(PersonalizeBoot).pipe(
++  Effect.flatMap((state) => Option.isSome(state) ? state.value[kind] : Effect.void),
++)
++
++export function sqliteBusy(input: unknown): boolean {
++  const seen = new Set<unknown>()
++  const visit = (value: unknown): boolean => {
++    if (value === null || value === undefined || seen.has(value)) return false
++    seen.add(value)
++    if (typeof value === "string") return /SQLITE_(?:BUSY|LOCKED)|database (?:is )?(?:locked|busy)/i.test(value)
++    if (typeof value !== "object") return false
++    const record = value as Record<string, unknown>
++    if ([record.message, record.code, record.errno].some((part) => typeof part === "string" && visit(part))) return true
++    return [record.cause, record.error, record.reason, record.reasons, record.left, record.right]
++      .some((part) => Array.isArray(part) ? part.some(visit) : visit(part))
++  }
++  return visit(input)
++}
+diff --git a/packages/util/src/personalize-observability.ts b/packages/util/src/personalize-observability.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aab581801cea150ba26cc34085f10325bd9506c7
+--- /dev/null
++++ b/packages/util/src/personalize-observability.ts
+@@ -0,0 +1,4 @@
++export function decorate(stock: typeof import("./observability")) {
++  const layer: typeof stock.layer = (options = {}) => stock.layer({ ...options, endpoint: undefined, headers: undefined })
++  return { layer }
++}
