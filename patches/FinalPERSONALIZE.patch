@@ -353,52 +353,22 @@ index 0000000000000000000000000000000000000000..56bff6ccfd5593c5db2676603f65e4f7
 +})
 diff --git a/.personalize/dedup.test.mjs b/.personalize/dedup.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..51840663b5834c957854b20f7af4476405a7ee78
+index 0000000000000000000000000000000000000000..3d6c103a8695421451d4ae88547c38a2ab6a2a07
 --- /dev/null
 +++ b/.personalize/dedup.test.mjs
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,62 @@
 +import { test } from "node:test"
 +import assert from "node:assert/strict"
 +import {
 +  bumpLedger,
-+  callSignature,
 +  dedupeText,
 +  estimateTokens,
 +  ledgerState,
 +  normalizeSentence,
 +  punchLine,
 +  resetLedger,
-+  slapReceipt,
 +  splitSentences,
-+  stableStringify,
 +} from "../packages/core/src/personalize/dedup.ts"
-+
-+test("stableStringify is key-order invariant and array-order exact", () => {
-+  assert.equal(stableStringify({ b: 1, a: 2 }), stableStringify({ a: 2, b: 1 }))
-+  assert.equal(
-+    stableStringify({ a: { y: 1, x: 2 }, b: [3, 4] }),
-+    stableStringify({ b: [3, 4], a: { x: 2, y: 1 } }),
-+  )
-+  assert.notEqual(stableStringify([1, 2]), stableStringify([2, 1]))
-+  assert.equal(stableStringify(undefined), "null")
-+})
-+
-+test("callSignature collides only for calls differing in argument key order", () => {
-+  assert.equal(callSignature("read", { path: "a", limit: 5 }), callSignature("read", { limit: 5, path: "a" }))
-+  assert.notEqual(callSignature("read", { path: "a" }), callSignature("read", { path: "b" }))
-+  assert.notEqual(callSignature("read", {}), callSignature("glob", {}))
-+})
-+
-+test("slapReceipt carries the call number, waste estimate and optional punch", () => {
-+  assert.equal(
-+    slapReceipt(7, 12, ""),
-+    "*Systemslap* DUPLICATE of call #7 this turn — result already in context. wasted: ~12 tkn",
-+  )
-+  assert.equal(
-+    slapReceipt(2, 4, "\n*SystemPunch* duplicates this session: 2 (≈8 tkn wasted)"),
-+    "*Systemslap* DUPLICATE of call #2 this turn — result already in context. wasted: ~4 tkn\n*SystemPunch* duplicates this session: 2 (≈8 tkn wasted)",
-+  )
-+})
 +
 +test("punch line appears only from the second duplicate onward and counts both kinds", () => {
 +  resetLedger()
@@ -686,17 +656,19 @@ index 0000000000000000000000000000000000000000..e362747a9694ad5c049894e7944650f7
 +}
 diff --git a/packages/core/src/personalize/dedup.ts b/packages/core/src/personalize/dedup.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d19c6de113494da4bbf7cbced7f6d10875e1228
+index 0000000000000000000000000000000000000000..1a2df6d26176e114612993bcf26851f494b345b8
 --- /dev/null
 +++ b/packages/core/src/personalize/dedup.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,117 @@
 +// ============================================================================
 +// PERSONALIZATION (deltav11) — duplicate guards.
-+// Deterministic detection of the two provable waste shapes:
-+//   1. call echo: adjacent identical tool calls inside one step
-+//   2. prose echo: adjacent duplicate sentences inside one text part
-+// Hard punishment only where waste is provable (adjacent identical);
-+// everything contextual is counted in the ledger, never blocked.
++// Prose echo only: adjacent duplicate sentences inside one text part are
++// stripped and counted. The call-echo guard was removed 2026-11-02: it read
++// args from `call.arguments` (the event carries them at `.input`), so every
++// signature degenerated to `name(null)` and it flagged ANY adjacent
++// same-tool pair — including authorized parallel spawns, which are
++// observationally identical to blind echoes. Parallel same-turn tool calls
++// are operator-authorized and must never be blocked.
 +// Pure module: no imports, no effects — unit-tested in .personalize/dedup.test.mjs.
 +// ============================================================================
 +
@@ -739,26 +711,7 @@ index 0000000000000000000000000000000000000000..5d19c6de113494da4bbf7cbced7f6d10
 +  return `\n*SystemPunch* duplicates this session: ${total} (≈${entry.wastedTokens} tkn wasted)`
 +}
 +
-+// --- guard 1: call echo ------------------------------------------------------
-+
-+export function stableStringify(value: unknown): string {
-+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
-+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`
-+  const record = value as Record<string, unknown>
-+  const keys = Object.keys(record).sort()
-+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`
-+}
-+
-+/** Signature of one tool call; calls differing only in argument key order collide by design. */
-+export function callSignature(name: unknown, args: unknown): string {
-+  return `${String(name ?? "")}(${stableStringify(args)})`
-+}
-+
-+export function slapReceipt(callNumber: number, wastedTokens: number, punch: string): string {
-+  return `*Systemslap* DUPLICATE of call #${callNumber} this turn — result already in context. wasted: ~${wastedTokens} tkn${punch}`
-+}
-+
-+// --- guard 2: prose echo -----------------------------------------------------
++// --- prose echo ---------------------------------------------------------------
 +
 +/** Sentences shorter than this (normalized) are structural noise — never compared. */
 +const MIN_SENTENCE_CHARS = 24
@@ -988,14 +941,12 @@ index 0000000000000000000000000000000000000000..eff6f79388ce8d3c00c2ed3a17e3cee3
 +}
 diff --git a/packages/core/src/personalize/model-request.ts b/packages/core/src/personalize/model-request.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..35631623b123525f91db362169c86c89bec866e8
+index 0000000000000000000000000000000000000000..434cd7ffddf5d48aeb32550803eced9513ed5f14
 --- /dev/null
 +++ b/packages/core/src/personalize/model-request.ts
-@@ -0,0 +1,67 @@
-+import { Context, Effect, Layer } from "effect"
+@@ -0,0 +1,32 @@
 +import { canonicalMessages, copyWith } from "./content"
 +import { personaLead, stripStockIdentity } from "./persona"
-+import { bumpLedger, callSignature, estimateTokens, punchLine, slapReceipt } from "./dedup"
 +
 +export function personalizeSystem<T extends { readonly content: string }>(system: readonly T[]): T[] {
 +  const persona = personaLead()
@@ -1011,53 +962,20 @@ index 0000000000000000000000000000000000000000..35631623b123525f91db362169c86c89
 +  const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)
 +  const boundImages: typeof stock.boundImages = (messages, ...rest) => stock.boundImages(canonicalMessages(messages), ...rest)
 +
-+  // Guard 1 (deltav11): adjacent duplicate tool calls get a *Systemslap*
-+  // receipt instead of execution. executeTool runs once per tool-call event
-+  // in stream order, so a closure over the previous signature flags exactly
-+  // the blind-echo shape: the model re-emitted a call before any result
-+  // could exist. A different call in between, or a later step (fresh
-+  // Prepared), is informed repetition and stays legal.
-+  const guardPrepared = <P extends { readonly executeTool: (input: any) => any; readonly [key: string]: unknown }>(prepared: P): P => {
-+    let lastSignature: string | undefined
-+    let callNumber = 0
-+    return {
-+      ...prepared,
-+      executeTool: (input: any) => {
-+        callNumber += 1
-+        const signature = callSignature(input?.call?.name, input?.call?.arguments)
-+        if (signature === lastSignature) {
-+          const wasted = estimateTokens(signature)
-+          const entry = bumpLedger(String(input?.sessionID ?? ""), "calls", wasted)
-+          const receipt = slapReceipt(callNumber, wasted, punchLine(entry))
-+          return Effect.succeed({ content: [{ type: "text" as const, text: receipt }] })
-+        }
-+        lastSignature = signature
-+        return prepared.executeTool(input)
-+      },
-+    } as P
-+  }
++  // Call-echo guard REMOVED (2026-11-02), two reasons, both proven live:
++  // 1. It signed calls via `input.call.arguments`, but the ToolCall event
++  //    carries parsed arguments at `.input` — every signature degenerated to
++  //    `name(null)`, so ANY adjacent same-tool pair collided. Different
++  //    reads, different greps, and authorized parallel spawns were all
++  //    replaced with a fake receipt instead of executing.
++  // 2. Even with correct signatures, an intentional parallel spawn is
++  //    observationally identical to a blind echo (adjacent calls, no result
++  //    between them yet) — the guard cannot tell them apart, so it must not
++  //    block. Parallel same-turn tool calls are authorized by the operator.
++  // executeTool passes through stock untouched; the node stays the stock
++  // layer. The prose-echo half of dedup.ts is unaffected.
 +
-+  // Same node-wrapping pattern as the owned hooks factory: build the stock
-+  // layer, wrap the service inside its context, keep dependency wiring and
-+  // the service contract intact (mapLayer preserves the node's deps).
-+  const node: typeof stock.node = stock.node.mapLayer((layer) =>
-+    Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
-+      const original = Context.get(context, stock.Service)
-+      return Context.add(
-+        context,
-+        stock.Service,
-+        {
-+          ...original,
-+          primary: (input: Parameters<typeof original.primary>[0]) => Effect.map(original.primary(input), guardPrepared),
-+          compaction: (input: Parameters<typeof original.compaction>[0]) => Effect.map(original.compaction(input), guardPrepared),
-+          generate: (input: Parameters<typeof original.generate>[0]) => Effect.map(original.generate(input), guardPrepared),
-+          title: (input: Parameters<typeof original.title>[0]) => Effect.map(original.title(input), guardPrepared),
-+        },
-+      )
-+    })),
-+  )
-+
-+  return { baseTranscript, unsupportedParts, boundImages, node }
++  return { baseTranscript, unsupportedParts, boundImages, node: stock.node }
 +}
 diff --git a/packages/core/src/personalize/persona.ts b/packages/core/src/personalize/persona.ts
 new file mode 100644
