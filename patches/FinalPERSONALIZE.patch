@@ -419,12 +419,332 @@ index 0000000000000000000000000000000000000000..3d6c103a8695421451d4ae88547c38a2
 +  assert.equal(estimateTokens("1234"), 1)
 +  assert.equal(estimateTokens("12345"), 2)
 +})
+diff --git a/.personalize/lifetime-effect.test.mjs b/.personalize/lifetime-effect.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..77b21bdd6789593c43572856c3805cc0ec067548
+--- /dev/null
++++ b/.personalize/lifetime-effect.test.mjs
+@@ -0,0 +1,180 @@
++import assert from "node:assert/strict"
++import fs from "node:fs"
++import path from "node:path"
++import { stripTypeScriptTypes } from "node:module"
++import { test } from "node:test"
++import { Lifetime, defaults, duration } from "../packages/util/src/personalize-lifetime.ts"
++
++const { Context, Effect, Layer, Option } = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++
++// Exercise the actual owned factories with the actual pinned Effect runtime;
++// only the host services are test doubles. No server or child processes.
++function load(relative, dependencies, names = ["decorate"], extra = {}) {
++  let code = stripTypeScriptTypes(fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8"), { mode: "transform" })
++  code = code.replace(/^import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["'];?$/gm,
++    (_, fields, specifier) => `const {${fields.replace(/\bas\b/g, ":")}} = deps[${JSON.stringify(specifier)}];`)
++  code = code.replace(/^import\s+(\w+)\s+from\s+["']([^"']+)["'];?$/gm,
++    (_, name, specifier) => `const ${name} = deps[${JSON.stringify(specifier)}];`)
++  code = code.replace(/^export /gm, "")
++  return new Function("deps", ...Object.keys(extra), `${code}\nreturn {${names.join(",")}}`)(dependencies, ...Object.values(extra))
++}
++
++function graph(tag, service) {
++  return {
++    mapLayer: (f) => ({ layer: f(Layer.succeed(tag, service)) }),
++    replace: (replacement) => ({ tag, ...replacement }),
++  }
++}
++
++test("route seam forwards trailing arguments and counts real session/job lifetimes", async () => {
++  const policy = new Lifetime(); policy.start(); policy.connect()
++  const JobService = Context.Service()("test/Job")
++  const ExecutionService = Context.Service()("test/Execution")
++  const BusService = Context.Service()("test/Bus")
++  const queued = [], active = new Set()
++  let subscriber, unsubscribed = false, forwarded
++  const job = { start: ({ run }) => Effect.sync(() => { queued.push(run); return "job-id" }) }
++  const execution = { active: Effect.sync(() => active) }
++  const events = Object.fromEntries(["Started", "Succeeded", "Failed", "Interrupted"].map((name) => [name, { type: name }]))
++  const { decorate } = load("packages/server/src/personalize/routes.ts", {
++    effect: { Context, Effect, Layer, Option },
++    "@opencode/core/job": { Job: { Service: JobService, node: graph(JobService, job) } },
++    "@opencode/core/session/execution": { SessionExecution: { Service: ExecutionService, node: graph(ExecutionService, execution) } },
++    "@opencode/core/bus": { Bus: { Service: BusService } },
++    "@opencode/schema/session-event": { SessionEvent: { Execution: events } },
++    "./idle-state": { lifetime: policy },
++  })
++  const options = {}, urls = () => [], caller = { caller: true }, instances = {}, future = {}
++  decorate({ createRoutes: (...args) => { forwarded = args } }).createRoutes(options, urls, [caller], instances, future)
++  assert.equal(forwarded[0], options); assert.equal(forwarded[1], urls)
++  assert.equal(forwarded[2].at(-1), caller)
++  assert.equal(forwarded[3], instances); assert.equal(forwarded[4], future)
++  const bus = { listen: (fn) => Effect.sync(() => {
++    subscriber = fn
++    return Effect.sync(() => { unsubscribed = true })
++  }) }
++  const combined = Layer.mergeAll(...forwarded[2].slice(0, 2).map((replacement) => replacement.layer)).pipe(
++    Layer.provide(Layer.succeed(BusService, bus)),
++  )
++  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++    const context = yield* Layer.build(combined)
++    const jobs = Context.get(context, JobService)
++    yield* jobs.start({ run: Effect.void })
++    assert.equal(policy.jobs, 1, "queued work is already protected")
++    yield* queued.shift()
++    assert.equal(policy.jobs, 0)
++    yield* jobs.start({ run: Effect.fail(new Error("tool failed")) })
++    yield* queued.shift().pipe(Effect.exit)
++    assert.equal(policy.jobs, 0, "failed tools release their lease")
++    yield* subscriber({ type: "Started", data: { sessionID: "parent" } })
++    yield* subscriber({ type: "Started", data: { sessionID: "child" } })
++    yield* subscriber({ type: "Started", data: { sessionID: "child" } })
++    assert.equal(policy.jobs, 2, "parallel sessions count separately; duplicate events do not")
++    yield* subscriber({ type: "Succeeded", data: { sessionID: "parent" } })
++    assert.equal(policy.jobs, 1)
++    yield* subscriber({ type: "Interrupted", data: { sessionID: "child" } })
++    assert.equal(policy.jobs, 0)
++    active.add("unreported-session")
++    assert.equal(policy.next(), undefined, "actual active-session state protects against a missing lifecycle event")
++    active.clear()
++  })))
++  assert.equal(unsubscribed, true)
++})
++
++test("native commands show warnings, query status, and update without model/tool calls", async () => {
++  let commandLayer, keyboard, request, toast, rendered
++  const client = { url: "http://localhost:28894", headers: { Authorization: "test-auth" }, connection: { status: () => "connected" } }
++  const { decorate } = load("packages/tui/src/personalize/lifetime.ts", {
++    "@opencode/plugin/tui": { Plugin: { define: (plugin) => plugin } },
++    "@opentui/solid": { useKeyboard: (fn) => { keyboard = fn } },
++    "solid-js": {},
++    "@opencode/util/personalize-lifetime": { defaults, duration },
++    "../context/client": { useClient: () => client },
++    "./lifetime-state": { wake: { wake() {} } },
++  }, ["decorate"], { fetch: async (url, options) => {
++    request = { url: String(url), ...options }
++    return { ok: true, json: async () => ({ hardMs: 1000, softMs: 10000 }) }
++  } })
++  const original = {}
++  const plugins = decorate({ builtins: [original] }).builtins
++  assert.equal(plugins[0], original)
++  plugins.at(-1).setup({
++    ui: { slot: ({ render }) => { rendered = render }, toast: { show: (value) => { toast = value } } },
++    keymap: { layer: (factory) => { commandLayer = factory() } },
++  })
++  rendered()
++  assert.equal(typeof keyboard, "function")
++  const hard = commandLayer.commands.find((command) => command.slash.name === "killtime")
++  const soft = commandLayer.commands.find((command) => command.slash.name === "softkilltime")
++  assert.match(hard.description, /priority.*unfinished work/)
++  assert.match(soft.description, /all tasks, subagents and background tools/)
++  await hard.run("1s")
++  assert.equal(request.method, "PUT")
++  assert.equal(request.headers.Authorization, "test-auth")
++  assert.deepEqual(JSON.parse(request.body), { command: "killtime", duration: "1s" })
++  assert.match(toast.message, /1s/)
++  await soft.run()
++  assert.equal(request.method, "GET")
++})
++
++test("deadline timer invokes hard kill despite work", () => {
++  let now = 0, callback, delay, soft = 0, hard = 0, marked
++  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping: (kind) => { marked = kind }, evictSelf() {} },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => { callback = fn; delay = ms; return { unref() {} } },
++    clearTimeout: () => {}, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => soft++, () => hard++)
++  policy.start(); policy.work()
++  assert.equal(delay, 1000)
++  now = 1000; callback()
++  assert.equal(hard, 1); assert.equal(soft, 0); assert.equal(marked, "hard")
++  disarm()
++})
++
++test("soft cleanup hanging does not disarm the eventual hard kill", () => {
++  let now = 0, callback, delay, soft = 0, hard = 0
++  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping() {}, evictSelf() {} },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => { callback = fn; delay = ms; return { unref() {} } },
++    clearTimeout() {}, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => { soft++ /* shutdown never finishes */ }, () => hard++)
++  policy.start()
++  assert.equal(delay, 500)
++  now = 500; callback()
++  assert.equal(soft, 1); assert.equal(hard, 0); assert.equal(delay, 500)
++  now = 1000; callback()
++  assert.equal(hard, 1)
++  disarm()
++})
++
++test("marker or registration failure cannot block hard shutdown", () => {
++  let now = 0, callback, delay, soft = 0, hard = 0
++  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": {
++      settings: () => policy.settings,
++      sleeping() { throw new Error("disk unavailable") },
++      evictSelf() { throw new Error("registration locked") },
++    },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => { callback = fn; delay = ms; return { unref() {} } },
++    clearTimeout() {}, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => soft++, () => hard++)
++  policy.start()
++  now = 500; callback()
++  assert.equal(soft, 0, "unsafe soft stop is withheld, not allowed to respawn-loop")
++  assert.equal(delay, 500, "the hard deadline remains armed")
++  now = 1000; callback()
++  assert.equal(hard, 1, "disk/registration failures do not prevent force-kill")
++  disarm()
++})
+diff --git a/.personalize/lifetime.test.mjs b/.personalize/lifetime.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fcb0de92128ce2b6657d386e6ec08281349969a
+--- /dev/null
++++ b/.personalize/lifetime.test.mjs
+@@ -0,0 +1,128 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { Lifetime, WakeGate, defaults, duration } from "../packages/util/src/personalize-lifetime.ts"
++
++function clock(settings = defaults) {
++  let now = 0
++  const policy = new Lifetime({ ...settings }, () => now)
++  policy.start()
++  return { policy, at: (time) => { now = time } }
++}
++
++test("defaults are hard 20s / soft 10s", () => {
++  assert.deepEqual(defaults, { hardMs: 20_000, softMs: 10_000 })
++})
++
++test("duration accepts short custom times and rejects disabling/invalid input", () => {
++  for (const [input, ms] of [["1s", 1000], ["50ms", 50], ["0.5s", 500], ["2m", 120000], ["default", 20000]])
++    assert.equal(duration(input, 20000), ms)
++  for (const input of ["0s", "-1s", "1", "Infinitys", "1s garbage", "0.1ms", "999999999m"])
++    assert.throws(() => duration(input, 20000))
++})
++
++test("last window disconnect, not heartbeats, starts the hard countdown", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 10000 })
++  const first = policy.connect(), second = policy.connect()
++  policy.work()
++  at(5000); first()
++  assert.equal(policy.next(), undefined)
++  at(9000); second()
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++  at(10000)
++  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++})
++
++test("hard deadline never waits for tasks, subagents, or soft shutdown", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 10000 })
++  policy.work(); policy.work(); policy.work("requests")
++  at(1000)
++  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++})
++
++test("soft waits for every task and works while a window stays connected", () => {
++  const { policy, at } = clock({ hardMs: 20000, softMs: 1000 })
++  policy.connect()
++  const parent = policy.work(), child = policy.work(), tool = policy.work()
++  at(4000); parent(); child()
++  assert.equal(policy.next(), undefined)
++  at(5000); tool()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
++  at(6000)
++  assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
++})
++
++test("new work cancels and completion resets the soft countdown", () => {
++  const { policy, at } = clock({ hardMs: 20000, softMs: 1000 })
++  policy.connect()
++  at(900); const done = policy.work()
++  at(5000); assert.equal(policy.next(), undefined)
++  done()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
++})
++
++test("a window reconnect cancels the hard countdown without touching soft work state", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 10000 })
++  policy.work()
++  at(999); policy.connect()
++  at(1001); assert.equal(policy.next(), undefined)
++})
++
++test("soft may stop sooner, hard wins equal deadlines", () => {
++  const { policy } = clock()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++  policy.configure({ hardMs: 1000, softMs: 1000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++})
++
++test("custom settings reset the deadline and finalizers are idempotent", () => {
++  const { policy, at } = clock()
++  const close = policy.connect(), done = policy.work()
++  close(); close(); done(); done()
++  assert.equal(policy.clients, 0); assert.equal(policy.jobs, 0)
++  at(30000); policy.configure({ hardMs: 1000, softMs: 2000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++})
++
++test("no shutdown during boot or after stopping", () => {
++  const policy = new Lifetime()
++  assert.equal(policy.next(), undefined)
++  policy.start(); policy.stopped = true
++  assert.equal(policy.next(), undefined)
++})
++
++test("broken soft probe and hung soft cleanup cannot cancel the hard deadline", () => {
++  const { policy, at } = clock()
++  policy.externalBusy = () => { throw new Error("probe failed") }
++  assert.deepEqual(policy.next(), { kind: "hard", after: 20000 })
++  policy.externalBusy = () => false
++  policy.softStopping = true
++  at(20000)
++  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++})
++
++test("intentional sleep parks automatic reconnect until user input", async () => {
++  let now = 0, slept = -1
++  const gate = new WakeGate((time) => slept > time, () => now)
++  const abort = new AbortController()
++  await gate.wait(abort.signal)
++  now = slept = 1000
++  let connected = false
++  const reconnect = gate.wait(abort.signal).then(() => { connected = true })
++  await Promise.resolve()
++  assert.equal(connected, false, "SSE retries cannot wake a sleeping service")
++  now = 1100; gate.wake()
++  await reconnect
++  assert.equal(connected, true)
++  await gate.wait(abort.signal)
++})
++
++test("parked reconnect is aborted cleanly when its window exits", async () => {
++  let slept = -1
++  const gate = new WakeGate((time) => slept > time, () => 0)
++  const abort = new AbortController()
++  slept = 1000
++  const reconnect = gate.wait(abort.signal)
++  abort.abort(new Error("window closed"))
++  await assert.rejects(reconnect, /window closed/)
++  gate.wake()
++})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..95e73d27bc59375e52937832d530cf8cf6661884
+index 0000000000000000000000000000000000000000..721fe112ddd9e5131273d610f229c6bc5b2e1c27
 --- /dev/null
 +++ b/.personalize/manifest.json
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,24 @@
 +{
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
@@ -441,7 +761,10 @@ index 0000000000000000000000000000000000000000..95e73d27bc59375e52937832d530cf8c
 +    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
 +    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
 +    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
++    { "target": "packages/server/src/routes.ts", "factory": "packages/server/src/personalize/routes.ts", "exports": ["createRoutes"] },
 +    { "target": "packages/server/src/handlers/event.ts", "factory": "packages/server/src/personalize/event.ts", "exports": ["EventHandler"] },
++    { "target": "packages/tui/src/plugin/builtins.ts", "factory": "packages/tui/src/personalize/lifetime.ts", "exports": ["builtins"] },
++    { "target": "packages/tui/src/context/client.tsx", "factory": "packages/tui/src/personalize/client.ts", "exports": ["ClientProvider"] },
 +    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
 +    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
 +  ]
@@ -1914,24 +2237,23 @@ index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22
 +})
 diff --git a/packages/server/src/personalize/event.ts b/packages/server/src/personalize/event.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e1c10a941bccbdb2fcb48d2f81ff34cf4e9c75b
+index 0000000000000000000000000000000000000000..7dfcc70e521feb5aa7f00486fc9035a32b113947
 --- /dev/null
 +++ b/packages/server/src/personalize/event.ts
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,52 @@
 +import { Event } from "@opencode/schema/event"
 +import { Effect, Stream } from "effect"
 +import { HttpServerResponse } from "effect/http"
 +import { HttpApiBuilder } from "effect/http-api"
 +import { Api } from "../api"
 +import { EventFeed } from "../event-feed"
-+import { noteSSE } from "./idle-state"
++import { lifetime } from "./idle-state"
 +
 +// ============================================================================
 +// PERSONALIZATION (deltav11) — SSE handler with idle-reaper activity.
-+// Identical to stock handlers/event.ts plus noteSSE() at subscribe time and
-+// on every 15s heartbeat. A live SSE client keeps the background service
-+// alive; a dead one stops heartbeating, so the idle reaper collects it after
-+// OPENCODE_SERVICE_IDLE_MS (default 30_000). The stock module is referenced
++// Actual stream ownership, not a 15s heartbeat estimate: even /killtime 1s
++// must leave connected windows alone. A scoped lease is released when the
++// stream closes, fails, or is interrupted. The stock module is referenced
 +// only in the type position below — erased at build, no runtime cycle.
 +// ============================================================================
 +
@@ -1941,23 +2263,18 @@ index 0000000000000000000000000000000000000000..3e1c10a941bccbdb2fcb48d2f81ff34c
 +      const feed = yield* EventFeed.Service
 +      return handlers.handleRaw("event.subscribe", (ctx) =>
 +        Effect.gen(function* () {
-+          noteSSE()
 +          const connected = {
 +            id: Event.ID.create(),
 +            type: "server.connected",
 +            data: {},
 +          } as const
 +          const output = Stream.unwrap(
-+            feed
-+              .subscribe(ctx.query.types)
-+              .pipe(Effect.map((live) => Stream.make(EventFeed.frame(connected)).pipe(Stream.concat(live)))),
++            Effect.acquireRelease(Effect.sync(() => lifetime.connect()), (close) => Effect.sync(close)).pipe(
++              Effect.andThen(feed.subscribe(ctx.query.types)),
++              Effect.map((live) => Stream.make(EventFeed.frame(connected)).pipe(Stream.concat(live))),
++            ),
 +          )
-+          const heartbeat = Stream.tick("15 seconds").pipe(
-+            Stream.map(() => {
-+              noteSSE()
-+              return ": heartbeat\n\n"
-+            }),
-+          )
++          const heartbeat = Stream.tick("15 seconds").pipe(Stream.map(() => ": heartbeat\n\n"))
 +          return HttpServerResponse.stream(
 +            output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }), Stream.encodeText),
 +            {
@@ -1978,176 +2295,229 @@ index 0000000000000000000000000000000000000000..3e1c10a941bccbdb2fcb48d2f81ff34c
 +}
 diff --git a/packages/server/src/personalize/idle-state.ts b/packages/server/src/personalize/idle-state.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..514d8545367bc1b33180d4bc5e1c4f0572c51164
+index 0000000000000000000000000000000000000000..8bee9fb60c5fc38bce9a5eb6f74558ccb63c9e98
 --- /dev/null
 +++ b/packages/server/src/personalize/idle-state.ts
-@@ -0,0 +1,63 @@
-+// ============================================================================
-+// PERSONALIZATION (deltav11) — idle reaper shared state.
-+// The background service must be async, not persistent-infinite: it stays
-+// alive while clients are attached (any HTTP request, any live SSE stream)
-+// and stops itself after OPENCODE_SERVICE_IDLE_MS (default 30_000, 0 = off)
-+// with no client activity, via the same graceful shutdown path `service stop`
-+// uses (latch open -> finalizers -> registration cleanup -> process exit).
-+//
-+// Shared mutable state: imported by the process wrapper (request tracking +
-+// watchdog arming, service mode only) and the event-handler wrapper (SSE
-+// heartbeat tracking). Zero imports, pure logic: unit-drilled directly.
-+// The watchdog itself is one setInterval — it spawns no processes and
-+// creates no persistence of any kind.
-+// ============================================================================
+@@ -0,0 +1,51 @@
++import { Lifetime } from "@opencode/util/personalize-lifetime"
++import { settings, sleeping, evictSelf } from "@opencode/util/personalize-lifetime-store"
 +
-+const state = {
-+  lastRequest: Date.now(),
-+  lastSSE: Date.now(),
-+}
++export const lifetime = new Lifetime(settings())
 +
-+export function noteRequest(): void {
-+  state.lastRequest = Date.now()
-+}
-+
-+export function noteSSE(): void {
-+  state.lastSSE = Date.now()
-+}
-+
-+export function lastActivity(): number {
-+  return Math.max(state.lastRequest, state.lastSSE)
-+}
-+
-+export function readIdleMs(): number {
-+  const raw = process.env.OPENCODE_SERVICE_IDLE_MS
-+  if (raw === undefined || raw.trim() === "") return 30_000
-+  const value = Number(raw)
-+  return Number.isFinite(value) && value >= 0 ? value : 30_000
-+}
-+
-+/**
-+ * Arm the idle watchdog for a service-mode server. `fire` triggers graceful
-+ * shutdown. Returns a disarm function the lifecycle cleanup calls when the
-+ * service stops for any other reason, so the watchdog never outlives the
-+ * server it guards.
-+ */
-+export function armIdleWatchdog(fire: () => void): () => void {
-+  const idleMs = readIdleMs()
-+  if (idleMs <= 0) return () => {}
-+  const timer = setInterval(() => {
-+    const idleFor = Date.now() - lastActivity()
-+    if (idleFor >= idleMs) {
-+      clearInterval(timer)
-+      console.error(
-+        `[personalize] idle-reaper: no client activity for ${Math.round(idleFor / 1000)}s ` +
-+          `(limit ${Math.round(idleMs / 1000)}s, OPENCODE_SERVICE_IDLE_MS) - stopping background service`,
-+      )
-+      fire()
-+    }
-+  }, 1_000)
-+  const unref = (timer as { unref?: () => void }).unref
-+  if (typeof unref === "function") unref.call(timer)
-+  return () => clearInterval(timer)
++// Exactly one deadline timer, rescheduled by actual client/job transitions.
++// No heartbeat heuristics, watchdog polling, fibers, or spawned processes.
++export function armIdleWatchdog(soft: () => void, hard = () => {
++  try { process.kill(process.pid, "SIGKILL") } catch {}
++  process.exit(137)
++}) {
++  let timer: ReturnType<typeof setTimeout> | undefined
++  let disarmed = false
++  function schedule() {
++    if (timer) clearTimeout(timer)
++    timer = undefined
++    if (disarmed) return
++    const next = lifetime.next()
++    if (!next) return
++    timer = setTimeout(() => {
++      const due = lifetime.next()
++      if (!due || due.after > 0) return schedule()
++      // Write before disconnecting: existing windows must park, not respawn it.
++      try { sleeping(due.kind) } catch (error) {
++        console.error("[personalize] cannot record service sleep", error)
++        if (due.kind === "soft") {
++          // Avoid a soft-stop/auto-respawn loop. Hard control stays armed.
++          lifetime.softBlocked = true
++          return schedule()
++        }
++      }
++      console.error(`[personalize] ${due.kind} lifetime deadline reached`)
++      if (due.kind === "hard") {
++        lifetime.stopped = true
++        try { evictSelf() } catch {}
++        hard()
++      } else {
++        lifetime.softStopping = true
++        try { soft() } finally { schedule() }
++      }
++    }, next.after)
++    timer.unref?.()
++  }
++  lifetime.changed = schedule
++  schedule()
++  return () => {
++    disarmed = true
++    if (timer) clearTimeout(timer)
++    lifetime.changed = () => {}
++  }
 +}
 diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3badabea6a3abfbeac0c1d6a1767511b608f3be7
+index 0000000000000000000000000000000000000000..b96a3b86afd35e442dc48f2efa16f1c54db7d4de
 --- /dev/null
 +++ b/packages/server/src/personalize/process.ts
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,88 @@
 +import os from "node:os"
 +import path from "node:path"
-+import { Effect } from "effect"
++import { Effect, Option } from "effect"
++import { HttpServerRequest, HttpServerResponse } from "effect/http"
 +import { Flock } from "@opencode/util/flock"
 +import { PersonalizeBoot } from "@opencode/util/personalize-boot"
-+import { armIdleWatchdog, noteRequest } from "./idle-state"
++import { defaults, duration } from "@opencode/util/personalize-lifetime"
++import { save } from "@opencode/util/personalize-lifetime-store"
++import { authorizedRequest, unauthorizedResponse } from "../middleware/authorization"
++import { armIdleWatchdog, lifetime } from "./idle-state"
 +
-+// Boot-serialization start (Flock) with optional idle reaping for service mode.
-+// Every argument is forwarded; nothing is dropped (see the registration lesson
-+// in the 2026-11-02 note). The reaper only arms when `lifecycle` is present —
-+// exactly the condition stock uses to distinguish the background service from
-+// a foreground `opencode serve` — and it spawns nothing: one unref'd interval
-+// that calls the stock shutdown effect when no request and no live SSE stream
-+// has been seen for OPENCODE_SERVICE_IDLE_MS (default 30_000, 0 = off).
 +export function decorate(stock: typeof import("../process")) {
-+  const start: typeof stock.start = (options: never, ...rest: unknown[]) => {
-+    const [lifecycle, transform, remoteURLs] = rest as [
-+      { onListen?: unknown } | undefined,
-+      ((app: never) => never) | undefined,
-+      unknown,
-+    ]
-+
-+    if (lifecycle === undefined || lifecycle === null || typeof lifecycle.onListen !== "function") {
-+      // Foreground or future-shaped: stock behavior, untouched, all args forwarded.
-+      return baseStart(options, rest)
-+    }
-+
-+    // Service mode: track every HTTP request (the transform wraps stock's
-+    // dispatch app — dispatch runs for every request, including pre-ready
-+    // /api/info polls, so boot-polling clients count as activity) and arm
-+    // the idle watchdog on the lifecycle's shutdown latch.
-+    const trackedLifecycle = {
-+      ...lifecycle,
-+      onListen: (address: unknown, shutdown: unknown) =>
-+        (lifecycle.onListen as (a: unknown, s: unknown) => Effect.Effect<unknown>)(address, shutdown).pipe(
-+          Effect.map((cleanup: unknown) => {
-+            const fire = () => {
-+              const effect = shutdown as Effect.Effect<void>
-+              void Effect.runPromise(effect).catch(() => {})
-+            }
-+            const disarm = armIdleWatchdog(fire)
-+            // Disarm when the server stops for any reason, so the watchdog
-+            // never outlives the lifecycle cleanup (registration eviction).
-+            if (cleanup !== null && cleanup !== undefined && typeof (cleanup as { pipe?: unknown }).pipe === "function") {
-+              return (cleanup as Effect.Effect<void>).pipe(Effect.ensuring(Effect.sync(disarm)))
-+            }
-+            return cleanup
++  // Keep the complete stock signature and forward its tail unchanged.
++  const start: typeof stock.start = (options, ...rest) => {
++    const [lifecycle, transform] = rest
++    if (lifecycle) {
++      rest[0] = {
++        ...lifecycle,
++        onListen: (address, shutdown) => Effect.gen(function* () {
++            const cleanup = yield* lifecycle.onListen(address, shutdown)
++            armIdleWatchdog(() => { void Effect.runPromise(shutdown).catch(console.error) })
++            // The unref'd hard deadline survives graceful finalizers. If they
++            // hang it still kills; if the process exits normally it holds no
++            // handles open and needs no extra cleanup machinery.
++            return cleanup.pipe(Effect.ensuring(Effect.sync(() => {
++              lifetime.softStopping = true
++              lifetime.changed()
++            })))
 +          }),
-+        ) as never,
-+    } as never
-+
-+    const trackedTransform = (app: never) => {
-+      const upstream = transform === undefined || transform === null ? app : transform(app)
-+      return (upstream as Effect.Effect<never>).pipe(Effect.tap(() => Effect.sync(noteRequest))) as never
-+    }
-+
-+    return baseStart(options, [trackedLifecycle, trackedTransform, remoteURLs, ...rest.slice(3)])
-+  }
-+
-+  // The original boot-serialized body: Flock-acquire, run stock.start with all
-+  // forwarded arguments, release. Factored out so both branches share it.
-+  const baseStart = (options: never, args: unknown[]) =>
-+    Effect.acquireUseRelease(
-+      Effect.promise((signal) =>
-+        Flock.acquire("service-bootstrap", {
-+          dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
-+        }).then((lease) => {
-+          // Flock refuses a second release (metadata is deleted on the first);
-+          // the boot-service release and the finalizer share one guarded
-+          // release so whichever fires first wins and the other no-ops.
-+          let done = false
-+          const release = () => {
-+            if (done) return Promise.resolve()
-+            done = true
-+            return lease.release()
++      }
++      rest[1] = (app) => {
++        const next = transform ? transform(app) : app
++        return Effect.gen(function* () {
++          const request = yield* HttpServerRequest.HttpServerRequest
++          if (new URL(request.url, "http://localhost").pathname === "/_personalize/lifetime") {
++            if (!(yield* authorizedRequest(request, { password: Option.fromNullishOr(options.password), username: "opencode" })))
++              return unauthorizedResponse(request)
++            const reply = (body: unknown, status = 200) => HttpServerResponse.text(JSON.stringify(body), {
++              status, contentType: "application/json",
++            })
++            if (request.method === "GET") return reply(lifetime.settings)
++            if (request.method !== "PUT") return reply({ error: "Use GET or PUT" }, 405)
++            const body: unknown = yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))
++            if (!body || typeof body !== "object") return reply({ error: "Expected command and duration" }, 400)
++            const command = Reflect.get(body, "command"), input = Reflect.get(body, "duration")
++            if ((command !== "killtime" && command !== "softkilltime") || typeof input !== "string")
++              return reply({ error: "Expected killtime or softkilltime and a duration" }, 400)
++            const key = command === "killtime" ? "hardMs" : "softMs"
++            let ms: number
++            try { ms = duration(input, defaults[key]) }
++            catch (error) { return reply({ error: error instanceof Error ? error.message : String(error) }, 400) }
++            const settings = { ...lifetime.settings, [key]: ms }
++            try { save(settings) }
++            catch { return reply({ error: "Could not save lifetime settings; nothing changed" }, 500) }
++            lifetime.configure(settings)
++            return reply(settings)
 +          }
-+          return { release }
++          // A mutation in progress protects soft shutdown; reads/heartbeats do
++          // not keep an idle server alive. Job leases protect asynchronous work.
++          if (request.method === "GET" || request.method === "HEAD") return yield* next
++          return yield* Effect.acquireUseRelease(
++            Effect.sync(() => lifetime.work("requests")),
++            () => next,
++            (done) => Effect.sync(done),
++          )
 +        })
-+      ),
-+      (boot) => (stock.start as (o: never, ...a: unknown[]) => Effect.Effect<unknown>)(options, ...args).pipe(
-+        Effect.provideService(PersonalizeBoot, {
-+          retry: Effect.void, release: Effect.promise(() => boot.release()),
-+        }),
-+      ),
++      }
++    }
++    return Effect.acquireUseRelease(
++      Effect.promise((signal) => Flock.acquire("service-bootstrap", {
++        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++      }).then((lease) => {
++        let done = false
++        const release = () => {
++          if (done) return Promise.resolve()
++          done = true
++          return lease.release()
++        }
++        return { release }
++      })),
++      (boot) => stock.start(options, ...rest).pipe(Effect.provideService(PersonalizeBoot, {
++        retry: Effect.void, release: Effect.promise(() => boot.release()),
++      })),
 +      (boot) => Effect.promise(() => boot.release()),
-+    ) as never
-+
++    )
++  }
 +  return { start }
++}
+diff --git a/packages/server/src/personalize/routes.ts b/packages/server/src/personalize/routes.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a422f9702b7da72e2aff3c9b4f130aee0a1650e0
+--- /dev/null
++++ b/packages/server/src/personalize/routes.ts
+@@ -0,0 +1,59 @@
++import { Context, Effect, Layer, Option } from "effect"
++import { Job } from "@opencode/core/job"
++import { Bus } from "@opencode/core/bus"
++import { SessionExecution } from "@opencode/core/session/execution"
++import { SessionEvent } from "@opencode/schema/session-event"
++import { lifetime } from "./idle-state"
++
++// One route-builder seam, using the app's actual services (not a second bus).
++export function decorate(stock: typeof import("../routes")) {
++  const createRoutes: typeof stock.createRoutes = (options, urls, ...rest) => {
++    const jobs = Job.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => {
++      const service = Context.get(context, Job.Service)
++      const start: Job.Interface["start"] = (input) => Effect.suspend(() => {
++        const done = lifetime.work()
++        let handedOff = false
++        return service.start({ ...input, run: input.run.pipe(Effect.ensuring(Effect.sync(done))) }).pipe(
++          Effect.tap(() => Effect.sync(() => { handedOff = true })),
++          Effect.ensuring(Effect.sync(() => { if (!handedOff) done() })),
++        )
++      })
++      return Layer.succeed(Job.Service, { ...service, start })
++    })))
++    const executions = SessionExecution.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) =>
++      Layer.effect(SessionExecution.Service, Effect.gen(function* () {
++        const service = Context.get(context, SessionExecution.Service)
++        // This dependency already belongs to the stock execution graph. Query
++        // it without changing mapLayer's dependency contract.
++        const bus = yield* Effect.serviceOption(Bus.Service)
++        if (Option.isNone(bus)) {
++          lifetime.softBlocked = true
++          return service // Hard control remains available if soft cannot prove safety.
++        }
++        const running = new Map<string, () => void>()
++        lifetime.externalBusy = () => Effect.runSync(service.active).size > 0
++        const unsubscribe = yield* bus.value.listen((event) => Effect.sync(() => {
++          if (!event.data || typeof event.data !== "object") return
++          const id = Reflect.get(event.data, "sessionID")
++          if (typeof id !== "string") return
++          if (event.type === SessionEvent.Execution.Started.type && !running.has(id))
++            running.set(id, lifetime.work())
++          if (event.type === SessionEvent.Execution.Succeeded.type || event.type === SessionEvent.Execution.Failed.type ||
++            event.type === SessionEvent.Execution.Interrupted.type) {
++            running.get(id)?.()
++            running.delete(id)
++          }
++        }))
++        yield* Effect.addFinalizer(() => unsubscribe.pipe(Effect.andThen(Effect.sync(() => {
++          for (const done of running.values()) done()
++          lifetime.externalBusy = () => false
++        }))))
++        return service
++      })),
++    )))
++    // Caller replacements retain priority. Forward every stock argument.
++    rest[0] = [Job.node.replace(jobs), SessionExecution.node.replace(executions), ...(rest[0] ?? [])]
++    return stock.createRoutes(options, urls, ...rest)
++  }
++  return { createRoutes }
 +}
 diff --git a/packages/server/src/personalize/service-status.ts b/packages/server/src/personalize/service-status.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..059c8b413b8f0b6c47935e291fa43a0b0b160e05
+index 0000000000000000000000000000000000000000..0c12ff3ac8c3093671ce60c390deed19a2e2c7b0
 --- /dev/null
 +++ b/packages/server/src/personalize/service-status.ts
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,24 @@
 +import { Effect, Option, Ref } from "effect"
 +import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++import { lifetime } from "./idle-state"
 +
 +export function decorate(stock: typeof import("../service-status")) {
 +  const make: typeof stock.make = (options = {}) => Effect.gen(function* () {
@@ -2156,18 +2526,140 @@ index 0000000000000000000000000000000000000000..059c8b413b8f0b6c47935e291fa43a0b
 +    const boot = yield* Effect.serviceOption(PersonalizeBoot)
 +    const release = Option.isSome(boot) ? boot.value.release : Effect.void
 +    if (Option.isSome(boot)) boot.value.retry = Ref.update(state, (value) =>
-+      value.type === "starting" || value.type === "retrying" ? { type: "retrying" } : value)
++      value.type === "starting" || value.type === "retrying" ? { type: "retrying" } as const : value)
 +    return {
 +      // The wire may expose retrying; the owned Promise client normalizes it to waiting.
 +      current: Ref.get(state) as Effect.Effect<import("../service-status").State>,
-+      ready: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "ready" } : value)
++      ready: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "ready" } as const : value)
++        .pipe(Effect.andThen(release), Effect.tap(() => Effect.sync(() => lifetime.start()))),
++      fail: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "failed" } as const : value)
 +        .pipe(Effect.andThen(release)),
-+      fail: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "failed" } : value)
-+        .pipe(Effect.andThen(release)),
-+      beginStopping: Ref.update(state, (value) => value.type === "stopping" ? value : { type: "stopping" }),
++      beginStopping: Ref.update(state, (value) => value.type === "stopping" ? value : { type: "stopping" } as const),
 +    }
 +  })
 +  return { make }
++}
+diff --git a/packages/tui/src/personalize/client.ts b/packages/tui/src/personalize/client.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f829fd1a38707c616c2b3cf4b620be18373c346
+--- /dev/null
++++ b/packages/tui/src/personalize/client.ts
+@@ -0,0 +1,19 @@
++import { createComponent, mergeProps } from "solid-js"
++import { wake } from "./lifetime-state"
++
++export function decorate(stock: typeof import("../context/client")) {
++  const ClientProvider: typeof stock.ClientProvider = (props) => {
++    const service = props.service
++    if (!service) return createComponent(stock.ClientProvider, props)
++    return createComponent(stock.ClientProvider, mergeProps(props, {
++      service: {
++        ...service,
++        async reconnect(signal: AbortSignal) {
++          await wake.wait(signal)
++          return service.reconnect(signal)
++        },
++      },
++    }))
++  }
++  return { ClientProvider }
++}
+diff --git a/packages/tui/src/personalize/lifetime-state.ts b/packages/tui/src/personalize/lifetime-state.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1199b5bcf5820749ea21d26d778c911accf11d0d
+--- /dev/null
++++ b/packages/tui/src/personalize/lifetime-state.ts
+@@ -0,0 +1,4 @@
++import { WakeGate } from "@opencode/util/personalize-lifetime"
++import { sleptAfter } from "@opencode/util/personalize-lifetime-store"
++
++export const wake = new WakeGate(sleptAfter)
+diff --git a/packages/tui/src/personalize/lifetime.ts b/packages/tui/src/personalize/lifetime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e044cfe20aa5c2cc008e6cfe978a3156a5eda63
+--- /dev/null
++++ b/packages/tui/src/personalize/lifetime.ts
+@@ -0,0 +1,81 @@
++import { Plugin } from "@opencode/plugin/tui"
++import { useKeyboard } from "@opentui/solid"
++import { createEffect, createRoot } from "solid-js"
++import { defaults, duration } from "@opencode/util/personalize-lifetime"
++import { useClient } from "../context/client"
++import { wake } from "./lifetime-state"
++
++const commands = [
++  {
++    name: "killtime", key: "hardMs", title: "Hard shutdown timeout",
++    description: "Force-kill after the last window disconnects (default 20s). A custom hard deadline takes priority over soft waiting and kills unfinished work.",
++  },
++  {
++    name: "softkilltime", key: "softMs", title: "Soft shutdown timeout",
++    description: "Wait for all tasks, subagents and background tools, then stop after this quiet time (default 10s). Never delays the hard deadline.",
++  },
++] as const
++
++const plugin = Plugin.define({
++  id: "opencode.personalize.lifetime",
++  setup(context) {
++    context.ui.slot({
++      append: "app",
++      render() {
++        const client = useClient()
++        useKeyboard(() => wake.wake())
++        context.keymap.layer(() => ({
++          mode: "global",
++          commands: commands.map((command) => ({
++            id: `personalize.${command.name}`,
++            title: command.title,
++            description: command.description,
++            group: "Service",
++            palette: true,
++            slash: { name: command.name, arguments: true },
++            async run(input) {
++              try {
++                const value = input?.trim()
++                if (value) duration(value, defaults[command.key])
++                wake.wake()
++                if (client.connection.status() !== "connected") {
++                  // Wait for the existing reconnect path, never spawn ourselves.
++                  await new Promise<void>((resolve, reject) => {
++                    createRoot((dispose) => {
++                      const timer = setTimeout(() => { dispose(); reject(new Error("Server did not reconnect")) }, 120_000)
++                      createEffect(() => {
++                        if (client.connection.status() !== "connected") return
++                        clearTimeout(timer); dispose(); resolve()
++                      })
++                    })
++                  })
++                }
++                if (!client.url) throw new Error("A managed local server is required")
++                const response = await fetch(new URL("/_personalize/lifetime", client.url), {
++                  method: value ? "PUT" : "GET",
++                  headers: { ...client.headers, "Content-Type": "application/json" },
++                  body: value ? JSON.stringify({ command: command.name, duration: value }) : undefined,
++                })
++                const body: unknown = await response.json()
++                if (!response.ok) throw new Error(body && typeof body === "object" ? String(Reflect.get(body, "error")) : "Lifetime command failed")
++                if (!body || typeof body !== "object") throw new Error("Invalid lifetime response")
++                const ms = Number(Reflect.get(body, command.key))
++                context.ui.toast.show({
++                  variant: "info",
++                  message: `/${command.name}: ${ms / 1000}s. ${command.description}`,
++                })
++              } catch (error) {
++                context.ui.toast.show({ variant: "error", message: error instanceof Error ? error.message : String(error) })
++              }
++            },
++          })),
++        }))
++        return null
++      },
++    })
++  },
++})
++
++export function decorate(stock: typeof import("../plugin/builtins")) {
++  return { builtins: [...stock.builtins, plugin] }
 +}
 diff --git a/packages/tui/src/personalize/logo.ts b/packages/tui/src/personalize/logo.ts
 new file mode 100644
@@ -2209,6 +2701,194 @@ index 0000000000000000000000000000000000000000..d599cc7ea1f8c5c2f38c35f6c2e1e2a4
 +      .some((part) => Array.isArray(part) ? part.some(visit) : visit(part))
 +  }
 +  return visit(input)
++}
+diff --git a/packages/util/src/personalize-lifetime-store.ts b/packages/util/src/personalize-lifetime-store.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..364aaed02572b3537188efaf6997c27c5fe078e7
+--- /dev/null
++++ b/packages/util/src/personalize-lifetime-store.ts
+@@ -0,0 +1,52 @@
++import fs from "node:fs"
++import path from "node:path"
++import { Global } from "./global"
++import { defaults, type Settings, type Stop } from "./personalize-lifetime"
++
++// Small settings/sleep files beside the existing service registration. These
++// are data only: no service, scheduler, autostart, polling, or process creation.
++const serviceFile = () => process.env.OPENCODE_SERVICE_FILE ?? path.join(Global.Path.state, "service.json")
++
++function read(file: string): unknown {
++  try { return JSON.parse(fs.readFileSync(file, "utf8")) } catch { return undefined }
++}
++
++function write(file: string, value: unknown) {
++  fs.mkdirSync(path.dirname(file), { recursive: true })
++  const temporary = `${file}.${process.pid}.tmp`
++  try {
++    fs.writeFileSync(temporary, JSON.stringify(value))
++    fs.renameSync(temporary, file)
++  } finally {
++    fs.rmSync(temporary, { force: true })
++  }
++}
++
++export function settings(): Settings {
++  const value = read(`${serviceFile()}.lifetime.json`)
++  if (!value || typeof value !== "object") return { ...defaults }
++  const result = { ...defaults }
++  for (const key of ["hardMs", "softMs"] as const) {
++    const ms = Reflect.get(value, key)
++    if (Number.isSafeInteger(ms) && ms > 0 && ms <= 2_147_483_647) result[key] = ms
++  }
++  return result
++}
++
++export function save(value: Settings) { write(`${serviceFile()}.lifetime.json`, value) }
++
++export function sleeping(kind: Stop) {
++  write(`${serviceFile()}.sleep.json`, { at: Date.now(), pid: process.pid, kind })
++}
++
++export function sleptAfter(time: number) {
++  const value = read(`${serviceFile()}.sleep.json`)
++  return !!value && typeof value === "object" && Number(Reflect.get(value, "at")) > time
++}
++
++export function evictSelf() {
++  const file = serviceFile()
++  const value = read(file)
++  if (value && typeof value === "object" && Reflect.get(value, "pid") === process.pid)
++    fs.rmSync(file, { force: true })
++}
+diff --git a/packages/util/src/personalize-lifetime.ts b/packages/util/src/personalize-lifetime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d270672f84fe3cc311100b35c2f07cd751b92a1a
+--- /dev/null
++++ b/packages/util/src/personalize-lifetime.ts
+@@ -0,0 +1,124 @@
++// Shared command syntax and pure lifetime policy. No processes, I/O, or timers.
++export const defaults = { hardMs: 20_000, softMs: 10_000 }
++export type Settings = typeof defaults
++export type Stop = "hard" | "soft"
++
++export function duration(input: string, fallback: number): number {
++  if (input.trim() === "default") return fallback
++  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m)$/i.exec(input.trim())
++  const ms = match ? Number(match[1]) * ({ ms: 1, s: 1000, m: 60_000 }[match[2].toLowerCase()] ?? 0) : NaN
++  if (!Number.isSafeInteger(ms) || ms < 1 || ms > 2_147_483_647)
++    throw new Error("Use a positive duration such as 1s, 500ms, 1m, or default. Zero does not disable shutdown.")
++  return ms
++}
++
++export class Lifetime {
++  clients = 0
++  jobs = 0
++  requests = 0
++  ready = false
++  stopped = false
++  softStopping = false
++  softBlocked = false
++  externalBusy = () => false
++  private disconnected = 0
++  private quiet = 0
++  changed = () => {}
++  settings: Settings
++  private now: () => number
++
++  constructor(settings: Settings = { ...defaults }, now = () => performance.now()) {
++    this.settings = settings
++    this.now = now
++  }
++
++  start() {
++    this.ready = true
++    this.disconnected = this.quiet = this.now()
++    this.changed()
++  }
++
++  configure(settings: Settings) {
++    this.settings = settings
++    this.softBlocked = false
++    // A custom value gets a full fresh countdown, not an already-expired one.
++    this.disconnected = this.quiet = this.now()
++    this.changed()
++  }
++
++  connect() {
++    this.clients++
++    this.changed()
++    return this.once(() => {
++      this.clients--
++      if (this.clients === 0) this.disconnected = this.now()
++      this.changed()
++    })
++  }
++
++  work(kind: "jobs" | "requests" = "jobs") {
++    this[kind]++
++    this.changed()
++    return this.once(() => {
++      this[kind]--
++      if (this.jobs === 0 && this.requests === 0) this.quiet = this.now()
++      this.changed()
++    })
++  }
++
++  next(): { kind: Stop; after: number } | undefined {
++    if (!this.ready || this.stopped) return
++    const hard = this.clients === 0 ? this.disconnected + this.settings.hardMs : Infinity
++    let busy = true
++    // A broken soft-state probe must never break or delay the hard timer.
++    try { busy = this.externalBusy() } catch {}
++    const soft = !this.softStopping && !this.softBlocked && this.jobs === 0 && this.requests === 0 && !busy
++      ? this.quiet + this.settings.softMs : Infinity
++    if (!Number.isFinite(Math.min(hard, soft))) return
++    // Hard wins equal deadlines, and never waits for jobs or the soft timer.
++    return hard <= soft
++      ? { kind: "hard", after: Math.max(0, hard - this.now()) }
++      : { kind: "soft", after: Math.max(0, soft - this.now()) }
++  }
++
++  private once(fn: () => void) {
++    let done = false
++    return () => {
++      if (done) return
++      done = true
++      fn()
++    }
++  }
++}
++
++// Reconnect may wait here after an intentional sleep. Only user input wakes
++// it; SSE retries do not authorize spawning a replacement server.
++export class WakeGate {
++  private allowed: number
++  private pending = new Set<() => void>()
++  private sleptAfter: (time: number) => boolean
++  private now: () => number
++  constructor(sleptAfter: (time: number) => boolean, now = () => Date.now()) {
++    this.sleptAfter = sleptAfter
++    this.now = now
++    this.allowed = now()
++  }
++  wake() {
++    this.allowed = this.now()
++    for (const resolve of [...this.pending]) resolve()
++  }
++  wait(signal: AbortSignal): Promise<void> {
++    if (signal.aborted) return Promise.reject(signal.reason)
++    if (!this.sleptAfter(this.allowed)) return Promise.resolve()
++    return new Promise((resolve, reject) => {
++      const done = () => { cleanup(); resolve() }
++      const abort = () => { cleanup(); reject(signal.reason) }
++      const cleanup = () => {
++        this.pending.delete(done)
++        signal.removeEventListener("abort", abort)
++      }
++      this.pending.add(done)
++      signal.addEventListener("abort", abort, { once: true })
++    })
++  }
 +}
 diff --git a/packages/util/src/personalize-observability.ts b/packages/util/src/personalize-observability.ts
 new file mode 100644
