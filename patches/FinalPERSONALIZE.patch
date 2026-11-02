@@ -421,10 +421,10 @@ index 0000000000000000000000000000000000000000..3d6c103a8695421451d4ae88547c38a2
 +})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..e2ed71f92217b854898665b536aea24707bde4e8
+index 0000000000000000000000000000000000000000..95e73d27bc59375e52937832d530cf8cf6661884
 --- /dev/null
 +++ b/.personalize/manifest.json
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,21 @@
 +{
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
@@ -441,6 +441,7 @@ index 0000000000000000000000000000000000000000..e2ed71f92217b854898665b536aea247
 +    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
 +    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
 +    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
++    { "target": "packages/server/src/handlers/event.ts", "factory": "packages/server/src/personalize/event.ts", "exports": ["EventHandler"] },
 +    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
 +    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
 +  ]
@@ -1911,47 +1912,232 @@ index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22
 +    expect(errors).toEqual([])
 +  })
 +})
+diff --git a/packages/server/src/personalize/event.ts b/packages/server/src/personalize/event.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e1c10a941bccbdb2fcb48d2f81ff34cf4e9c75b
+--- /dev/null
++++ b/packages/server/src/personalize/event.ts
+@@ -0,0 +1,58 @@
++import { Event } from "@opencode/schema/event"
++import { Effect, Stream } from "effect"
++import { HttpServerResponse } from "effect/http"
++import { HttpApiBuilder } from "effect/http-api"
++import { Api } from "../api"
++import { EventFeed } from "../event-feed"
++import { noteSSE } from "./idle-state"
++
++// ============================================================================
++// PERSONALIZATION (deltav11) — SSE handler with idle-reaper activity.
++// Identical to stock handlers/event.ts plus noteSSE() at subscribe time and
++// on every 15s heartbeat. A live SSE client keeps the background service
++// alive; a dead one stops heartbeating, so the idle reaper collects it after
++// OPENCODE_SERVICE_IDLE_MS (default 30_000). The stock module is referenced
++// only in the type position below — erased at build, no runtime cycle.
++// ============================================================================
++
++export function decorate(stock: typeof import("../handlers/event")) {
++  const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers) =>
++    Effect.gen(function* () {
++      const feed = yield* EventFeed.Service
++      return handlers.handleRaw("event.subscribe", (ctx) =>
++        Effect.gen(function* () {
++          noteSSE()
++          const connected = {
++            id: Event.ID.create(),
++            type: "server.connected",
++            data: {},
++          } as const
++          const output = Stream.unwrap(
++            feed
++              .subscribe(ctx.query.types)
++              .pipe(Effect.map((live) => Stream.make(EventFeed.frame(connected)).pipe(Stream.concat(live)))),
++          )
++          const heartbeat = Stream.tick("15 seconds").pipe(
++            Stream.map(() => {
++              noteSSE()
++              return ": heartbeat\n\n"
++            }),
++          )
++          return HttpServerResponse.stream(
++            output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }), Stream.encodeText),
++            {
++              contentType: "text/event-stream",
++              headers: {
++                "Cache-Control": "no-cache, no-transform",
++                "X-Accel-Buffering": "no",
++                "X-Content-Type-Options": "nosniff",
++              },
++            },
++          )
++        }),
++      )
++    }),
++  ) as typeof stock.EventHandler
++
++  return { EventHandler }
++}
+diff --git a/packages/server/src/personalize/idle-state.ts b/packages/server/src/personalize/idle-state.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..514d8545367bc1b33180d4bc5e1c4f0572c51164
+--- /dev/null
++++ b/packages/server/src/personalize/idle-state.ts
+@@ -0,0 +1,63 @@
++// ============================================================================
++// PERSONALIZATION (deltav11) — idle reaper shared state.
++// The background service must be async, not persistent-infinite: it stays
++// alive while clients are attached (any HTTP request, any live SSE stream)
++// and stops itself after OPENCODE_SERVICE_IDLE_MS (default 30_000, 0 = off)
++// with no client activity, via the same graceful shutdown path `service stop`
++// uses (latch open -> finalizers -> registration cleanup -> process exit).
++//
++// Shared mutable state: imported by the process wrapper (request tracking +
++// watchdog arming, service mode only) and the event-handler wrapper (SSE
++// heartbeat tracking). Zero imports, pure logic: unit-drilled directly.
++// The watchdog itself is one setInterval — it spawns no processes and
++// creates no persistence of any kind.
++// ============================================================================
++
++const state = {
++  lastRequest: Date.now(),
++  lastSSE: Date.now(),
++}
++
++export function noteRequest(): void {
++  state.lastRequest = Date.now()
++}
++
++export function noteSSE(): void {
++  state.lastSSE = Date.now()
++}
++
++export function lastActivity(): number {
++  return Math.max(state.lastRequest, state.lastSSE)
++}
++
++export function readIdleMs(): number {
++  const raw = process.env.OPENCODE_SERVICE_IDLE_MS
++  if (raw === undefined || raw.trim() === "") return 30_000
++  const value = Number(raw)
++  return Number.isFinite(value) && value >= 0 ? value : 30_000
++}
++
++/**
++ * Arm the idle watchdog for a service-mode server. `fire` triggers graceful
++ * shutdown. Returns a disarm function the lifecycle cleanup calls when the
++ * service stops for any other reason, so the watchdog never outlives the
++ * server it guards.
++ */
++export function armIdleWatchdog(fire: () => void): () => void {
++  const idleMs = readIdleMs()
++  if (idleMs <= 0) return () => {}
++  const timer = setInterval(() => {
++    const idleFor = Date.now() - lastActivity()
++    if (idleFor >= idleMs) {
++      clearInterval(timer)
++      console.error(
++        `[personalize] idle-reaper: no client activity for ${Math.round(idleFor / 1000)}s ` +
++          `(limit ${Math.round(idleMs / 1000)}s, OPENCODE_SERVICE_IDLE_MS) - stopping background service`,
++      )
++      fire()
++    }
++  }, 1_000)
++  const unref = (timer as { unref?: () => void }).unref
++  if (typeof unref === "function") unref.call(timer)
++  return () => clearInterval(timer)
++}
 diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fec1da32d0591eb608e53e12ecf4153036946e40
+index 0000000000000000000000000000000000000000..3badabea6a3abfbeac0c1d6a1767511b608f3be7
 --- /dev/null
 +++ b/packages/server/src/personalize/process.ts
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,89 @@
 +import os from "node:os"
 +import path from "node:path"
 +import { Effect } from "effect"
 +import { Flock } from "@opencode/util/flock"
 +import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++import { armIdleWatchdog, noteRequest } from "./idle-state"
 +
++// Boot-serialization start (Flock) with optional idle reaping for service mode.
++// Every argument is forwarded; nothing is dropped (see the registration lesson
++// in the 2026-11-02 note). The reaper only arms when `lifecycle` is present —
++// exactly the condition stock uses to distinguish the background service from
++// a foreground `opencode serve` — and it spawns nothing: one unref'd interval
++// that calls the stock shutdown effect when no request and no live SSE stream
++// has been seen for OPENCODE_SERVICE_IDLE_MS (default 30_000, 0 = off).
 +export function decorate(stock: typeof import("../process")) {
-+  // Forward every argument. Upstream's `start(options, lifecycle?, transform?,
-+  // remoteURLs?)` registers the service through `lifecycle.onListen`; binding
-+  // only `options` here dropped the registration callback, so spawned service
-+  // contenders bound the port but never registered — their CLIs timed out and
-+  // left detached port-squatting zombies behind ("Managed service port ...
-+  // already in use", no instance ever becoming the host).
-+  const start: typeof stock.start = (options, ...rest) => Effect.acquireUseRelease(
-+    Effect.promise((signal) =>
-+      Flock.acquire("service-bootstrap", {
-+        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
-+      }).then((lease) => {
-+        // Flock refuses a second release (metadata is deleted on the first);
-+        // the boot-service release and the finalizer share one guarded
-+        // release so whichever fires first wins and the other no-ops.
-+        let done = false
-+        const release = () => {
-+          if (done) return Promise.resolve()
-+          done = true
-+          return lease.release()
-+        }
-+        return { release }
-+      })
-+    ),
-+    (boot) => stock.start(options, ...rest).pipe(Effect.provideService(PersonalizeBoot, {
-+      retry: Effect.void, release: Effect.promise(() => boot.release()),
-+    })),
-+    (boot) => Effect.promise(() => boot.release()),
-+  )
++  const start: typeof stock.start = (options: never, ...rest: unknown[]) => {
++    const [lifecycle, transform, remoteURLs] = rest as [
++      { onListen?: unknown } | undefined,
++      ((app: never) => never) | undefined,
++      unknown,
++    ]
++
++    if (lifecycle === undefined || lifecycle === null || typeof lifecycle.onListen !== "function") {
++      // Foreground or future-shaped: stock behavior, untouched, all args forwarded.
++      return baseStart(options, rest)
++    }
++
++    // Service mode: track every HTTP request (the transform wraps stock's
++    // dispatch app — dispatch runs for every request, including pre-ready
++    // /api/info polls, so boot-polling clients count as activity) and arm
++    // the idle watchdog on the lifecycle's shutdown latch.
++    const trackedLifecycle = {
++      ...lifecycle,
++      onListen: (address: unknown, shutdown: unknown) =>
++        (lifecycle.onListen as (a: unknown, s: unknown) => Effect.Effect<unknown>)(address, shutdown).pipe(
++          Effect.map((cleanup: unknown) => {
++            const fire = () => {
++              const effect = shutdown as Effect.Effect<void>
++              void Effect.runPromise(effect).catch(() => {})
++            }
++            const disarm = armIdleWatchdog(fire)
++            // Disarm when the server stops for any reason, so the watchdog
++            // never outlives the lifecycle cleanup (registration eviction).
++            if (cleanup !== null && cleanup !== undefined && typeof (cleanup as { pipe?: unknown }).pipe === "function") {
++              return (cleanup as Effect.Effect<void>).pipe(Effect.ensuring(Effect.sync(disarm)))
++            }
++            return cleanup
++          }),
++        ) as never,
++    } as never
++
++    const trackedTransform = (app: never) => {
++      const upstream = transform === undefined || transform === null ? app : transform(app)
++      return (upstream as Effect.Effect<never>).pipe(Effect.tap(() => Effect.sync(noteRequest))) as never
++    }
++
++    return baseStart(options, [trackedLifecycle, trackedTransform, remoteURLs, ...rest.slice(3)])
++  }
++
++  // The original boot-serialized body: Flock-acquire, run stock.start with all
++  // forwarded arguments, release. Factored out so both branches share it.
++  const baseStart = (options: never, args: unknown[]) =>
++    Effect.acquireUseRelease(
++      Effect.promise((signal) =>
++        Flock.acquire("service-bootstrap", {
++          dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++        }).then((lease) => {
++          // Flock refuses a second release (metadata is deleted on the first);
++          // the boot-service release and the finalizer share one guarded
++          // release so whichever fires first wins and the other no-ops.
++          let done = false
++          const release = () => {
++            if (done) return Promise.resolve()
++            done = true
++            return lease.release()
++          }
++          return { release }
++        })
++      ),
++      (boot) => (stock.start as (o: never, ...a: unknown[]) => Effect.Effect<unknown>)(options, ...args).pipe(
++        Effect.provideService(PersonalizeBoot, {
++          retry: Effect.void, release: Effect.promise(() => boot.release()),
++        }),
++      ),
++      (boot) => Effect.promise(() => boot.release()),
++    ) as never
++
 +  return { start }
 +}
 diff --git a/packages/server/src/personalize/service-status.ts b/packages/server/src/personalize/service-status.ts
