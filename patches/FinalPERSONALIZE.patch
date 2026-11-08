@@ -421,10 +421,10 @@ index 0000000000000000000000000000000000000000..3d6c103a8695421451d4ae88547c38a2
 +})
 diff --git a/.personalize/lifetime-effect.test.mjs b/.personalize/lifetime-effect.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..77b21bdd6789593c43572856c3805cc0ec067548
+index 0000000000000000000000000000000000000000..d18c25fb18e844295f92794b9593f41629bdc7c5
 --- /dev/null
 +++ b/.personalize/lifetime-effect.test.mjs
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,205 @@
 +import assert from "node:assert/strict"
 +import fs from "node:fs"
 +import path from "node:path"
@@ -544,6 +544,31 @@ index 0000000000000000000000000000000000000000..77b21bdd6789593c43572856c3805cc0
 +  assert.equal(request.method, "GET")
 +})
 +
++test("watchdog cancels reconnect grace and reschedules after final disconnect", () => {
++  let now = 0, timer, soft = 0, hard = 0
++  const policy = new Lifetime({ hardMs: 1000, softMs: 100 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping() {}, evictSelf() {} },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => (timer = { fn, ms, unref() {} }),
++    clearTimeout: (handle) => { if (timer === handle) timer = undefined }, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => soft++, () => hard++)
++  policy.start()
++  const close = policy.connect()
++  assert.equal(timer, undefined)
++  now = 3000; close()
++  assert.equal(timer.ms, 500)
++  now = 3499; const reconnect = policy.connect()
++  assert.equal(timer, undefined)
++  now = 3600; reconnect()
++  assert.equal(timer.ms, 500)
++  now = 4100; timer.fn()
++  assert.equal(soft, 1); assert.equal(hard, 0)
++  disarm()
++})
++
 +test("deadline timer invokes hard kill despite work", () => {
 +  let now = 0, callback, delay, soft = 0, hard = 0, marked
 +  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
@@ -607,10 +632,10 @@ index 0000000000000000000000000000000000000000..77b21bdd6789593c43572856c3805cc0
 +})
 diff --git a/.personalize/lifetime.test.mjs b/.personalize/lifetime.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3fcb0de92128ce2b6657d386e6ec08281349969a
+index 0000000000000000000000000000000000000000..d3da95e10bd09fbd15b8986406a03e20b9798340
 --- /dev/null
 +++ b/.personalize/lifetime.test.mjs
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,176 @@
 +import assert from "node:assert/strict"
 +import { test } from "node:test"
 +import { Lifetime, WakeGate, defaults, duration } from "../packages/util/src/personalize-lifetime.ts"
@@ -661,7 +686,7 @@ index 0000000000000000000000000000000000000000..3fcb0de92128ce2b6657d386e6ec0828
 +  at(5000); tool()
 +  assert.equal(policy.next(), undefined, "an idle open window keeps the service alive")
 +  at(6000); close()
-+  assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
 +})
 +
 +test("new work cancels and completion resets the soft countdown", () => {
@@ -670,7 +695,55 @@ index 0000000000000000000000000000000000000000..3fcb0de92128ce2b6657d386e6ec0828
 +  at(900); const done = policy.work()
 +  at(5000); assert.equal(policy.next(), undefined)
 +  done(); close()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++})
++
++test("idle disconnect gets half the hard timeout to reconnect", () => {
++  const { policy, at } = clock()
++  const close = policy.connect()
++  at(30000); close()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++  at(39999); assert.deepEqual(policy.next(), { kind: "soft", after: 1 })
++  const reconnect = policy.connect()
++  at(40001); assert.equal(policy.next(), undefined)
++  reconnect()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++})
++
++test("grace starts only when the last window disconnects", () => {
++  const { policy, at } = clock({ hardMs: 12000, softMs: 1000 })
++  const first = policy.connect(), second = policy.connect()
++  at(30000); first()
++  assert.equal(policy.next(), undefined)
++  at(31000); second()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 6000 })
++  at(37000); assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
++})
++
++test("active work blocks soft shutdown but not the original hard deadline", () => {
++  const { policy, at } = clock({ hardMs: 12000, softMs: 1000 })
++  const close = policy.connect(), done = policy.work()
++  at(30000); close()
++  assert.deepEqual(policy.next(), { kind: "hard", after: 12000 })
++  at(37000); done()
 +  assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
++  const again = policy.work()
++  at(42000); assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++  again()
++})
++
++test("half-hard grace preserves longer soft deadlines and hard priority", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 750 })
++  assert.deepEqual(policy.next(), { kind: "soft", after: 750 })
++  at(100); policy.configure({ hardMs: 1000, softMs: 1000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++  at(200); policy.configure({ hardMs: 1000, softMs: 2000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++})
++
++test("startup and odd millisecond hard timeouts get the half-hard minimum", () => {
++  const { policy } = clock({ hardMs: 1001, softMs: 100 })
++  assert.deepEqual(policy.next(), { kind: "soft", after: 500.5 })
 +})
 +
 +test("a window reconnect cancels the hard countdown without touching soft work state", () => {
@@ -773,10 +846,10 @@ index 0000000000000000000000000000000000000000..5cca274bd0463ca0e2ab75e68c4328b2
 +}
 diff --git a/.personalize/output.test.mjs b/.personalize/output.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..684e4d45fffa1b3488ff3c0c9c5e3c8e11437a08
+index 0000000000000000000000000000000000000000..1b7be6d8f94d76b49a0d7c843b3823c66df64256
 --- /dev/null
 +++ b/.personalize/output.test.mjs
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,162 @@
 +import assert from "node:assert/strict"
 +import { test } from "node:test"
 +import { personalizeSystem } from "../packages/core/src/personalize/model-request.ts"
@@ -806,7 +879,7 @@ index 0000000000000000000000000000000000000000..684e4d45fffa1b3488ff3c0c9c5e3c8e
 +  const model = LanguageModel.make({ id: "gpt-test", provider: "openai", route: {
 +    id: "test", endpoint: { baseURL: "https://api.openai.com/v1" },
 +  }, options: { providerOptions: { reasoningEffort: effort } } })
-+  return { model, system: [], messages: [], tools: [], ...patch }
++  return { model, system: [], messages: [], tools: [], maxTokens: 128000, ...patch }
 +}
 +const resolved = { ref: {}, limit: { context: 262144, output: 128000 } }
 +const call = (id = "write-1") => ({ type: "tool-call", id, name: "write", input: { content: "echo ok" } })
@@ -841,6 +914,12 @@ index 0000000000000000000000000000000000000000..684e4d45fffa1b3488ff3c0c9c5e3c8e
 +  assert.equal(capRequest(request(), { ...resolved, limit: { ...resolved.limit, output: 8192 } }).maxTokens, 8192)
 +  assert.equal(capRequest(request(), resolved, resolved.limit.context - 2024).maxTokens, 1000)
 +  assert.equal(capRequest(request("max"), resolved).maxTokens, 100000)
++})
++
++test("a request without an output limit stays without one (ChatGPT/Codex rejects any)", () => {
++  const capped = capRequest(request("xhigh", { maxTokens: undefined }), resolved)
++  assert.equal(Object.hasOwn(capped, "maxTokens") && capped.maxTokens !== undefined, false)
++  assert.equal(responseBody(capped).max_output_tokens, undefined)
 +})
 +
 +test("native HTTP overlays cannot increase the cap or mutate user settings", () => {
@@ -1565,10 +1644,10 @@ index 0000000000000000000000000000000000000000..e3ccab058d6dc9f79f6dbe0902bb7e7b
 +}
 diff --git a/packages/core/src/personalize/output-request.ts b/packages/core/src/personalize/output-request.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8f62943133b95822ec6ab653e720df38b3366280
+index 0000000000000000000000000000000000000000..86b93bbdd95ad0c6c99982d74320f6d728ac14e1
 --- /dev/null
 +++ b/packages/core/src/personalize/output-request.ts
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,41 @@
 +import type { LLMRequest } from "@opencode/ai/effect"
 +import type { Resolved } from "../model-resolver"
 +import { capBody, outputCap, outputEffort } from "./output-policy"
@@ -1600,10 +1679,13 @@ index 0000000000000000000000000000000000000000..8f62943133b95822ec6ab653e720df38
 +  const effort = outputEffort(body, outputEffort(providerOptions, model.ref.variant))
 +  const context = model.limit.context
 +  const room = context > 0 ? Math.max(1, context - (inputTokens ?? 0) - 1024) : undefined
-+  const maxTokens = outputCap(effort, request.maxTokens ?? options?.maxTokens, model.limit.output, room)
++  const requested = request.maxTokens ?? options?.maxTokens
++  const maxTokens = outputCap(effort, requested, model.limit.output, room)
 +  return {
 +    ...request,
-+    maxTokens,
++    // Only lower a limit the request already carries. Stock deliberately omits
++    // it for some routes (the ChatGPT/Codex backend rejects any output limit).
++    ...(requested === undefined ? {} : { maxTokens }),
 +    ...(body ? { http: { ...request.http, body: capBody(body, maxTokens) } } : {}),
 +  }
 +}
@@ -3155,7 +3237,7 @@ index 0000000000000000000000000000000000000000..364aaed02572b3537188efaf6997c27c
 +}
 diff --git a/packages/util/src/personalize-lifetime.ts b/packages/util/src/personalize-lifetime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d270672f84fe3cc311100b35c2f07cd751b92a1a
+index 0000000000000000000000000000000000000000..9c028b081902a5a4b504535de0f64187f88a9215
 --- /dev/null
 +++ b/packages/util/src/personalize-lifetime.ts
 @@ -0,0 +1,124 @@
@@ -3234,7 +3316,7 @@ index 0000000000000000000000000000000000000000..d270672f84fe3cc311100b35c2f07cd7
 +    // A broken soft-state probe must never break or delay the hard timer.
 +    try { busy = this.externalBusy() } catch {}
 +    const soft = this.clients === 0 && !this.softStopping && !this.softBlocked && this.jobs === 0 && this.requests === 0 && !busy
-+      ? this.quiet + this.settings.softMs : Infinity
++      ? Math.max(this.quiet + this.settings.softMs, this.disconnected + this.settings.hardMs / 2) : Infinity
 +    if (!Number.isFinite(Math.min(hard, soft))) return
 +    // Hard wins equal deadlines, and never waits for jobs or the soft timer.
 +    return hard <= soft

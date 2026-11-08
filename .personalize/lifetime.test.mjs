@@ -48,7 +48,7 @@ test("soft never stops the service while a window stays connected", () => {
   at(5000); tool()
   assert.equal(policy.next(), undefined, "an idle open window keeps the service alive")
   at(6000); close()
-  assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
+  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
 })
 
 test("new work cancels and completion resets the soft countdown", () => {
@@ -57,7 +57,55 @@ test("new work cancels and completion resets the soft countdown", () => {
   at(900); const done = policy.work()
   at(5000); assert.equal(policy.next(), undefined)
   done(); close()
+  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
+})
+
+test("idle disconnect gets half the hard timeout to reconnect", () => {
+  const { policy, at } = clock()
+  const close = policy.connect()
+  at(30000); close()
+  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
+  at(39999); assert.deepEqual(policy.next(), { kind: "soft", after: 1 })
+  const reconnect = policy.connect()
+  at(40001); assert.equal(policy.next(), undefined)
+  reconnect()
+  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
+})
+
+test("grace starts only when the last window disconnects", () => {
+  const { policy, at } = clock({ hardMs: 12000, softMs: 1000 })
+  const first = policy.connect(), second = policy.connect()
+  at(30000); first()
+  assert.equal(policy.next(), undefined)
+  at(31000); second()
+  assert.deepEqual(policy.next(), { kind: "soft", after: 6000 })
+  at(37000); assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
+})
+
+test("active work blocks soft shutdown but not the original hard deadline", () => {
+  const { policy, at } = clock({ hardMs: 12000, softMs: 1000 })
+  const close = policy.connect(), done = policy.work()
+  at(30000); close()
+  assert.deepEqual(policy.next(), { kind: "hard", after: 12000 })
+  at(37000); done()
   assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
+  const again = policy.work()
+  at(42000); assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
+  again()
+})
+
+test("half-hard grace preserves longer soft deadlines and hard priority", () => {
+  const { policy, at } = clock({ hardMs: 1000, softMs: 750 })
+  assert.deepEqual(policy.next(), { kind: "soft", after: 750 })
+  at(100); policy.configure({ hardMs: 1000, softMs: 1000 })
+  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
+  at(200); policy.configure({ hardMs: 1000, softMs: 2000 })
+  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
+})
+
+test("startup and odd millisecond hard timeouts get the half-hard minimum", () => {
+  const { policy } = clock({ hardMs: 1001, softMs: 100 })
+  assert.deepEqual(policy.next(), { kind: "soft", after: 500.5 })
 })
 
 test("a window reconnect cancels the hard countdown without touching soft work state", () => {

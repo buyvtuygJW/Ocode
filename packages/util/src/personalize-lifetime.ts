@@ -73,7 +73,7 @@ export class Lifetime {
     // A broken soft-state probe must never break or delay the hard timer.
     try { busy = this.externalBusy() } catch {}
     const soft = this.clients === 0 && !this.softStopping && !this.softBlocked && this.jobs === 0 && this.requests === 0 && !busy
-      ? this.quiet + this.settings.softMs : Infinity
+      ? Math.max(this.quiet + this.settings.softMs, this.disconnected + this.settings.hardMs / 2) : Infinity
     if (!Number.isFinite(Math.min(hard, soft))) return
     // Hard wins equal deadlines, and never waits for jobs or the soft timer.
     return hard <= soft

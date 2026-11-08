@@ -117,6 +117,31 @@ test("native commands show warnings, query status, and update without model/tool
   assert.equal(request.method, "GET")
 })
 
+test("watchdog cancels reconnect grace and reschedules after final disconnect", () => {
+  let now = 0, timer, soft = 0, hard = 0
+  const policy = new Lifetime({ hardMs: 1000, softMs: 100 }, () => now)
+  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
+    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
+    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping() {}, evictSelf() {} },
+  }, ["armIdleWatchdog"], {
+    setTimeout: (fn, ms) => (timer = { fn, ms, unref() {} }),
+    clearTimeout: (handle) => { if (timer === handle) timer = undefined }, console: { error() {} },
+  })
+  const disarm = armIdleWatchdog(() => soft++, () => hard++)
+  policy.start()
+  const close = policy.connect()
+  assert.equal(timer, undefined)
+  now = 3000; close()
+  assert.equal(timer.ms, 500)
+  now = 3499; const reconnect = policy.connect()
+  assert.equal(timer, undefined)
+  now = 3600; reconnect()
+  assert.equal(timer.ms, 500)
+  now = 4100; timer.fn()
+  assert.equal(soft, 1); assert.equal(hard, 0)
+  disarm()
+})
+
 test("deadline timer invokes hard kill despite work", () => {
   let now = 0, callback, delay, soft = 0, hard = 0, marked
   const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
