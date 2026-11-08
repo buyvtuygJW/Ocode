@@ -652,24 +652,24 @@ index 0000000000000000000000000000000000000000..3fcb0de92128ce2b6657d386e6ec0828
 +  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
 +})
 +
-+test("soft waits for every task and works while a window stays connected", () => {
++test("soft never stops the service while a window stays connected", () => {
 +  const { policy, at } = clock({ hardMs: 20000, softMs: 1000 })
-+  policy.connect()
++  const close = policy.connect()
 +  const parent = policy.work(), child = policy.work(), tool = policy.work()
 +  at(4000); parent(); child()
 +  assert.equal(policy.next(), undefined)
 +  at(5000); tool()
-+  assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
-+  at(6000)
++  assert.equal(policy.next(), undefined, "an idle open window keeps the service alive")
++  at(6000); close()
 +  assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
 +})
 +
 +test("new work cancels and completion resets the soft countdown", () => {
 +  const { policy, at } = clock({ hardMs: 20000, softMs: 1000 })
-+  policy.connect()
++  const close = policy.connect()
 +  at(900); const done = policy.work()
 +  at(5000); assert.equal(policy.next(), undefined)
-+  done()
++  done(); close()
 +  assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
 +})
 +
@@ -2840,7 +2840,7 @@ index 0000000000000000000000000000000000000000..d270672f84fe3cc311100b35c2f07cd7
 +    let busy = true
 +    // A broken soft-state probe must never break or delay the hard timer.
 +    try { busy = this.externalBusy() } catch {}
-+    const soft = !this.softStopping && !this.softBlocked && this.jobs === 0 && this.requests === 0 && !busy
++    const soft = this.clients === 0 && !this.softStopping && !this.softBlocked && this.jobs === 0 && this.requests === 0 && !busy
 +      ? this.quiet + this.settings.softMs : Infinity
 +    if (!Number.isFinite(Math.min(hard, soft))) return
 +    // Hard wins equal deadlines, and never waits for jobs or the soft timer.
