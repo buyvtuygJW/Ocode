@@ -1,0 +1,160 @@
+diff --git a/.personalize/X.json b/.personalize/X.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b67f588c350cf1b3355d573386e1fa62ced966a
+--- /dev/null
++++ b/.personalize/X.json
+@@ -0,0 +1,8 @@
++{
++  "modules": [
++    { "target": "packages/tui/src/config/keybind.ts", "factory": "packages/tui/src/personalize/keybind.ts", "exports": ["Definitions", "Descriptions", "KeybindOverrides", "parse", "unknownKeys"] },
++    { "target": "packages/tui/src/context/theme.tsx", "factory": "packages/tui/src/personalize/theme.ts", "exports": ["useThemes", "useTheme"] },
++    { "target": "packages/tui/src/context/keymap.tsx", "factory": "packages/tui/src/personalize/keymap.ts", "exports": ["Keymap"] },
++    { "target": "packages/tui/src/ui/dialog-select.tsx", "factory": "packages/tui/src/personalize/dialog-select.ts", "exports": ["DialogSelect"] }
++  ]
++}
+diff --git a/packages/tui/src/personalize/dialog-select.ts b/packages/tui/src/personalize/dialog-select.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..99a68c2714f5e69f6c94cd5c2ecbd27487c873bb
+--- /dev/null
++++ b/packages/tui/src/personalize/dialog-select.ts
+@@ -0,0 +1,23 @@
++import { InputRenderable, type KeyBinding } from "@opentui/core"
++import { extend } from "@opentui/solid"
++import { createComponent, createContext, useContext } from "solid-js"
++
++const Filter = createContext(false)
++class FilterInput extends InputRenderable {
++  constructor(...[renderer, options]: ConstructorParameters<typeof InputRenderable>) {
++    super(renderer, useContext(Filter) ? { ...options, keyBindings: [
++      ...(options.keyBindings ?? []),
++      { name: "a", ctrl: true, action: "opencode:pass-through" },
++    ] as unknown as KeyBinding[] } : options)
++  }
++}
++// Public Solid extension API; non-dialog input behavior is left byte-identical.
++extend({ input: FilterInput })
++
++export function decorate(stock: typeof import("../ui/dialog-select")) {
++  const DialogSelect: typeof stock.DialogSelect = (props) => createComponent(Filter.Provider, {
++    value: true,
++    get children() { return createComponent(stock.DialogSelect, props) },
++  })
++  return { DialogSelect }
++}
+diff --git a/packages/tui/src/personalize/keybind.ts b/packages/tui/src/personalize/keybind.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..06fb194f15bc64f5941c16e51e993b213d86267b
+--- /dev/null
++++ b/packages/tui/src/personalize/keybind.ts
+@@ -0,0 +1,21 @@
++import { Schema } from "effect"
++
++export function decorate(stock: typeof import("../config/keybind")) {
++  // Definitions are an explicitly exported data table, not an ESM binding rewrite.
++  // The original parse/defaultValue functions keep reading this same table.
++  Object.assign(stock.Definitions, { "theme.transparent": {
++    default: "alt+t", description: "Toggle transparency",
++  } })
++  Object.assign(stock.Definitions["model.dialog.provider"], { default: "alt+p,ctrl+a" })
++  Object.assign(stock.Descriptions, { "theme.transparent": "Toggle transparency" })
++  const unknownKeys: typeof stock.unknownKeys = (value) => stock.unknownKeys(value).filter((name) => name !== "theme.transparent")
++  const KeybindOverrides = Schema.Struct({ ...stock.KeybindOverrides.fields,
++    "theme.transparent": Schema.optional(stock.BindingValueSchema).annotate({ description: "Toggle transparency" }),
++  })
++  const decode = Schema.decodeUnknownSync(stock.BindingValueSchema)
++  const parse: typeof stock.parse = (input) => {
++    const { ["theme.transparent"]: toggle, ...rest } = input as typeof input & { "theme.transparent"?: unknown }
++    return { ...stock.parse(rest), "theme.transparent": decode(toggle ?? "alt+t") }
++  }
++  return { Definitions: stock.Definitions, Descriptions: stock.Descriptions, KeybindOverrides, parse, unknownKeys }
++}
+diff --git a/packages/tui/src/personalize/keymap.ts b/packages/tui/src/personalize/keymap.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8be4e343725a9e9b3f6cba3855376064428d8a8
+--- /dev/null
++++ b/packages/tui/src/personalize/keymap.ts
+@@ -0,0 +1,19 @@
++import { useThemes } from "../context/theme"
++
++export function decorate(stock: typeof import("../context/keymap")) {
++  const createLayer: typeof stock.Keymap.createLayer = (input) => {
++    // The app registers its global command-palette layer inside both providers.
++    // No edits to its private command list or component body are necessary.
++    let theme: ReturnType<typeof useThemes> & { toggleTransparent?: () => void }
++    try { theme = useThemes() } catch { return stock.Keymap.createLayer(input) }
++    return stock.Keymap.createLayer(() => {
++      const layer = input()
++      if (layer.mode !== "global" || !layer.commands?.some((item) => item.id === stock.COMMAND_PALETTE_COMMAND)) return layer
++      return { ...layer, commands: [...layer.commands, {
++        id: "theme.transparent", title: "Toggle transparency", group: "System", palette: true,
++        run: () => theme.toggleTransparent?.(),
++      }], bindings: [...(layer.bindings ?? []), "theme.transparent"] }
++    })
++  }
++  return { Keymap: { ...stock.Keymap, createLayer } }
++}
+diff --git a/packages/tui/src/personalize/theme.ts b/packages/tui/src/personalize/theme.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..342ee297f7097f40992fdd4db8f1f5691d2e66da
+--- /dev/null
++++ b/packages/tui/src/personalize/theme.ts
+@@ -0,0 +1,59 @@
++import { RGBA } from "@opentui/core"
++import { useRenderer } from "@opentui/solid"
++import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
++import { createComponentTheme } from "../theme/component"
++import { useStorageOptional } from "../context/storage"
++
++type Themes = ReturnType<typeof import("../context/theme").useThemes>
++const facades = new WeakMap<Themes, ReturnType<typeof facade>>()
++const NONE = RGBA.fromInts(0, 0, 0, 0)
++
++function facade(source: Themes) {
++  const renderer = useRenderer()
++  const storage = useStorageOptional()?.store<{ on?: boolean }>("theme-transparent", { initial: {} })
++  const [transparent, setTransparent] = createSignal(storage?.[0].on === true)
++  const tokens = createMemo(() => transparent()
++    ? { ...source.currentTokens(), background: { ...source.currentTokens().background, base: NONE } }
++    : source.currentTokens())
++  createEffect(() => renderer.setBackgroundColor(tokens().background.base))
++  return { ...source, currentTokens: tokens, current: createComponentTheme(tokens), transparent,
++    toggleTransparent() {
++      const next = !transparent()
++      setTransparent(next)
++      void storage?.[1]((draft) => { draft.on = next }).catch(() => {})
++    },
++  }
++}
++
++export function decorate(stock: typeof import("../context/theme")) {
++  const useThemes = () => {
++    const source = stock.useThemes()
++    const existing = facades.get(source)
++    if (existing) return existing
++    const value = facade(source)
++    facades.set(source, value)
++    onCleanup(() => facades.delete(source))
++    return value
++  }
++  const useTheme: typeof stock.useTheme = () => {
++    const theme = stock.useTheme()
++    const source = stock.useThemes()
++    const facade = useThemes()
++    // Retain the upstream ambient surface. Only aliases of the base background
++    // become transparent; explicit selection/diff/dialog backgrounds stay intact.
++    const cache = new WeakMap<object, object>()
++    const view = <T extends object>(value: T): T => {
++      const existing = cache.get(value)
++      if (existing) return existing as T
++      const wrapped = new Proxy(value, { get(target, key, receiver) {
++        const item = Reflect.get(target, key, receiver)
++        if (item instanceof RGBA) return facade.transparent() && item === source.currentTokens().background.base ? NONE : item
++        return item && typeof item === "object" ? view(item) : item
++      } })
++      cache.set(value, wrapped)
++      return wrapped
++    }
++    return view(theme)
++  }
++  return { useThemes, useTheme }
++}
