@@ -773,10 +773,10 @@ index 0000000000000000000000000000000000000000..5cca274bd0463ca0e2ab75e68c4328b2
 +}
 diff --git a/.personalize/output.test.mjs b/.personalize/output.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b7be6d8f94d76b49a0d7c843b3823c66df64256
+index 0000000000000000000000000000000000000000..684e4d45fffa1b3488ff3c0c9c5e3c8e11437a08
 --- /dev/null
 +++ b/.personalize/output.test.mjs
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,156 @@
 +import assert from "node:assert/strict"
 +import { test } from "node:test"
 +import { personalizeSystem } from "../packages/core/src/personalize/model-request.ts"
@@ -806,7 +806,7 @@ index 0000000000000000000000000000000000000000..1b7be6d8f94d76b49a0d7c843b3823c6
 +  const model = LanguageModel.make({ id: "gpt-test", provider: "openai", route: {
 +    id: "test", endpoint: { baseURL: "https://api.openai.com/v1" },
 +  }, options: { providerOptions: { reasoningEffort: effort } } })
-+  return { model, system: [], messages: [], tools: [], maxTokens: 128000, ...patch }
++  return { model, system: [], messages: [], tools: [], ...patch }
 +}
 +const resolved = { ref: {}, limit: { context: 262144, output: 128000 } }
 +const call = (id = "write-1") => ({ type: "tool-call", id, name: "write", input: { content: "echo ok" } })
@@ -841,12 +841,6 @@ index 0000000000000000000000000000000000000000..1b7be6d8f94d76b49a0d7c843b3823c6
 +  assert.equal(capRequest(request(), { ...resolved, limit: { ...resolved.limit, output: 8192 } }).maxTokens, 8192)
 +  assert.equal(capRequest(request(), resolved, resolved.limit.context - 2024).maxTokens, 1000)
 +  assert.equal(capRequest(request("max"), resolved).maxTokens, 100000)
-+})
-+
-+test("a request without an output limit stays without one (ChatGPT/Codex rejects any)", () => {
-+  const capped = capRequest(request("xhigh", { maxTokens: undefined }), resolved)
-+  assert.equal(Object.hasOwn(capped, "maxTokens") && capped.maxTokens !== undefined, false)
-+  assert.equal(responseBody(capped).max_output_tokens, undefined)
 +})
 +
 +test("native HTTP overlays cannot increase the cap or mutate user settings", () => {
@@ -1571,10 +1565,10 @@ index 0000000000000000000000000000000000000000..e3ccab058d6dc9f79f6dbe0902bb7e7b
 +}
 diff --git a/packages/core/src/personalize/output-request.ts b/packages/core/src/personalize/output-request.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..86b93bbdd95ad0c6c99982d74320f6d728ac14e1
+index 0000000000000000000000000000000000000000..8f62943133b95822ec6ab653e720df38b3366280
 --- /dev/null
 +++ b/packages/core/src/personalize/output-request.ts
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,38 @@
 +import type { LLMRequest } from "@opencode/ai/effect"
 +import type { Resolved } from "../model-resolver"
 +import { capBody, outputCap, outputEffort } from "./output-policy"
@@ -1606,13 +1600,10 @@ index 0000000000000000000000000000000000000000..86b93bbdd95ad0c6c99982d74320f6d7
 +  const effort = outputEffort(body, outputEffort(providerOptions, model.ref.variant))
 +  const context = model.limit.context
 +  const room = context > 0 ? Math.max(1, context - (inputTokens ?? 0) - 1024) : undefined
-+  const requested = request.maxTokens ?? options?.maxTokens
-+  const maxTokens = outputCap(effort, requested, model.limit.output, room)
++  const maxTokens = outputCap(effort, request.maxTokens ?? options?.maxTokens, model.limit.output, room)
 +  return {
 +    ...request,
-+    // Only lower a limit the request already carries. Stock deliberately omits
-+    // it for some routes (the ChatGPT/Codex backend rejects any output limit).
-+    ...(requested === undefined ? {} : { maxTokens }),
++    maxTokens,
 +    ...(body ? { http: { ...request.http, body: capBody(body, maxTokens) } } : {}),
 +  }
 +}
