@@ -1,8 +1,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const { repairText } = require('./repair-photon-patch.cjs');
+const { repairText, runWithRepair, relative } = require('./repair-photon-patch.cjs');
 
 const bad = "@@ -4509,7 +4510,8 @@\n      ;\n  };\n  \n-const path = require('path').join(__dirname, 'photon_rs_bg.wasm');\n+const path = process.env.OPENCODE_PHOTON_WASM_PATH || require('path').join(__dirname, 'photon_rs_bg.wasm');\n";
 const good = bad.replace('\n      ;\n  };\n  \n-', '\n     ;\n };\n \n-');
@@ -20,6 +21,26 @@ test('preserves CRLF and does not alter unknown patches', () => {
 
 test('rejects an ambiguous duplicate instead of guessing', () => {
   assert.throws(() => repairText(bad + bad), /duplicate known hunk/);
+});
+
+test('install sees repaired bytes and the upstream patch is restored on success and failure', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photon-repair-test-'));
+  const file = path.join(root, relative);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, bad);
+  const child = `const fs=require('fs');if(fs.readFileSync(${JSON.stringify(file)},'utf8')!==${JSON.stringify(good)})process.exit(91);process.exit(Number(process.argv[1]));`;
+  try {
+    for (const status of [0, 42]) {
+      assert.equal(runWithRepair(root, process.execPath, ['-e', child, String(status)]), status);
+      assert.equal(fs.readFileSync(file, 'utf8'), bad);
+    }
+    assert.throws(() => runWithRepair(root, 'missing-photon-test-command-do-not-create', []));
+    assert.equal(fs.readFileSync(file, 'utf8'), bad);
+  } finally {
+    fs.unlinkSync(file);
+    fs.rmdirSync(path.dirname(file));
+    fs.rmdirSync(root);
+  }
 });
 
 test('v11 patch delivers the same repair used by the tests', () => {

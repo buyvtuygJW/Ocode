@@ -435,11 +435,17 @@ jobs:
             #    shim-level decoration is enforced at build time by
             #    check-personalize-hooks.cjs + the PersonalizeBuild plugin, not here.
             local tests=() f found
-            for f in \
-              packages/core/test/session-context-decay.test.ts \
-              packages/core/test/session/content-guards.test.ts \
-              packages/core/test/personalize-legacy.test.ts \
-              packages/core/test/session-model-request-hooks.test.ts; do
+            local required=(
+              packages/core/test/session-context-decay.test.ts
+              packages/core/test/session/content-guards.test.ts
+              packages/core/test/session-model-request-hooks.test.ts
+            )
+            # This test is owned by optional FinalPersonalizeR, not the core patch.
+            # Require it when R is applied; do not require it after dropping R.
+            if [ "${APPLIED_RSI:-off}" = "on" ]; then
+              required+=(packages/core/test/personalize-legacy.test.ts)
+            fi
+            for f in "${required[@]}"; do
               if [ -f "$f" ]; then
                 tests+=("$f")
               else
@@ -482,7 +488,9 @@ jobs:
             flag="--skip-embed-web-ui"
             [ "$pkg" = "packages/cli" ] && flag="--skip-web-ui"
             echo "CLI package dir: $pkg (dist prefix: $prefix, web-ui flag: $flag)"
-            if ! bun run --cwd "$pkg" build -- "$flag"; then
+            # The build script may invoke bun install again; keep the same
+            # temporary dependency repair around that invocation too.
+            if ! node .personalize/repair-photon-patch.cjs --run . bun run --cwd "$pkg" build -- "$flag"; then
               echo "opencode build failed"
               return 1
             fi
@@ -579,14 +587,9 @@ jobs:
             echo "Patched commits:"
             git log --oneline -12
 
-            # Some fallback upstream refs carry a malformed photon 0.3.4 patch.
-            # Correct only its known whitespace defect before Bun reads it.
-            if ! node .personalize/repair-photon-patch.cjs .; then
-              echo "ERROR: photon dependency patch repair failed"
-              cd ..
-              return 30
-            fi
-            if ! bun install; then
+            # Repair the known photon hunk only during install; the helper
+            # restores the upstream patch byte-for-byte even if install fails.
+            if ! node .personalize/repair-photon-patch.cjs --run . bun install; then
               echo "ERROR: bun install failed"
               cd ..
               return 30
