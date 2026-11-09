@@ -9,6 +9,7 @@
     { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
     { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
     { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
+    { "target": "packages/core/src/model-resolver.ts", "factory": "packages/core/src/personalize/model-resolver.ts", "exports": ["node"] },
     { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
     { "target": "packages/core/src/session/runner/step.ts", "factory": "packages/core/src/personalize/step.ts", "exports": ["make"] },
     { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },

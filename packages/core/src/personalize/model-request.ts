@@ -2,6 +2,7 @@ import { canonicalMessages, copyWith } from "./content"
 import { personaLead, stripStockIdentity } from "./persona"
 import { Context, Effect, Layer } from "effect"
 import { capRequest } from "./output-request"
+import { withDecayPolicy } from "./decay-policy"
 type SystemBlock = ReturnType<typeof import("../session/model-request").baseTranscript>["system"][number]
 
 export function personalizeSystem(system: readonly SystemBlock[]): SystemBlock[] {
@@ -12,7 +13,7 @@ export function personalizeSystem(system: readonly SystemBlock[]): SystemBlock[]
 
 export function decorate(stock: typeof import("../session/model-request")) {
   const baseTranscript: typeof stock.baseTranscript = (...args) => {
-    const result = stock.baseTranscript(...args)
+    const result = withDecayPolicy(args[0].model, () => stock.baseTranscript(...args))
     return { ...result, system: personalizeSystem(result.system) }
   }
   const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)

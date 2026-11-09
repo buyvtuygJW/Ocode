@@ -579,7 +579,7 @@ export const Plugin = define({
                 prompt,
               }).pipe(
                 Effect.map((answer) => ({ member, answer }) as MemberAnswer),
-                Effect.catchAll((cause) =>
+                Effect.catch((cause) =>
                   Effect.succeed({ member, answer: `[${refToString(member.model)} failed: ${cause}]` } as MemberAnswer),
                 ),
               )
@@ -705,7 +705,7 @@ export const Plugin = define({
             ctx.session.prompt({
               ...input.prompt,
               sessionID: input.sessionID,
-              text: template.replace("$ARGUMENTS", input.prompt.text ?? ""),
+              text: template.replace("$ARGUMENTS", () => input.prompt.text ?? ""),
             }),
         })
       relay(PROMPT_DISTILL, "Distill this session into a reusable learned skill (RSI).", "distill")

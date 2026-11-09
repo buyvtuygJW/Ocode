@@ -50,10 +50,23 @@ else
 fi
 
 # ── 2. Verify the IME fix is present in source ────────────────────────
-PROMPT_FILE="$OPENCODE_SRC/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx"
-if [ ! -f "$PROMPT_FILE" ]; then
-  err "Prompt file not found: $PROMPT_FILE"
+# Upstream renamed packages/opencode -> packages/cli (and moved the TUI into
+# packages/tui) in the 2026-10 refactor; support both layouts.
+PROMPT_FILE=""
+for cand in \
+  "$OPENCODE_SRC/packages/tui/src/component/prompt/index.tsx" \
+  "$OPENCODE_SRC/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx"; do
+  if [ -f "$cand" ]; then PROMPT_FILE="$cand"; break; fi
+done
+if [ -z "$PROMPT_FILE" ]; then
+  err "Prompt component not found in either layout (packages/tui or packages/opencode)."
   exit 1
+fi
+
+if [ -d "$OPENCODE_SRC/packages/cli" ]; then
+  BUILD_PKG="$OPENCODE_SRC/packages/cli"          # post-rename layout
+else
+  BUILD_PKG="$OPENCODE_SRC/packages/opencode"     # pre-rename layout
 fi
 
 if grep -q "setTimeout(() => setTimeout" "$PROMPT_FILE"; then
@@ -77,7 +90,7 @@ bun install --frozen-lockfile 2>/dev/null || bun install
 
 # ── 4. Build (current platform only) ──────────────────────────────────
 info "Building opencode for current platform ..."
-cd "$OPENCODE_SRC/packages/opencode"
+cd "$BUILD_PKG"
 bun run build --single
 
 # ── 5. Install binary ──────────────────────────────────────────────────
@@ -90,10 +103,10 @@ ARCH=$(uname -m)
 [ "$PLATFORM" = "darwin" ] && true
 [ "$PLATFORM" = "linux" ] && true
 
-BUILT_BINARY="$OPENCODE_SRC/packages/opencode/dist/opencode-${PLATFORM}-${ARCH}/bin/opencode"
+BUILT_BINARY="$BUILD_PKG/dist/opencode-${PLATFORM}-${ARCH}/bin/opencode"
 
 if [ ! -f "$BUILT_BINARY" ]; then
-  BUILT_BINARY=$(find "$OPENCODE_SRC/packages/opencode/dist" -name "opencode" -type f -executable 2>/dev/null | head -1)
+  BUILT_BINARY=$(find "$BUILD_PKG/dist" -name "opencode" -type f -executable 2>/dev/null | head -1)
 fi
 
 if [ -f "$BUILT_BINARY" ]; then
@@ -106,7 +119,7 @@ if [ -f "$BUILT_BINARY" ]; then
 else
   err "Build failed - binary not found in dist/"
   info "Try running manually:"
-  echo "  cd $OPENCODE_SRC/packages/opencode && bun run build --single"
+  echo "  cd $BUILD_PKG && bun run build --single"
   exit 1
 fi
 

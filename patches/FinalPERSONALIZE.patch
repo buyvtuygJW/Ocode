@@ -814,10 +814,10 @@ index 0000000000000000000000000000000000000000..d3da95e10bd09fbd15b8986406a03e20
 +})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..5cca274bd0463ca0e2ab75e68c4328b20c3431ab
+index 0000000000000000000000000000000000000000..766c375f66f62fee3807a582f2ec9b5518a53ffe
 --- /dev/null
 +++ b/.personalize/manifest.json
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,27 @@
 +{
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
@@ -829,6 +829,7 @@ index 0000000000000000000000000000000000000000..5cca274bd0463ca0e2ab75e68c4328b2
 +    { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
 +    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
 +    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
++    { "target": "packages/core/src/model-resolver.ts", "factory": "packages/core/src/personalize/model-resolver.ts", "exports": ["node"] },
 +    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
 +    { "target": "packages/core/src/session/runner/step.ts", "factory": "packages/core/src/personalize/step.ts", "exports": ["make"] },
 +    { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },
@@ -1508,14 +1509,15 @@ index 0000000000000000000000000000000000000000..eff6f79388ce8d3c00c2ed3a17e3cee3
 +}
 diff --git a/packages/core/src/personalize/model-request.ts b/packages/core/src/personalize/model-request.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c1a0fee967026428af50bfba218da2798c346c5c
+index 0000000000000000000000000000000000000000..ded0959799c1be8d3d4572dd688a20b9bdb14064
 --- /dev/null
 +++ b/packages/core/src/personalize/model-request.ts
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,54 @@
 +import { canonicalMessages, copyWith } from "./content"
 +import { personaLead, stripStockIdentity } from "./persona"
 +import { Context, Effect, Layer } from "effect"
 +import { capRequest } from "./output-request"
++import { withDecayPolicy } from "./decay-policy"
 +type SystemBlock = ReturnType<typeof import("../session/model-request").baseTranscript>["system"][number]
 +
 +export function personalizeSystem(system: readonly SystemBlock[]): SystemBlock[] {
@@ -1526,7 +1528,7 @@ index 0000000000000000000000000000000000000000..c1a0fee967026428af50bfba218da279
 +
 +export function decorate(stock: typeof import("../session/model-request")) {
 +  const baseTranscript: typeof stock.baseTranscript = (...args) => {
-+    const result = stock.baseTranscript(...args)
++    const result = withDecayPolicy(args[0].model, () => stock.baseTranscript(...args))
 +    return { ...result, system: personalizeSystem(result.system) }
 +  }
 +  const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)
@@ -1887,17 +1889,20 @@ index 0000000000000000000000000000000000000000..605856751a9f7c546732ecb7f51dbcf2
 +}
 diff --git a/packages/core/src/personalize/to-llm-message.ts b/packages/core/src/personalize/to-llm-message.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..40b1c9b3a15038662cacae229ec9a31730b344b8
+index 0000000000000000000000000000000000000000..140ecb2100310bb0fa0b49debcd6f0d661cfd49b
 --- /dev/null
 +++ b/packages/core/src/personalize/to-llm-message.ts
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,16 @@
 +import { Message } from "@opencode/ai/effect"
 +import { decay, indexBlock } from "../session/runner/context-decay"
 +import { historyMessages } from "./content"
++import { bypassDecay } from "./decay-policy"
 +
 +export function decorate(stock: typeof import("../session/runner/to-llm-message")) {
 +  const toLLMMessages: typeof stock.toLLMMessages = (messages, ...rest) => {
-+    const decayed = decay(historyMessages(messages))
++    const history = historyMessages(messages)
++    if (bypassDecay()) return stock.toLLMMessages(history, ...rest)
++    const decayed = decay(history)
 +    const lowered = stock.toLLMMessages(decayed.messages, ...rest)
 +    const index = indexBlock(decayed.archive)
 +    return index === undefined ? lowered : [...lowered, Message.user(index)]
@@ -3375,3 +3380,126 @@ index 0000000000000000000000000000000000000000..aab581801cea150ba26cc34085f10325
 +  const layer: typeof stock.layer = (options = {}) => stock.layer({ ...options, endpoint: undefined, headers: undefined })
 +  return { layer }
 +}
+diff --git a/packages/core/src/personalize/decay-policy.ts b/packages/core/src/personalize/decay-policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b82f866fe187a9f627bff31c2124385ec0fd9c6
+--- /dev/null
++++ b/packages/core/src/personalize/decay-policy.ts
+@@ -0,0 +1,23 @@
++import { AsyncLocalStorage } from "node:async_hooks"
++
++// Per-resolved-model policy, not a URL or provider-name heuristic. Keeping the
++// marker out of the model avoids passing a client option to provider SDKs.
++const bypass = new WeakSet<object>()
++const scope = new AsyncLocalStorage<boolean>()
++
++export const rememberDecayBypass = <T extends object>(model: T, enabled: boolean): T => {
++  if (enabled) bypass.add(model)
++  return model
++}
++
++export const withDecayPolicy = <T>(model: object, run: () => T): T => scope.run(bypass.has(model), run)
++export const bypassDecay = () => scope.getStore() === true
++
++/** Strip the client-only setting before constructing a provider model. */
++export function splitDecaySetting<T extends { readonly settings?: Readonly<Record<string, unknown>> }>(model: T) {
++  const settings = model.settings
++  if (!settings || !("ocodeContextDecay" in settings)) return { model, bypass: false }
++  const { ocodeContextDecay, ...rest } = settings
++  if (typeof ocodeContextDecay !== "boolean") throw new TypeError("ocodeContextDecay must be a boolean")
++  return { model: { ...model, settings: rest }, bypass: ocodeContextDecay === false }
++}
+diff --git a/packages/core/src/personalize/model-resolver.ts b/packages/core/src/personalize/model-resolver.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..08f7bb0a8ffbbbc4dbf52a57d0d7c307585244cf
+--- /dev/null
++++ b/packages/core/src/personalize/model-resolver.ts
+@@ -0,0 +1,33 @@
++import { Model } from "../model"
++import { Context, Effect, Layer } from "effect"
++import { rememberDecayBypass, splitDecaySetting } from "./decay-policy"
++
++export function decorate(stock: typeof import("../model-resolver")) {
++  // The stock node already depends on Model.node; mapLayer's generic R cannot
++  // express that existing requirement even though the node supplies it.
++  const node = stock.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => Layer.effect(stock.Service, Effect.gen(function* () {
++    const service = Context.get(context, stock.Service)
++    const models = yield* Model.Service
++    const resolveModel: typeof service.resolveModel = (selected, variant) => {
++      const split = splitDecaySetting(selected)
++      // Variant-level overrides are not supported: remove the client-only key
++      // there too, so it can never leak to the provider.
++      const variants = split.model.variants?.map((item) => splitDecaySetting(item).model)
++      const cleaned = variants ? { ...split.model, variants } : split.model
++      return service.resolveModel(cleaned, variant).pipe(Effect.map((resolved) => rememberDecayBypass(resolved, split.bypass)))
++    }
++    const resolve: typeof service.resolve = Effect.fn("PersonalizeModelResolver.resolve")(function* (requested) {
++      const selected = requested
++        ? yield* models.get(requested.providerID, requested.id)
++        : yield* models.default().pipe(Effect.flatMap((model) =>
++            model && stock.hasPackage(model)
++              ? Effect.succeed(model)
++              : Effect.map(models.available(), (all) => all.find((model) => stock.hasPackage(model) && Model.supportsText(model))),
++          ))
++      if (!selected) return undefined
++      return yield* resolveModel(selected, requested?.variant)
++    })
++    return stock.Service.of({ ...service, resolve, resolveModel })
++  })))) as typeof layer)
++  return { node }
++}
+diff --git a/packages/core/test/personalize-decay-policy.test.ts b/packages/core/test/personalize-decay-policy.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7789dcd00099b000f01e0e132d2b99cdb6317130
+--- /dev/null
++++ b/packages/core/test/personalize-decay-policy.test.ts
+@@ -0,0 +1,49 @@
++import { expect, test } from "bun:test"
++import { Context, Effect, Layer } from "effect"
++import { Model } from "../src/model"
++import { decorate } from "../src/personalize/model-resolver"
++import { bypassDecay, rememberDecayBypass, splitDecaySetting, withDecayPolicy } from "../src/personalize/decay-policy"
++
++test("the decay opt-in is strict, model-scoped and removed from provider settings", () => {
++  const selected = { settings: { baseURL: "http://localhost", ocodeContextDecay: false } }
++  const split = splitDecaySetting(selected)
++  expect(split.bypass).toBe(true)
++  expect(split.model.settings.baseURL).toBe("http://localhost")
++  expect("ocodeContextDecay" in split.model.settings).toBe(false)
++  expect(selected.settings.ocodeContextDecay).toBe(false)
++  expect(splitDecaySetting({ settings: { baseURL: "x" } }).bypass).toBe(false)
++  expect(splitDecaySetting({ settings: { ocodeContextDecay: true } }).bypass).toBe(false)
++  expect(() => splitDecaySetting({ settings: { ocodeContextDecay: "false" } })).toThrow()
++  const enabled = rememberDecayBypass({}, true)
++  const normal = {}
++  expect(withDecayPolicy(enabled, bypassDecay)).toBe(true)
++  expect(withDecayPolicy(normal, bypassDecay)).toBe(false)
++  expect(bypassDecay()).toBe(false)
++})
++
++test("the resolver strips the opt-in on direct and ordinary resolution", async () => {
++  const selected = {
++    id: "sol", providerID: "proxy", settings: { baseURL: "http://localhost", ocodeContextDecay: false },
++    variants: [{ id: "v", settings: { ocodeContextDecay: false, temperature: 1 } }],
++  }
++  const catalog = { get: () => Effect.succeed(selected), default: () => Effect.succeed(selected), available: () => Effect.succeed([selected]) }
++  const tag = Context.Service("personalize-test-resolver")
++  const service = { resolve: () => Effect.die("unexpected stock resolve"), resolveModel: (model: unknown) => Effect.succeed({ model }), untouched: 42 }
++  const stock: any = { Service: tag, hasPackage: () => true, node: { mapLayer: (f: any) => ({ layer: f(Layer.succeed(tag, service)) }) } }
++  const node: any = decorate(stock).node
++  const program = Effect.gen(function* () {
++    const resolver: any = yield* tag
++    expect(resolver.untouched).toBe(42)
++    const direct = yield* resolver.resolveModel(selected)
++    expect(direct.model.settings).toEqual({ baseURL: "http://localhost" })
++    expect(direct.model.variants[0].settings).toEqual({ temperature: 1 })
++    expect(withDecayPolicy(direct, bypassDecay)).toBe(true)
++    const explicit = yield* resolver.resolve({ providerID: "proxy", id: "sol" })
++    expect(withDecayPolicy(explicit, bypassDecay)).toBe(true)
++    const fallback = yield* resolver.resolve()
++    expect(withDecayPolicy(fallback, bypassDecay)).toBe(true)
++    const normal = yield* resolver.resolveModel({ ...selected, settings: { baseURL: "x" } })
++    expect(withDecayPolicy(normal, bypassDecay)).toBe(false)
++  }).pipe(Effect.provide(node.layer), Effect.provide(Layer.succeed(Model.Service, catalog as any)))
++  await Effect.runPromise(program as Effect.Effect<void, never, never>)
++})

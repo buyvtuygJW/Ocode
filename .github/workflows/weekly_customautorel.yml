@@ -437,6 +437,7 @@ jobs:
             for f in \
               packages/core/test/session-context-decay.test.ts \
               packages/core/test/session/content-guards.test.ts \
+              packages/core/test/personalize-legacy.test.ts \
               packages/core/test/session-model-request-hooks.test.ts; do
               if [ -f "$f" ]; then
                 tests+=("$f")
