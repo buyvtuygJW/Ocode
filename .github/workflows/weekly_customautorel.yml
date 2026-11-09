@@ -112,6 +112,7 @@ jobs:
 
           echo "Running checker unit tests..."
           node --test .github/scripts/personalize-hooks.test.cjs
+          node --test .github/scripts/repair-photon-patch.test.cjs
 
           echo "Checking patch-set isolation contract..."
           node .github/scripts/check-personalize-hooks.cjs
@@ -578,6 +579,13 @@ jobs:
             echo "Patched commits:"
             git log --oneline -12
 
+            # Some fallback upstream refs carry a malformed photon 0.3.4 patch.
+            # Correct only its known whitespace defect before Bun reads it.
+            if ! node .personalize/repair-photon-patch.cjs .; then
+              echo "ERROR: photon dependency patch repair failed"
+              cd ..
+              return 30
+            fi
             if ! bun install; then
               echo "ERROR: bun install failed"
               cd ..
@@ -939,6 +947,8 @@ jobs:
           # patched sources it checks, so it stays runnable wherever the workflow runs.
           cp ../.github/scripts/check-personalize-hooks.cjs .github/scripts/check-personalize-hooks.cjs
           cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
+          cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
+          cp ../.github/scripts/repair-photon-patch.test.cjs .github/scripts/repair-photon-patch.test.cjs
 
           if [ ! -s "$SELF" ]; then
             echo "ERROR: $SELF missing from automation checkout; refusing to push"
