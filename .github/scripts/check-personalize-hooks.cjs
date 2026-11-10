@@ -71,6 +71,14 @@ function ownedBody(name, file, section) {
 
 function publicExports(source) {
   const names = new Set([...source.matchAll(/^export\s+(?:async\s+)?(?:const|let|function|class|interface|type)\s+(\w+)/gm)].map((m) => m[1]));
+  // Context providers use exported object bindings, often formatted over several
+  // lines. The alias is the export (ClientProvider), not the property (provider).
+  for (const binding of source.matchAll(/^export\s+(?:const|let|var)\s*\{([^{}]+)\}\s*=/gm)) {
+    for (const item of binding[1].split(',')) {
+      const match = item.trim().match(/^(?:\.\.\.)?([A-Za-z_$][\w$]*)(?:\s*:\s*([A-Za-z_$][\w$]*))?(?:\s*=[\s\S]+)?$/);
+      if (match) names.add(match[2] || match[1]);
+    }
+  }
   for (const clause of source.matchAll(/^export\s*\{([^}]+)\}/gm)) {
     for (const item of clause[1].split(',')) {
       const name = item.trim().split(/\s+as\s+/).at(-1);

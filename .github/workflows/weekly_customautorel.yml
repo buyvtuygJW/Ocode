@@ -112,6 +112,8 @@ jobs:
 
           echo "Running checker unit tests..."
           node --test .github/scripts/personalize-hooks.test.cjs
+          node --test .github/scripts/personalize-workflow.test.cjs
+          node --experimental-vm-modules --test .github/scripts/personalize-runtime.test.cjs
           node --test .github/scripts/repair-photon-patch.test.cjs
 
           echo "Checking patch-set isolation contract..."
@@ -273,12 +275,9 @@ jobs:
 
             echo "Applied final personalize patch."
 
-            # Remember the core commit so a failed build can roll back ALL optional patches.
-            CORE_SHA="$(git rev-parse HEAD)"
-
             # Optional transparency patch (best-effort): apply if it fits, else skip.
-            # The core build NEVER fails over it; the release notes flag a skip so a
-            # download tells you it's time to re-port FinalPersonalizeX.patch.
+            # Apply failures are optional; an applied stack must pass tests/build.
+            # Release notes flag skipped FinalPersonalizeX.patch applications.
             APPLIED_TRANSPARENCY="off"
             XPATCH="../patches/FinalPersonalizeX.patch"
             if [ -f "$XPATCH" ]; then
@@ -296,8 +295,8 @@ jobs:
             fi
 
             # Optional OpenScience research-agents patch (best-effort): apply if it fits, else skip.
-            # Independent of the transparency patch; the core build NEVER fails over it. A skip is
-            # flagged in the release notes so a download tells you to re-port FinalPersonalizeS.patch.
+            # Independent of transparency; apply failures are flagged in release notes.
+            # An applied stack must still pass the combined tests/build.
             APPLIED_SCIENCE="off"
             SPATCH="../patches/FinalPersonalizeS.patch"
             if [ -f "$SPATCH" ]; then
@@ -315,7 +314,7 @@ jobs:
             fi
 
             # Optional RSI /distill loop patch (best-effort): native distill_session tool +
-            # built-in /distill command, compiled into the binary. Core build NEVER fails over it.
+            # built-in /distill command, compiled into the binary. Apply failures are optional.
             # This is the riskiest optional (hand-written effect code); a skip is flagged in the notes.
             APPLIED_RSI="off"
             RPATCH="../patches/FinalPersonalizeR.patch"
@@ -563,7 +562,11 @@ jobs:
             # guarded by the 3-way apply plus the shipped unit tests.
             if [ "$label" = "latest" ]; then
               echo "Checking personalization isolation against pristine upstream..."
-              node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches --upstream .
+              if ! node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches --upstream .; then
+                echo "ERROR: personalization isolation check failed"
+                cd ..
+                return 12
+              fi
             fi
 
             git config user.name "claudedbuildbot"
@@ -596,24 +599,11 @@ jobs:
             fi
 
             if ! { run_patch_tests && run_opencode_build; }; then
-              if [ "${APPLIED_TRANSPARENCY:-off}" = "on" ] || [ "${APPLIED_SCIENCE:-off}" = "on" ] || [ "${APPLIED_RSI:-off}" = "on" ]; then
-                echo "Tests/build failed with optional patch(es) applied (transparency=${APPLIED_TRANSPARENCY:-off}, science=${APPLIED_SCIENCE:-off}, rsi=${APPLIED_RSI:-off})."
-                echo "Dropping ALL optional patches and retrying the tests + build without them..."
-                git reset --hard "${CORE_SHA:-HEAD}" >/dev/null 2>&1 || true
-                APPLIED_TRANSPARENCY="off"
-                APPLIED_SCIENCE="off"
-                APPLIED_RSI="off"
-                if ! { run_patch_tests && run_opencode_build; }; then
-                  echo "ERROR: opencode tests/build failed even without the optional patches"
-                  cd ..
-                  return 40
-                fi
-                echo "Build succeeded WITHOUT optional patches (dropped; release will warn)."
-              else
-                echo "ERROR: opencode build failed"
-                cd ..
-                return 40
-              fi
+              # A combined test/build failure does not identify a broken optional
+              # patch. Reject this ref; never erase unrelated features to pass.
+              echo "ERROR: patched tests/build failed (transparency=${APPLIED_TRANSPARENCY:-off}, science=${APPLIED_SCIENCE:-off}, rsi=${APPLIED_RSI:-off})."
+              cd ..
+              return 40
             fi
 
             cd ..
@@ -950,6 +940,8 @@ jobs:
           # patched sources it checks, so it stays runnable wherever the workflow runs.
           cp ../.github/scripts/check-personalize-hooks.cjs .github/scripts/check-personalize-hooks.cjs
           cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
+          cp ../.github/scripts/personalize-workflow.test.cjs .github/scripts/personalize-workflow.test.cjs
+          cp ../.github/scripts/personalize-runtime.test.cjs .github/scripts/personalize-runtime.test.cjs
           cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
           cp ../.github/scripts/repair-photon-patch.test.cjs .github/scripts/repair-photon-patch.test.cjs
 

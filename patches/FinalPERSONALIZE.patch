@@ -1046,7 +1046,7 @@ index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97
 +  }
 +}
 diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
-index 80a67fe75589d35a68f803ae2ffdab35e48715a6..7daf40430eae26b2e61239f5d79593ab1719c6ad 100644
+index a9ae9e606975bb38fc3b324c435c8c783e094fd4..7ae63416edcdca1a388ed0cfa66f0d64b52b1560 100755
 --- a/packages/cli/script/build.ts
 +++ b/packages/cli/script/build.ts
 @@ -1,4 +1,5 @@
@@ -1064,8 +1064,7 @@ index 80a67fe75589d35a68f803ae2ffdab35e48715a6..7daf40430eae26b2e61239f5d79593ab
        appAssetsPlugin,
        solidPlugin,
        parcelWatcherPlugin,
-@@ -168,7 +169,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
-       pluginRuntimePlugin,
+@@ -182,6 +183,6 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
        simulationGraphPlugin,
        modelsSnapshot,
 -    ],

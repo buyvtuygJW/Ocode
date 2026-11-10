@@ -19,8 +19,13 @@ import { Global } from "@opencode/util/global"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Effect } from "effect"
 import path from "path"
+import { randomUUID } from "node:crypto"
+import { LanguageModel, LLMClient, Message, type RequestOptions } from "@opencode/ai/effect"
+import { HttpClientRequest } from "effect/unstable/http"
 import { Model } from "../model.js"
 import { Session } from "../session.js"
+import { Service as ModelResolverService } from "../model-resolver.js"
+import { capRequest } from "../personalize/output-request"
 
 // ----------------------------------------------------------------------------
 // Shared helpers
@@ -301,6 +306,87 @@ type MemberAnswer = { readonly member: MemberRef; readonly answer: string }
 // Plugin
 // ----------------------------------------------------------------------------
 
+// Members get an explicit, stateless prompt, not stock session generation. Drop
+// affinity / diagnostic identifiers from both defaults and provider overrides;
+// never walk messages (a user's JSON is content, not request metadata).
+const memberIdentifier = (key: string) =>
+  /^(id|user|metadata|safetyidentifier|promptcachekey|promptcacheid|sessionid|conversation|conversationid|previousresponseid|threadid|requestid|clientrequestid|traceid)$/.test(
+    key.replace(/[-_]/g, "").toLowerCase(),
+  )
+
+function memberFields<T extends object>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !memberIdentifier(key))) as T
+}
+
+const memberHeader = (key: string) => {
+  const name = key.toLowerCase()
+  return name.startsWith("x-opencode-") || name.startsWith("x-pxpipe-") ||
+    /^(session[-_]id|conversation[-_]id|x-(client-)?(session|conversation|request|correlation)-id|client-request-id|x-(oai|openai)-(session|request)-id|traceparent|tracestate|baggage)$/.test(name)
+}
+
+export function councilMemberOptions(options: RequestOptions = {}): RequestOptions {
+  const headers = options.headers && Object.fromEntries(
+    Object.entries(options.headers).filter(([key]) => !memberHeader(key)),
+  )
+  const providerOptions = options.providerOptions && Object.fromEntries(
+    Object.entries(options.providerOptions).map(([provider, value]) => [provider,
+      value !== null && typeof value === "object" && !Array.isArray(value) ? memberFields(value) : value,
+    ]),
+  )
+  const http = options.http && {
+    ...options.http,
+    body: options.http.body && memberFields(options.http.body),
+  }
+  return { ...memberFields(options), headers, providerOptions, http }
+}
+
+export function councilTraceOrigin(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    const url = new URL(value)
+    if (!["http:", "https:"].includes(url.protocol) ||
+      !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
+      url.username || url.password || url.pathname !== "/" || url.search || url.hash) return undefined
+    return url.origin
+  } catch { return undefined }
+}
+
+// This boundary runs AFTER route headers and transport authentication. Keep
+// auth/routing headers (Authorization, x-api-key, chatgpt-account-id, etc.).
+// Opt-in trace ids are random correlation ids, never local session identifiers.
+export function councilMemberWire(
+  request: HttpClientRequest.HttpClientRequest,
+  trace?: { origin: string; id: string },
+): HttpClientRequest.HttpClientRequest {
+  let result = request
+  for (const key of Object.keys(request.headers)) {
+    if (memberHeader(key)) result = HttpClientRequest.removeHeader(result, key)
+  }
+  if (request.body._tag === "Uint8Array" && request.body.contentType.includes("json")) {
+    const body = JSON.parse(new TextDecoder().decode(request.body.body))
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      result = HttpClientRequest.bodyUint8Array(
+        result,
+        new TextEncoder().encode(JSON.stringify(memberFields(body))),
+        request.body.contentType,
+      )
+      result = HttpClientRequest.removeHeader(result, "content-length")
+    }
+  }
+  if (trace) {
+    const url = new URL(request.url)
+    // Explicit origin AND loopback are required. A configured remote provider
+    // must never receive proxy-only headers, even when tracing is enabled.
+    if (url.origin === trace.origin && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+      result = HttpClientRequest.setHeaders(result, {
+        "x-pxpipe-debug": "1",
+        "x-pxpipe-local-session": trace.id,
+      })
+    }
+  }
+  return result
+}
+
 export const Plugin = define({
   id: "opencode.personalize",
   effect: Effect.fn(function* (ctx) {
@@ -308,6 +394,8 @@ export const Plugin = define({
     const fs = yield* FSUtil.Service
     const sessions = yield* Session.Service
     const models = yield* Model.Service
+    const memberModels = yield* ModelResolverService
+    const memberClient = yield* LLMClient.Service
     const projectDirectory = ctx.location.directory
 
     const globalCouncilPath = path.join(global.config, "council.json")
@@ -326,6 +414,45 @@ export const Plugin = define({
         model: input.model,
       })
       return yield* sessions.generate({ sessionID: child.id, prompt: input.prompt })
+    })
+
+    // Owned one-shot member path. Do not change askModel, the chair, or stock
+    // generation: their context/lifecycle policies are deliberately different.
+    const askCouncilMember = Effect.fn(function* (input: {
+      parentID: SessionSchema.ID
+      model: ModelSchema.Ref
+      prompt: string
+    }) {
+      const child = yield* sessions.create({ parentID: input.parentID, title: "Council member", model: input.model })
+      const resolved = yield* memberModels.resolve(input.model)
+      if (!resolved) return yield* new Tool.Error({ message: `Council member unavailable: ${input.model.providerID}/${input.model.id}` })
+      const options = councilMemberOptions(resolved.model.options)
+      const request = capRequest({
+        ...options,
+        model: new LanguageModel({ ...LanguageModel.input(resolved.model), options }),
+        system: [],
+        messages: [Message.user(input.prompt)],
+        tools: [],
+      }, resolved)
+      const origin = councilTraceOrigin(process.env.OPENCODE_COUNCIL_PROXY_TRACE_ORIGIN)
+      const trace = origin ? { origin, id: randomUUID() } : undefined
+      if (trace) {
+        yield* Effect.logInfo("Council proxy-only trace (local mapping)", {
+          traceID: trace.id, proxyOrigin: trace.origin, parentID: input.parentID, sessionID: child.id,
+        })
+      }
+      const generate = () => memberClient.generate(request, {
+        http: (wire, next) => Effect.suspend(() => next(councilMemberWire(wire, trace))),
+      })
+      const first = yield* generate()
+      if (first.finishReason.normalized !== "length") return first.text
+      // Same original request and cap; no partial answer, continuation, larger
+      // budget, or general-error retry. This is the one authorized length retry.
+      const second = yield* generate()
+      if (second.finishReason.normalized === "length") {
+        return yield* new Tool.Error({ message: "Council member output was length-limited twice; partial answers discarded." })
+      }
+      return second.text
     })
 
     const loadMembers = Effect.fn(function* (inline: readonly string[] | undefined) {
@@ -572,9 +699,8 @@ export const Plugin = define({
               })
 
             const ask = (member: MemberRef, prompt: string) =>
-              askModel({
+              askCouncilMember({
                 parentID: context.sessionID,
-                title: `council:${member.name}`,
                 model: member.model,
                 prompt,
               }).pipe(

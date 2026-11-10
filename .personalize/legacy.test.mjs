@@ -1,15 +1,29 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { createRequire, stripTypeScriptTypes } from "node:module"
+import { createRequire } from "node:module"
 import path from "node:path"
 import { test } from "node:test"
+import { pathToFileURL } from "node:url"
+import { randomUUID } from "node:crypto"
+
+// Bun 1.4 does not export Node's stripTypeScriptTypes. Do not link that named
+// export before selecting the runtime; Bun uses its own TypeScript transpiler.
+const stripTypeScriptTypes = globalThis.Bun ? undefined : (await import("node:module")).stripTypeScriptTypes
 
 // Execute the owned production bodies, not copies of their algorithms. Only the
 // service boundary is replaced: no database, real config, network, or processes.
 // The allowlist fails closed if a new runtime import is added to these modules.
 const requireCore = createRequire(new URL("../packages/core/package.json", import.meta.url))
-const runtime = process.env.PERSONALIZE_EFFECT ?? requireCore.resolve("effect")
+// Node ESM needs a file URL, not a Windows drive-letter path, for dynamic import.
+const runtime = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(requireCore.resolve("effect")).href
 const { Context, Deferred, Effect, JsonSchema, Schema, Scope } = await import(runtime)
+// Test the real HTTP request combinators too. Effect's audit dependency has the
+// stable /http layout; the application pin uses /unstable/http. Root resolution
+// (including an explicit PERSONALIZE_EFFECT override) remains unchanged/lazy.
+const HttpClientRequest = await import(new URL("./unstable/http/HttpClientRequest.js", runtime).href).catch((error) => {
+  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error
+  return import(new URL("./http/HttpClientRequest.js", runtime).href)
+})
 const root = new URL("../", import.meta.url)
 function load(relative, dependencies, names) {
   const file = new URL(relative, root)
@@ -21,8 +35,17 @@ function load(relative, dependencies, names) {
     assert.ok(Object.hasOwn(dependencies, specifier), `Unmocked import in ${relative}: ${specifier}`)
     return `dependencies[${JSON.stringify(specifier)}]`
   }
+  const exported = new Map()
   source = source
     .replace(/^export \* as \w+ from [^\n]+\n/gm, "")
+    .replace(/^export\s*\{([^}]*)\};?\s*$/gm, (_, clause) => {
+      for (const item of clause.split(",").map((item) => item.trim()).filter(Boolean)) {
+        const match = /^(\w+)(?:\s+as\s+(\w+))?$/.exec(item)
+        assert.ok(match, `Unhandled export in ${relative}: ${item}`)
+        exported.set(match[2] ?? match[1], match[1])
+      }
+      return ""
+    })
     .replace(/^import \{([^}]+)\} from ["']([^"']+)["'];?\s*$/gm, (_, names, specifier) =>
       `const {${names.replace(/\bas\b/g, ":")}} = ${imported(specifier)};`)
     .replace(/^import (\w+) from ["']([^"']+)["'];?\s*$/gm, (_, name, specifier) =>
@@ -30,17 +53,33 @@ function load(relative, dependencies, names) {
     .replace(/^export /gm, "")
   assert.doesNotMatch(source, /^import\s/m, `Unhandled import in ${relative}`)
   const denyNetwork = () => { throw new Error("Network forbidden in legacy regression tests") }
-  return new Function("dependencies", "fetch", `${source}\nreturn {${names.join(",")}}`)(dependencies, denyNetwork)
+  const result = names.map((name) => `${name}: ${exported.get(name) ?? name}`).join(",")
+  return new Function("dependencies", "fetch", `${source}\nreturn {${result}}`)(dependencies, denyNetwork)
 }
 
 const { define } = load("packages/plugin/src/effect/plugin.ts", {}, ["define"])
 const Tool = load("packages/schema/src/tool.ts", { effect: { Effect, JsonSchema, Schema } }, ["Error", "TextContent"])
 const tag = (name) => ({ Service: Context.Service()(`LegacyTest/${name}`) })
 const Global = tag("Global"), FSUtil = tag("FSUtil"), Session = tag("Session"), Model = tag("Model")
+const MemberModels = tag("MemberModels"), MemberClient = tag("MemberClient")
+const modelNode = { name: "fixture-model-resolver" }
+const localLogs = []
+const outputPolicy = load("packages/core/src/personalize/output-policy.ts", {}, ["capBody", "outputCap", "outputEffort"])
+const outputRequest = load("packages/core/src/personalize/output-request.ts", {
+  "./output-policy": outputPolicy,
+}, ["capRequest"])
+class LanguageModel {
+  constructor(input) { Object.assign(this, input) }
+  static input(model) { return { ...model } }
+}
+const Message = { user: (text) => ({ role: "user", content: [{ type: "text", text }] }) }
 const identity = { ID: { make: (id) => id } }
 const legacy = load("packages/core/src/plugin/personalize.ts", {
   path,
-  effect: { Effect },
+  effect: { Effect: { ...Effect, logInfo: (...args) => Effect.sync(() => { localLogs.push(args) }) } },
+  "node:crypto": { randomUUID },
+  "@opencode/ai/effect": { LanguageModel, Message, LLMClient: MemberClient },
+  "effect/unstable/http": { HttpClientRequest },
   "@opencode/plugin/effect/plugin": { define },
   "@opencode/schema/tool": { Tool },
   "@opencode/schema/model": { Model: identity },
@@ -49,10 +88,17 @@ const legacy = load("packages/core/src/plugin/personalize.ts", {
   "@opencode/util/fs-util": { FSUtil },
   "../model.js": { Model },
   "../session.js": { Session },
-}, ["Plugin", "captureTrajectory", "scoreTrajectory", "normalizeCadence", "cronMatches", "nextRun", "isDue"])
+  "../model-resolver.js": { Service: MemberModels.Service },
+  "../personalize/output-request": outputRequest,
+}, ["Plugin", "captureTrajectory", "scoreTrajectory", "normalizeCadence", "cronMatches", "nextRun", "isDue", "councilMemberOptions", "councilMemberWire", "councilTraceOrigin"])
 const { Plugin } = legacy
+const resolverDependencies = {
+  "../model-resolver.js": { ModelResolver: { ...MemberModels, node: modelNode } },
+  "@opencode/util/effect/layer-node": { LayerNode: { group: (nodes) => ({ nodes }) } },
+}
 const { decorate } = load("packages/core/src/personalize/tools.ts", {
   effect: { Context, Effect, Scope }, "../plugin/personalize": { Plugin },
+  ...resolverDependencies,
 }, ["decorate"])
 
 const provider = "test-provider"
@@ -74,7 +120,7 @@ const noCalls = (h) => {
 
 async function harness(options = {}) {
   const tools = new Map(), commands = new Map(), files = new Map(options.files ?? [])
-  const reads = [], writes = [], created = [], generated = [], prompts = [], transforms = []
+  const reads = [], writes = [], created = [], generated = [], memberRequests = [], stockRequests = [], prompts = [], transforms = []
   const available = (options.available ?? ["one", "two", "three"]).map((id) => ({ providerID: provider, id }))
   const fs = {
     readJson: (file) => Effect.sync(() => { reads.push(file); return files.get(file) }),
@@ -107,8 +153,26 @@ async function harness(options = {}) {
       return Effect.succeed({ id: `child-${created.length}` })
     }),
     generate: (input) => Effect.suspend(() => {
+      stockRequests.push(input)
       generated.push(input)
       return options.generate?.(input, generated.length) ?? Effect.succeed(`answer-${generated.length}`)
+    }),
+  }
+  const memberModels = {
+    resolve: (ref) => options.failResolve ? Effect.fail(new Error("resolution denied")) : Effect.succeed({
+      ref,
+      model: new LanguageModel({ id: ref.id, providerID: ref.providerID, options: options.memberOptions ?? { maxTokens: 2400 },
+        route: { options: options.routeOptions ?? {}, auth: { type: "fixture-auth" } } }),
+      limit: { context: 100000, output: 50000 },
+    }),
+  }
+  const memberClient = {
+    generate: (request, transport) => Effect.suspend(() => {
+      memberRequests.push({ request, transport })
+      const input = { prompt: request.messages[0].content[0].text, model: request.model }
+      generated.push(input)
+      const result = options.memberGenerate?.(request, memberRequests.length) ?? options.generate?.(input, generated.length) ?? Effect.succeed(`answer-${generated.length}`)
+      return result.pipe(Effect.map((value) => typeof value === "string" ? { text: value, finishReason: { normalized: "stop" } } : value))
     }),
   }
   const host = {
@@ -134,13 +198,22 @@ async function harness(options = {}) {
     Effect.provideService(FSUtil.Service, fs),
     Effect.provideService(Session.Service, sessions),
     Effect.provideService(Model.Service, { available: () => Effect.succeed(available) }),
+    Effect.provideService(MemberModels.Service, memberModels),
+    Effect.provideService(MemberClient.Service, memberClient),
   )
   await Effect.runPromise(provide(Plugin.effect(host)))
   return {
-    tools, commands, files, reads, writes, created, generated, prompts, transforms, host, provide,
+    tools, commands, files, reads, writes, created, generated, memberRequests, stockRequests, prompts, transforms, host, provide,
     call: (name, input) => Effect.runPromise(provide(tools.get(name).execute(input, context))),
   }
 }
+
+test("default Effect resolution produces a Node-compatible file URL", {
+  skip: process.env.PERSONALIZE_EFFECT !== undefined ? "Explicit Effect override selected" : false,
+}, () => {
+  assert.equal(new URL(runtime).protocol, "file:")
+  assert.equal(runtime, pathToFileURL(requireCore.resolve("effect")).href)
+})
 
 test("legacy activation registers exactly three tools and three commands without side effects", async () => {
   const h = await harness()
@@ -200,7 +273,7 @@ test("slash commands accept omitted text without injecting undefined", async () 
 })
 
 for (const [strategy, count] of [["council", 3], ["compare", 2], ["consensus", 4], ["moa", 3], ["debate", 5], ["router", 2], ["arena", 2]]) {
-  test(`council ${strategy} has a bounded ${count}-call plan through Session.generate`, async () => {
+  test(`council ${strategy} keeps its ${count}-call nominal plan across owned members and stock chair`, async () => {
     const h = await harness()
     const result = output(await h.call("council", { question: "Which fix?", members, strategy }))
     assert.ok(result.length > 0)
@@ -211,8 +284,8 @@ for (const [strategy, count] of [["council", 3], ["compare", 2], ["consensus", 4
       assert.equal(input.parentID, context.sessionID)
       assert.equal(input.model.providerID, provider)
       assert.ok(["one", "two"].includes(input.model.id))
-      const generated = h.generated.find((call) => call.sessionID === `child-${index + 1}`)
-      assert.ok(generated?.prompt.includes("Which fix?"))
+      assert.equal(input.title, "Council member")
+      assert.ok(h.memberRequests[index].request.messages[0].content[0].text.includes("Which fix?"))
     })
     if (["council", "moa", "debate"].includes(strategy)) {
       const chair = h.generated.find((call) => call.sessionID === context.sessionID)
@@ -451,19 +524,171 @@ test("legacy registration does not require or capture the activation scope", asy
   const scopedPlugin = { id: "personalize", effect: () => Effect.scope }
   const { decorate } = load("packages/core/src/personalize/tools.ts", {
     effect: { Context, Effect, Scope }, "../plugin/personalize": { Plugin: scopedPlugin },
+    ...resolverDependencies,
   }, ["decorate"])
+  const provide = (effect) => Effect.provideService(effect, MemberModels.Service, {})
   const stock = { list: () => Effect.succeed({ pre: [], post: [] }) }
-  assert.equal((await Effect.runPromise(decorate(stock).list())).post.length, 1)
+  assert.equal((await Effect.runPromise(provide(decorate(stock).list()))).post.length, 1)
   let registrationScope
   const listed = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     registrationScope = yield* Effect.scope
-    return yield* decorate(stock).list()
+    return yield* provide(decorate(stock).list())
   })))
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     const hostScope = yield* Effect.scope
     assert.notEqual(hostScope, registrationScope)
     assert.equal(yield* listed.post[0].effect({}), hostScope)
   })))
+})
+
+test("owned member retry discards length-limited text, reuses the original request and never raises its cap", async () => {
+  const attempts = new Map()
+  const h = await harness({ memberGenerate: (request) => {
+    const n = (attempts.get(request.model.id) ?? 0) + 1
+    attempts.set(request.model.id, n)
+    return Effect.succeed({ text: n === 1 ? "PARTIAL-DO-NOT-CARRY" : "complete", finishReason: { normalized: n === 1 ? "length" : "stop" } })
+  } })
+  const result = output(await h.call("council", { question: "original question", members, strategy: "compare" }))
+  assert.equal(h.stockRequests.length, 0)
+  assert.equal(h.memberRequests.length, 4)
+  assert.doesNotMatch(result, /PARTIAL-DO-NOT-CARRY/)
+  for (const id of ["one", "two"]) {
+    const requests = h.memberRequests.filter((entry) => entry.request.model.id === id).map((entry) => entry.request)
+    assert.equal(requests.length, 2)
+    assert.equal(requests[0], requests[1])
+    assert.equal(requests[0].maxTokens, 2400)
+    assert.equal(requests[0].messages.length, 1)
+    assert.equal(requests[0].messages[0].content[0].text, "original question")
+    assert.doesNotMatch(JSON.stringify(requests[1]), /PARTIAL-DO-NOT-CARRY|parent-session|child-/)
+  }
+})
+
+test("two length responses fail each member without returning a partial or attempting a third call", async () => {
+  const h = await harness({ memberGenerate: () => Effect.succeed({ text: "PARTIAL-ONLY", finishReason: { normalized: "length" } }) })
+  const result = output(await h.call("council", { question: "Q", members, strategy: "compare" }))
+  assert.equal(h.memberRequests.length, 4)
+  assert.equal(h.stockRequests.length, 0)
+  assert.match(result, /length-limited twice/)
+  assert.doesNotMatch(result, /PARTIAL-ONLY/)
+})
+
+test("member provider errors and errors after the length retry are not retried", async () => {
+  for (const lengthFirst of [false, true]) {
+    const attempts = new Map()
+    const h = await harness({ memberGenerate: (request) => {
+      const n = (attempts.get(request.model.id) ?? 0) + 1
+      attempts.set(request.model.id, n)
+      return lengthFirst && n === 1 ? Effect.succeed({ text: "partial", finishReason: { normalized: "length" } }) : Effect.fail(new Error("provider failed"))
+    } })
+    assert.match(output(await h.call("council", { question: "Q", members, strategy: "compare" })), /provider failed/)
+    assert.equal(h.memberRequests.length, lengthFirst ? 4 : 2)
+    assert.equal(h.stockRequests.length, 0)
+  }
+})
+
+test("owned member defaults/overrides lose identifiers, preserve auth and do not mutate shared model settings", async () => {
+  const settings = {
+    maxTokens: 1234, promptCacheKey: "session-cache",
+    headers: { Authorization: "Bearer fixture", "chatgpt-account-id": "account-fixture", "x-api-key": "api-fixture", "x-opencode-session": "session-header", "x-pxpipe-debug": "1", "x-pxpipe-local-session": "local-header" },
+    providerOptions: { openai: { user: "local-user", safety_identifier: "local-safety", promptCacheKey: "local-cache", metadata: { sessionID: "local-meta" }, reasoningEffort: "high" }, scalar: "kept" },
+    http: { body: { session_id: "local-session", previous_response_id: "local-response", metadata: { id: "local-meta" }, max_output_tokens: 1200 } },
+  }
+  const before = structuredClone(settings)
+  const h = await harness({ memberOptions: settings, routeOptions: { promptCacheKey: "route-cache" } })
+  await h.call("council", { question: "sensitive question", members, strategy: "compare" })
+  assert.deepEqual(settings, before)
+  assert.ok(h.created.every((entry) => entry.title === "Council member"))
+  for (const { request } of h.memberRequests) {
+    assert.equal(request.maxTokens, 1234)
+    assert.equal(request.headers.Authorization, "Bearer fixture")
+    assert.equal(request.headers["chatgpt-account-id"], "account-fixture")
+    assert.equal(request.headers["x-api-key"], "api-fixture")
+    assert.equal(request.providerOptions.openai.reasoningEffort, "high")
+    assert.equal(request.http.body.max_output_tokens, 1200)
+    assert.doesNotMatch(JSON.stringify({ ...request, messages: [], model: { options: request.model.options } }), /local-|session-cache|session-header|route-cache|x-pxpipe|x-opencode/)
+    assert.deepEqual(request.model.route.auth, { type: "fixture-auth" })
+  }
+})
+
+test("real HTTP request boundary strips late identifiers and debug headers but leaves auth and prompt JSON intact", () => {
+  const content = { model: "fixture", session_id: "local", prompt_cache_key: "local", user: "local", metadata: { session: "local" }, previous_response_id: "local", messages: [{ role: "user", content: '{"user":"content-not-metadata"}' }] }
+  const wire = HttpClientRequest.bodyUint8Array(HttpClientRequest.setHeaders(HttpClientRequest.post("https://provider.invalid/v1/responses"), {
+    Authorization: "Bearer fixture", "x-api-key": "api-fixture", "chatgpt-account-id": "account-fixture", "x-opencode-session": "local", session_id: "local", "x-request-id": "local", traceparent: "local", "x-pxpipe-debug": "1", "x-pxpipe-local-session": "local", "content-length": "99999",
+  }), new TextEncoder().encode(JSON.stringify(content)), "application/json")
+  const clean = legacy.councilMemberWire(wire)
+  assert.equal(clean.headers.authorization, "Bearer fixture")
+  assert.equal(clean.headers["x-api-key"], "api-fixture")
+  assert.equal(clean.headers["chatgpt-account-id"], "account-fixture")
+  for (const key of ["x-opencode-session", "session_id", "x-request-id", "traceparent", "x-pxpipe-debug", "x-pxpipe-local-session", "content-length"]) assert.equal(clean.headers[key], undefined)
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(clean.body.body)), { model: "fixture", messages: content.messages })
+  assert.equal(wire.headers["x-pxpipe-debug"], "1")
+})
+
+test("owned member actually installs the final HTTP scrubber, with tracing off by default", async () => {
+  const h = await harness()
+  await h.call("council", { question: "Q", members, strategy: "compare" })
+  let forwarded
+  await Effect.runPromise(h.memberRequests[0].transport.http(
+    HttpClientRequest.setHeaders(HttpClientRequest.get("https://provider.invalid/v1/responses"), { Authorization: "Bearer fixture", "x-pxpipe-debug": "1", "x-pxpipe-local-session": "local", session_id: "local" }),
+    (request) => Effect.sync(() => { forwarded = request }),
+  ))
+  assert.equal(forwarded.headers.authorization, "Bearer fixture")
+  assert.equal(forwarded.headers["x-pxpipe-debug"], undefined)
+  assert.equal(forwarded.headers["x-pxpipe-local-session"], undefined)
+  assert.equal(forwarded.headers.session_id, undefined)
+})
+
+test("proxy-only tracing requires explicit loopback origin; remote, credentialled and malformed origins are rejected", () => {
+  for (const value of [undefined, "", "1", "https://provider.invalid", "http://user:password@127.0.0.1:47821", "http://127.0.0.1:47821/path", "http://127.0.0.1:47821/?token=secret"]) assert.equal(legacy.councilTraceOrigin(value), undefined)
+  assert.equal(legacy.councilTraceOrigin("http://127.0.0.1:47821/"), "http://127.0.0.1:47821")
+  const trace = { origin: "http://127.0.0.1:47821", id: "12345678-1234-4123-8123-123456789abc" }
+  const local = legacy.councilMemberWire(HttpClientRequest.get(`${trace.origin}/v1/responses`), trace)
+  assert.equal(local.headers["x-pxpipe-debug"], "1")
+  assert.equal(local.headers["x-pxpipe-local-session"], trace.id)
+  for (const url of ["https://provider.invalid/v1/responses", "http://127.0.0.1:47822/v1/responses"]) {
+    const remote = legacy.councilMemberWire(HttpClientRequest.get(url), { ...trace, origin: new URL(url).origin })
+    assert.equal(remote.headers["x-pxpipe-debug"], new URL(url).hostname === "127.0.0.1" ? "1" : undefined)
+    assert.equal(legacy.councilMemberWire(HttpClientRequest.get(url), trace).headers["x-pxpipe-local-session"], undefined)
+  }
+})
+
+test("opt-in correlation is logged locally before generation and never uses the real local session id as a header", async () => {
+  const previous = process.env.OPENCODE_COUNCIL_PROXY_TRACE_ORIGIN
+  const start = localLogs.length
+  process.env.OPENCODE_COUNCIL_PROXY_TRACE_ORIGIN = "http://127.0.0.1:47821"
+  try {
+    const h = await harness({ memberGenerate: () => {
+      assert.ok(localLogs.length > start)
+      return Effect.succeed("done")
+    } })
+    await h.call("council", { question: "Q", members, strategy: "compare" })
+    const records = localLogs.slice(start)
+    assert.equal(records.length, 2)
+    for (let i = 0; i < records.length; i++) {
+      const [, mapping] = records[i]
+      assert.equal(mapping.parentID, context.sessionID)
+      assert.equal(mapping.sessionID, `child-${i + 1}`)
+      let forwarded
+      await Effect.runPromise(h.memberRequests[i].transport.http(HttpClientRequest.get("http://127.0.0.1:47821/v1/responses"), (request) => Effect.sync(() => { forwarded = request })))
+      assert.equal(forwarded.headers["x-pxpipe-local-session"], mapping.traceID)
+      assert.doesNotMatch(mapping.traceID, /child-|parent-session/)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_COUNCIL_PROXY_TRACE_ORIGIN
+    else process.env.OPENCODE_COUNCIL_PROXY_TRACE_ORIGIN = previous
+  }
+})
+
+test("registration graph exposes the shared resolver needed by owned members", () => {
+  const requirements = { name: "stock-requirements" }
+  assert.deepEqual(decorate({ requirements }).requirements.nodes, [requirements, modelNode])
+})
+
+test("R facade exports the shared member resolver requirements as well as list", () => {
+  const manifest = JSON.parse(readFileSync(new URL(".personalize/R.json", root), "utf8"))
+  const entry = manifest.modules.find((item) => item.target === "packages/core/src/plugin/internal.ts")
+  assert.equal(entry.factory, "packages/core/src/personalize/tools.ts")
+  assert.deepEqual(entry.exports, ["list", "requirements"])
 })
 
 test.todo("supported proxy route restores a missing cap after OpenAI hooks; requires the pending route-aware fix, not these host doubles")

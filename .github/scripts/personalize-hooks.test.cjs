@@ -114,3 +114,19 @@ test('the CLI refuses to silently pass when the mandatory patch is missing', () 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('context-provider destructuring exports the alias, including multiline bindings', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'opencode', 'personalize-exports-'));
+  try {
+    writeFileSync(path.join(directory, 'stock.ts'), 'export const {\n  use: useClient,\n  provider: ClientProvider,\n} = context()\n');
+    const fixture = (name) => owned('.personalize/manifest.json', JSON.stringify({ modules: [
+      { target: 'stock.ts', factory: 'owned.ts', exports: [name] },
+    ] })) + owned('owned.ts', `export const decorate = (stock) => ({ ${name}: stock.${name} })`) + shimSection();
+    assert.doesNotThrow(() => analyze({ core: fixture('ClientProvider') }, directory));
+    assert.doesNotThrow(() => analyze({ core: fixture('useClient') }, directory));
+    assert.throws(() => analyze({ core: fixture('provider') }, directory), /Public export changed/);
+    assert.throws(() => analyze({ core: fixture('missing') }, directory), /Public export changed/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
