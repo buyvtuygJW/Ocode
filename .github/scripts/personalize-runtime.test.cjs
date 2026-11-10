@@ -15,18 +15,21 @@ const source = section.split(/\r?\n/).filter((line) => line.startsWith('+') && !
 const end = source.indexOf('const { define } = load(');
 assert.ok(end > 0);
 
-async function loader(input = source.slice(0, end)) {
+async function loader(input = source.slice(0, end), specifier = 'fixture') {
   const context = vm.createContext({ URL, process: { env: {} }, Bun: {
     Transpiler: class {
       transformSync() {
-        return 'import { value } from "fixture";\nconst localAnswer = value + 1;\nexport {\n  localAnswer as answer,\n};\n';
+        return `import { value } from ${JSON.stringify(specifier)};\nconst localAnswer = value + 1;\nexport {\n  localAnswer as answer,\n};\n`;
       }
     },
   } });
   let nodeModuleImports = 0;
   const synthetic = async (name) => {
     if (name === 'node:module') nodeModuleImports++;
-    const exports = name === 'node:module' ? { createRequire: () => ({ resolve: () => '/fixture/effect.js' }) }
+    const exports = name === 'node:module' ? { createRequire: () => ({ resolve: (specifier) => {
+      if (specifier === 'effect/__missing') throw Object.assign(new Error('Missing Effect module'), { code: 'MODULE_NOT_FOUND' });
+      return '/fixture/effect.js';
+    } }) }
       : name === 'node:fs' ? { readFileSync: () => 'fixture TypeScript' }
       : name.startsWith('node:') ? await import(name)
       : { Context: {}, Deferred: {}, Effect: {}, JsonSchema: {}, Schema: {}, Scope: {} };
@@ -57,6 +60,11 @@ test('R loader links without stripTypeScriptTypes and evaluates trailing transpi
 test('the original static named import is detected before any fixture runs', async () => {
   const broken = source.slice(0, end).replace('import { createRequire }', 'import { createRequire, stripTypeScriptTypes as oldStrip }');
   await assert.rejects(loader(broken), /does not provide an export named 'stripTypeScriptTypes'/);
+});
+
+test('a fixture substitute cannot conceal an unavailable production Effect import', async () => {
+  const load = await loader(undefined, 'effect/__missing');
+  assert.throws(() => load('fixture.ts', { 'effect/__missing': { value: 41 } }, ['answer']), { code: 'MODULE_NOT_FOUND' });
 });
 
 test('removing the trailing-export cleanup is detected', async () => {

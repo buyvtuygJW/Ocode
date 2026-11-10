@@ -40,7 +40,7 @@ index 0000000..9598b97
 +}
 diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
 new file mode 100644
-index 0000000..a461bb3
+index 0000000..b3b3087
 --- /dev/null
 +++ b/packages/core/src/plugin/personalize.ts
 @@ -0,0 +1,842 @@
@@ -67,7 +67,7 @@ index 0000000..a461bb3
 +import path from "path"
 +import { randomUUID } from "node:crypto"
 +import { LanguageModel, LLMClient, Message, type RequestOptions } from "@opencode/ai/effect"
-+import { HttpClientRequest } from "effect/unstable/http"
++import { HttpClientRequest } from "effect/http"
 +import { Model } from "../model.js"
 +import { Session } from "../session.js"
 +import { Service as ModelResolverService } from "../model-resolver.js"
@@ -888,10 +888,10 @@ index 0000000..a461bb3
 +})
 diff --git a/.personalize/legacy.test.mjs b/.personalize/legacy.test.mjs
 new file mode 100644
-index 0000000..894133f
+index 0000000..63a9ab4
 --- /dev/null
 +++ b/.personalize/legacy.test.mjs
-@@ -0,0 +1,695 @@
+@@ -0,0 +1,693 @@
 +import assert from "node:assert/strict"
 +import { readFileSync } from "node:fs"
 +import { createRequire } from "node:module"
@@ -911,13 +911,10 @@ index 0000000..894133f
 +// Node ESM needs a file URL, not a Windows drive-letter path, for dynamic import.
 +const runtime = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(requireCore.resolve("effect")).href
 +const { Context, Deferred, Effect, JsonSchema, Schema, Scope } = await import(runtime)
-+// Test the real HTTP request combinators too. Effect's audit dependency has the
-+// stable /http layout; the application pin uses /unstable/http. Root resolution
-+// (including an explicit PERSONALIZE_EFFECT override) remains unchanged/lazy.
-+const HttpClientRequest = await import(new URL("./unstable/http/HttpClientRequest.js", runtime).href).catch((error) => {
-+  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error
-+  return import(new URL("./http/HttpClientRequest.js", runtime).href)
-+})
++// Resolve the public subpath from the selected Effect package, exactly as the
++// production import does. No alternate layout or mock may hide a missing module.
++const requireEffect = createRequire(runtime)
++const { HttpClientRequest } = await import(pathToFileURL(requireEffect.resolve("effect/http")).href)
 +const root = new URL("../", import.meta.url)
 +function load(relative, dependencies, names) {
 +  const file = new URL(relative, root)
@@ -926,6 +923,7 @@ index 0000000..894133f
 +    ? new Bun.Transpiler({ loader: "ts" }).transformSync(original)
 +    : stripTypeScriptTypes(original)
 +  const imported = (specifier) => {
++    if (specifier === "effect" || specifier.startsWith("effect/")) requireEffect.resolve(specifier)
 +    assert.ok(Object.hasOwn(dependencies, specifier), `Unmocked import in ${relative}: ${specifier}`)
 +    return `dependencies[${JSON.stringify(specifier)}]`
 +  }
@@ -973,7 +971,7 @@ index 0000000..894133f
 +  effect: { Effect: { ...Effect, logInfo: (...args) => Effect.sync(() => { localLogs.push(args) }) } },
 +  "node:crypto": { randomUUID },
 +  "@opencode/ai/effect": { LanguageModel, Message, LLMClient: MemberClient },
-+  "effect/unstable/http": { HttpClientRequest },
++  "effect/http": { HttpClientRequest },
 +  "@opencode/plugin/effect/plugin": { define },
 +  "@opencode/schema/tool": { Tool },
 +  "@opencode/schema/model": { Model: identity },

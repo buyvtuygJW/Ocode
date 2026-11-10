@@ -17,13 +17,10 @@ const requireCore = createRequire(new URL("../packages/core/package.json", impor
 // Node ESM needs a file URL, not a Windows drive-letter path, for dynamic import.
 const runtime = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(requireCore.resolve("effect")).href
 const { Context, Deferred, Effect, JsonSchema, Schema, Scope } = await import(runtime)
-// Test the real HTTP request combinators too. Effect's audit dependency has the
-// stable /http layout; the application pin uses /unstable/http. Root resolution
-// (including an explicit PERSONALIZE_EFFECT override) remains unchanged/lazy.
-const HttpClientRequest = await import(new URL("./unstable/http/HttpClientRequest.js", runtime).href).catch((error) => {
-  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error
-  return import(new URL("./http/HttpClientRequest.js", runtime).href)
-})
+// Resolve the public subpath from the selected Effect package, exactly as the
+// production import does. No alternate layout or mock may hide a missing module.
+const requireEffect = createRequire(runtime)
+const { HttpClientRequest } = await import(pathToFileURL(requireEffect.resolve("effect/http")).href)
 const root = new URL("../", import.meta.url)
 function load(relative, dependencies, names) {
   const file = new URL(relative, root)
@@ -32,6 +29,7 @@ function load(relative, dependencies, names) {
     ? new Bun.Transpiler({ loader: "ts" }).transformSync(original)
     : stripTypeScriptTypes(original)
   const imported = (specifier) => {
+    if (specifier === "effect" || specifier.startsWith("effect/")) requireEffect.resolve(specifier)
     assert.ok(Object.hasOwn(dependencies, specifier), `Unmocked import in ${relative}: ${specifier}`)
     return `dependencies[${JSON.stringify(specifier)}]`
   }
@@ -79,7 +77,7 @@ const legacy = load("packages/core/src/plugin/personalize.ts", {
   effect: { Effect: { ...Effect, logInfo: (...args) => Effect.sync(() => { localLogs.push(args) }) } },
   "node:crypto": { randomUUID },
   "@opencode/ai/effect": { LanguageModel, Message, LLMClient: MemberClient },
-  "effect/unstable/http": { HttpClientRequest },
+  "effect/http": { HttpClientRequest },
   "@opencode/plugin/effect/plugin": { define },
   "@opencode/schema/tool": { Tool },
   "@opencode/schema/model": { Model: identity },
