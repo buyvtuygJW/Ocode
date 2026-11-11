@@ -1,0 +1,27 @@
+{
+  "modules": [
+    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
+    { "target": "packages/cli/src/version.ts", "factory": "packages/cli/src/personalize/version.ts", "exports": ["OPENCODE_CHANNEL", "OPENCODE_LOCAL"] },
+    { "target": "packages/util/src/observability.ts", "factory": "packages/util/src/personalize-observability.ts", "exports": ["layer"] },
+    { "target": "packages/ai/src/protocols/open-responses.ts", "factory": "packages/ai/src/personalize/open-responses.ts", "exports": ["lowerGeneration", "fromRequest", "fromRequestWithAdapter", "protocol"] },
+    { "target": "packages/core/src/config/markdown.ts", "factory": "packages/core/src/personalize/markdown.ts", "exports": ["sanitize"] },
+    { "target": "packages/core/src/database/database.ts", "factory": "packages/core/src/personalize/database.ts", "exports": ["layer", "configured", "node"] },
+    { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
+    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
+    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
+    { "target": "packages/core/src/model-resolver.ts", "factory": "packages/core/src/personalize/model-resolver.ts", "exports": ["node"] },
+    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
+    { "target": "packages/core/src/session/runner/step.ts", "factory": "packages/core/src/personalize/step.ts", "exports": ["make"] },
+    { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },
+    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
+    { "target": "packages/core/src/session/runner/publish-llm-event.ts", "factory": "packages/core/src/personalize/publish-llm-event.ts", "exports": ["createLLMEventPublisher"] },
+    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
+    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
+    { "target": "packages/server/src/routes.ts", "factory": "packages/server/src/personalize/routes.ts", "exports": ["createRoutes"] },
+    { "target": "packages/server/src/handlers/event.ts", "factory": "packages/server/src/personalize/event.ts", "exports": ["EventHandler"] },
+    { "target": "packages/tui/src/plugin/builtins.ts", "factory": "packages/tui/src/personalize/lifetime.ts", "exports": ["builtins"] },
+    { "target": "packages/tui/src/context/client.tsx", "factory": "packages/tui/src/personalize/client.ts", "exports": ["ClientProvider"] },
+    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
+    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
+  ]
+}

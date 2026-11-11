@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { PersonalizeBuild } from "../../../.personalize/build.mjs"
 
 import { $ } from "bun"
 import { createHash } from "node:crypto"
@@ -172,7 +173,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
   const result = await Bun.build({
     entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
     tsconfig: "./tsconfig.json",
-    plugins: [
+    plugins: PersonalizeBuild.plugins([
       appAssetsPlugin,
       solidPlugin,
       parcelWatcherPlugin,
@@ -181,7 +182,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       wsReexportPlugin,
       simulationGraphPlugin,
       modelsSnapshot,
-    ],
+    ]),
     external: ["node-gyp"],
     format: "esm",
     minify: true,
