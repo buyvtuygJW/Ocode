@@ -1,0 +1,3620 @@
+diff --git a/.personalize/build.d.mts b/.personalize/build.d.mts
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc05d0d68a8c3f46c027cfb7b190a25b2fbcb487
+--- /dev/null
++++ b/.personalize/build.d.mts
+@@ -0,0 +1,7 @@
++import type { BunPlugin } from "bun"
++
++export function normalizeChannel(value: unknown): string
++export function personalizationPlugins(plugins: BunPlugin[], options?: {
++  root?: string
++}): BunPlugin[]
++export const PersonalizeBuild: { plugins: typeof personalizationPlugins }
+diff --git a/.personalize/build.mjs b/.personalize/build.mjs
+new file mode 100644
+index 000000000..5429a07b8
+--- /dev/null
++++ b/.personalize/build.mjs
+@@ -0,0 +1,138 @@
++import { existsSync, readFileSync } from "node:fs"
++import path from "node:path"
++import { fileURLToPath } from "node:url"
++import { normalizeChannel } from "./channel.mjs"
++export { normalizeChannel } from "./channel.mjs"
++
++const ORIGINAL = "personalize-original"
++const PREFIX = "personalize:original:"
++// Bun dedupes modules by path while ignoring the namespace, so the original must never
++// collide with the shim's real file path. The marker sits in the basename, keeping the
++// real directory so Bun's default resolver (extensions, index files, tsconfig) resolves
++// the stock module's imports exactly like upstream.
++const VIRTUAL = ".personalize-original~"
++const directory = path.dirname(fileURLToPath(import.meta.url))
++
++// This module is the FIRST build-script import, before Script computes its constants.
++if (process.env.OPENCODE_CHANNEL !== undefined) {
++  process.env.OPENCODE_CHANNEL = normalizeChannel(process.env.OPENCODE_CHANNEL)
++}
++
++const key = (value) => {
++  const normalized = path.resolve(value).replaceAll("\\", "/")
++  return process.platform === "win32" ? normalized.toLowerCase() : normalized
++}
++
++export function loadManifest(root) {
++  const result = new Map()
++  for (const name of ["manifest.json", "R.json", "S.json", "X.json"]) {
++    const filename = path.join(root, ".personalize", name)
++    if (!existsSync(filename)) continue
++    const manifest = JSON.parse(readFileSync(filename, "utf8"))
++    for (const item of manifest.modules) {
++      const target = path.resolve(root, item.target)
++      if (!existsSync(target)) throw new Error(`Personalize target missing: ${item.target}`)
++      for (const filename of [...(item.before || []), ...(item.factory ? [item.factory] : [])]) {
++        if (!existsSync(path.resolve(root, filename))) throw new Error(`Personalize owned module missing: ${filename}`)
++      }
++      const current = result.get(key(target)) || { target, modules: [] }
++      current.modules.push(item)
++      result.set(key(target), current)
++    }
++  }
++  return result
++}
++
++export function moduleShim(root, entry) {
++  const original = PREFIX + encodeURIComponent(entry.target)
++  const code = []
++  for (const item of entry.modules) for (const filename of item.before || []) {
++    code.push(`import ${JSON.stringify(path.resolve(root, filename).replaceAll("\\", "/"))}`)
++  }
++  code.push(`export * from ${JSON.stringify(original)}`)
++  const factories = entry.modules.filter((item) => item.factory)
++  if (!factories.length) return code.join("\n") + "\n"
++  code.push(`import * as original from ${JSON.stringify(original)}`)
++  const names = new Set()
++  factories.forEach((item, index) => {
++    for (const name of item.exports) {
++      if (!/^[A-Za-z_$][\w$]*$/.test(name) || name === "default") throw new Error(`Invalid Personalize export: ${name}`)
++      names.add(name)
++    }
++    code.push(`import { decorate as decorate${index} } from ${JSON.stringify(path.resolve(root, item.factory).replaceAll("\\", "/"))}`)
++    for (const name of item.exports) code.push(`if (!(${JSON.stringify(name)} in original)) throw new Error(${JSON.stringify(`Personalize public export changed: ${entry.target}#${name}`)})`)
++    code.push(`const stage${index} = { ...${index ? `stage${index - 1}` : "original"}, ...decorate${index}(${index ? `stage${index - 1}` : "original"}) }`)
++  })
++  for (const name of names) code.push(`export const ${name} = stage${factories.length - 1}.${name}`)
++  return code.join("\n") + "\n"
++}
++
++/** Adapt normal plugin registrations so original TSX still uses the STOCK Solid compiler. */
++export function forwardPlugin(plugin) {
++  return {
++    ...plugin,
++    setup(build) {
++      // Native methods and accessors must receive the actual builder. A separate
++      // target permits registration overrides even when the builder is frozen.
++      const bound = new Map()
++      const facade = new Proxy(Object.create(build), {
++        get(target, key, receiver) {
++          if (Object.hasOwn(target, key)) return Reflect.get(target, key, receiver)
++          const value = Reflect.get(build, key, build)
++          if (typeof value !== "function") return value
++          if (!bound.has(value)) bound.set(value, value.bind(build))
++          return bound.get(value)
++        },
++      })
++      for (const method of ["onLoad", "onResolve"]) Object.defineProperty(facade, method, {
++        value(options, callback) {
++          build[method]({ namespace: "file", ...options }, callback)
++          if (!options.namespace || options.namespace === "file") {
++            build[method]({ ...options, namespace: ORIGINAL }, (args) => callback({ ...args, namespace: "file", path: args.path.replaceAll(VIRTUAL, ""), importer: args.importer?.replaceAll(VIRTUAL, "") }))
++          }
++        },
++      })
++      return plugin.setup(facade)
++    },
++  }
++}
++
++export function personalizationPlugins(plugins, options = {}) {
++  const root = options.root || path.resolve(directory, "..")
++  const manifest = loadManifest(root)
++  const aliases = {
++    name: "personalize-owned-module-boundaries",
++    setup(build) {
++      const original = (args) => {
++        const filename = decodeURIComponent(args.path.slice(PREFIX.length))
++        if (!manifest.has(key(filename))) throw new Error(`Unregistered Personalize original: ${filename}`)
++        const normalized = filename.replaceAll("\\", "/")
++        const slash = normalized.lastIndexOf("/")
++        return { path: normalized.slice(0, slash + 1) + VIRTUAL + normalized.slice(slash + 1), namespace: ORIGINAL }
++      }
++      build.onResolve({ filter: /^personalize:original:/, namespace: "file" }, original)
++      build.onResolve({ filter: /^personalize:original:/, namespace: ORIGINAL }, original)
++      build.onLoad({ filter: /\.[cm]?[jt]sx?$/, namespace: "file" }, (args) => {
++        const entry = manifest.get(key(args.path))
++        if (!entry) return
++        return { loader: "js", contents: moduleShim(root, entry) }
++      })
++    },
++  }
++  const originals = {
++    name: "personalize-stock-modules-unchanged",
++    setup(build) {
++      build.onLoad({ filter: /.*/, namespace: ORIGINAL }, (args) => {
++        const filename = args.path.replaceAll("\\", "/").replaceAll(VIRTUAL, "")
++        return {
++          // No substitutions, AST edits, copied framework implementations, or source anchors.
++          contents: readFileSync(filename, "utf8"),
++          loader: args.path.endsWith(".tsx") ? "tsx" : args.path.endsWith(".jsx") ? "jsx" : "ts",
++        }
++      })
++    },
++  }
++  return [aliases, ...plugins.map(forwardPlugin), originals]
++}
++
++export const PersonalizeBuild = { plugins: personalizationPlugins }
+diff --git a/.personalize/build.test.mjs b/.personalize/build.test.mjs
+new file mode 100644
+index 000000000..27223de12
+--- /dev/null
++++ b/.personalize/build.test.mjs
+@@ -0,0 +1,136 @@
++import { afterEach, test } from "node:test"
++import assert from "node:assert/strict"
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { forwardPlugin, loadManifest, moduleShim, normalizeChannel, personalizationPlugins } from "./build.mjs"
++
++const directories = []
++afterEach(() => {
++  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
++})
++
++function fixture() {
++  const temporary = path.join(tmpdir(), "opencode")
++  mkdirSync(temporary, { recursive: true })
++  const root = mkdtempSync(path.join(temporary, "personalize-resolver-"))
++  directories.push(root)
++  mkdirSync(path.join(root, ".personalize"))
++  writeFileSync(path.join(root, "stock.ts"), "// deliberately unlike ANY old source\nexport const value = 1\n")
++  writeFileSync(path.join(root, "owned.ts"), "export const decorate = stock => ({ value: stock.value + 1 })\n")
++  writeFileSync(path.join(root, ".personalize/manifest.json"), JSON.stringify({ modules: [
++    { target: "stock.ts", factory: "owned.ts", exports: ["value"] },
++  ] }))
++  return root
++}
++
++function registrations(plugins) {
++  const registrations = { onLoad: [], onResolve: [] }
++  for (const plugin of plugins) plugin.setup({
++    onLoad(options, callback) { registrations.onLoad.push({ options, callback }) },
++    onResolve(options, callback) { registrations.onResolve.push({ options, callback }) },
++  })
++  return registrations
++}
++
++test("channel normalization handles null/undefined/bad names without trim crashes", () => {
++  for (const value of [undefined, null, "", "undefined", " null ", "a/b", 1]) assert.equal(normalizeChannel(value), "local")
++  assert.equal(normalizeChannel(" custom "), "custom")
++})
++
++test("wrapper delegates every untouched export and contains no stock implementation", () => {
++  const root = fixture()
++  const shim = moduleShim(root, [...loadManifest(root).values()][0])
++  assert.match(shim, /export \* from "personalize:original:/)
++  assert.match(shim, /export const value = stage0.value/)
++  assert(!shim.includes("value = 1"))
++  assert(!shim.includes("deliberately unlike"))
++})
++
++test("unknown optional files are not invented and missing owned modules fail closed", () => {
++  const root = fixture()
++  assert.equal(loadManifest(root).size, 1)
++  rmSync(path.join(root, "owned.ts"))
++  assert.throws(() => loadManifest(root), /owned module missing/)
++})
++
++test("original module bytes stay byte-for-byte untouched", () => {
++  const root = fixture()
++  const hooks = registrations(personalizationPlugins([], { root }))
++  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
++  assert.equal(original.callback({ path: path.join(root, "stock.ts") }).contents,
++    readFileSync(path.join(root, "stock.ts"), "utf8"))
++})
++
++test("private originals cannot address arbitrary unregistered files", () => {
++  const root = fixture()
++  const hooks = registrations(personalizationPlugins([], { root }))
++  const resolve = hooks.onResolve.find((h) => h.options.namespace === "file")
++  assert.throws(() => resolve.callback({ path: "personalize:original:" + encodeURIComponent(path.join(root, "secret.ts")) }), /Unregistered/)
++})
++
++test("stock Solid/virtual/native callbacks receive originals in their expected file namespace", () => {
++  const seen = []
++  const hooks = registrations([forwardPlugin({ name: "stock-solid", setup(build) {
++    build.onLoad({ filter: /\.tsx$/ }, (args) => { seen.push(args); return { contents: "compiled-by-stock-solid", loader: "js" } })
++  } })])
++  const original = hooks.onLoad.find((h) => h.options.namespace === "personalize-original")
++  assert.equal(original.callback({ path: "stock.tsx", namespace: "personalize-original" }).contents, "compiled-by-stock-solid")
++  assert.equal(seen[0].namespace, "file")
++})
++
++test("custom upstream plugin namespaces are not duplicated or rewritten", () => {
++  const hooks = registrations([forwardPlugin({ name: "stock-virtual", setup(build) {
++    build.onLoad({ filter: /.*/, namespace: "opencode" }, () => ({ contents: "embedded" }))
++  } })])
++  assert.equal(hooks.onLoad.length, 1)
++  assert.equal(hooks.onLoad[0].options.namespace, "opencode")
++})
++
++test("non-writable SDK methods can be adapted without assigning to inherited fields", () => {
++  const calls = []
++  const build = Object.freeze({ onLoad: (...args) => calls.push(args), onResolve() {} })
++  forwardPlugin({ name: "frozen-sdk", setup(api) { api.onLoad({ filter: /x/ }, () => undefined) } }).setup(build)
++  assert.equal(calls.length, 2)
++  assert.equal(calls[0][0].namespace, "file")
++  assert.equal(calls[1][0].namespace, "personalize-original")
++})
++
++test("plugin order intercepts the selected file, then delegates original transforms before raw fallback", () => {
++  const root = fixture()
++  const plugins = personalizationPlugins([{ name: "stock", setup() {} }], { root })
++  assert.deepEqual(plugins.map((p) => p.name), ["personalize-owned-module-boundaries", "stock", "personalize-stock-modules-unchanged"])
++})
++
++test("forwarded builder methods and getters retain their native receiver", async () => {
++  const calls = [], config = { target: "bun" }
++  class Builder {
++    #config = config
++    constructor() {
++      for (const name of ["resolve", "onEnd", "onLoad", "onResolve"]) Object.defineProperty(this, name, { value: this[name] })
++    }
++    get config() { return this.#config }
++    resolve(name) { assert.equal(this, build); return `resolved:${name}` }
++    onEnd(callback) { assert.equal(this, build); calls.push(callback) }
++    onLoad(options, callback) { assert.equal(this, build); calls.push({ options, callback }) }
++    onResolve(options, callback) { assert.equal(this, build); calls.push({ options, callback }) }
++  }
++  const build = Object.freeze(new Builder())
++  const plugin = {
++    name: "receiver-sensitive",
++    async setup(forwarded) {
++      assert.equal(this, plugin)
++      assert.equal(forwarded.config, config)
++      const resolve = forwarded.resolve
++      assert.equal(resolve, forwarded.resolve)
++      assert.equal(resolve("solid-js"), "resolved:solid-js")
++      forwarded.onEnd(() => {})
++      forwarded.onLoad({ filter: /\.tsx$/ }, () => ({ contents: "stock", loader: "js" }))
++      forwarded.onResolve({ filter: /^native:/, namespace: "native" }, () => undefined)
++      return "setup-result"
++    },
++  }
++  assert.equal(await forwardPlugin(plugin).setup(build), "setup-result")
++  assert.equal(calls.length, 4)
++  assert.deepEqual(calls.slice(1).map((call) => call.options.namespace), ["file", "personalize-original", "native"])
++})
+diff --git a/.personalize/channel.d.mts b/.personalize/channel.d.mts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a59a3b4927c3e812455eb43034be464e1c155fc
+--- /dev/null
++++ b/.personalize/channel.d.mts
+@@ -0,0 +1 @@
++export function normalizeChannel(value: unknown): string
+diff --git a/.personalize/channel.mjs b/.personalize/channel.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..58d7470b10d17a195eee07fd2ac8fde633cd7952
+--- /dev/null
++++ b/.personalize/channel.mjs
+@@ -0,0 +1,4 @@
++export function normalizeChannel(value) {
++  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*$/i.test(value.trim()) &&
++    !["undefined", "null"].includes(value.trim().toLowerCase()) ? value.trim() : "local"
++}
+diff --git a/.personalize/content.test.mjs b/.personalize/content.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..56bff6ccfd5593c5db2676603f65e4f7ff197d3e
+--- /dev/null
++++ b/.personalize/content.test.mjs
+@@ -0,0 +1,75 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { canonicalMessages, historyMessages, copyWith } from "../packages/core/src/personalize/content.ts"
++import { personaLead, stripStockIdentity } from "../packages/core/src/personalize/persona.ts"
++
++test("valid messages retain their exact object identity and metadata", () => {
++  const message = { role: "user", content: [{ type: "text", text: "hello" }], metadata: { instruction: [1] } }
++  assert.equal(canonicalMessages([message])[0], message)
++})
++
++test("missing content is repaired without losing prototypes, symbols, readonly or hidden metadata", () => {
++  const marker = Symbol("metadata")
++  class Message { content = undefined; role = "user"; get kind() { return "original" } }
++  const message = new Message()
++  Object.defineProperty(message, marker, { value: { instructions: [1] }, enumerable: false })
++  Object.defineProperty(message, "content", { value: undefined, writable: false, enumerable: true })
++  const result = canonicalMessages([message])[0]
++  assert(result instanceof Message)
++  assert.equal(result.kind, "original")
++  assert.equal(result[marker], message[marker])
++  assert.equal(Object.getOwnPropertyDescriptor(result, marker).enumerable, false)
++  assert.equal(Object.getOwnPropertyDescriptor(result, "content").writable, false)
++  assert.deepEqual(result.content, [])
++  assert.equal(message.content, undefined)
++})
++
++test("nullish arrays and tool-result values are repaired, not mutated", () => {
++  assert.deepEqual(canonicalMessages(undefined), [])
++  const message = { role: "tool", content: [{ type: "tool-result", result: { type: "content", value: undefined } }] }
++  const result = canonicalMessages([message])[0]
++  assert.deepEqual(result.content[0].result.value, [])
++  assert.equal(message.content[0].result.value, undefined)
++})
++
++test("history repair keeps completed-tool metadata and leaves healthy records alone", () => {
++  const good = { role: "assistant", content: [] }
++  assert.equal(historyMessages([good])[0], good)
++  const bad = { role: "assistant", content: [{ type: "tool", state: { status: "completed", content: undefined, metadata: { id: 1 } } }] }
++  const result = historyMessages([bad])[0]
++  assert.deepEqual(result.content[0].state.content, [])
++  assert.equal(result.content[0].state.metadata, bad.content[0].state.metadata)
++})
++
++test("system-part replacement preserves instruction/cache metadata", () => {
++  const part = { content: "stock", metadata: { experimental: { instructions: [{ id: 1 }] } } }
++  const result = copyWith(part, { content: "persona\nstock" })
++  assert.equal(result.metadata, part.metadata)
++  assert.equal(part.content, "stock")
++})
++
++test("persona seeds the existing role schema and reads only assistant_system", () => {
++  const root = path.join(tmpdir(), "opencode")
++  mkdirSync(root, { recursive: true })
++  const directory = mkdtempSync(path.join(root, "personalize-role-"))
++  const previous = process.env.OPENCODE_ROLE_FILE
++  try {
++    const file = path.join(directory, "role.json")
++    process.env.OPENCODE_ROLE_FILE = file
++    assert.equal(personaLead(), "")
++    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { usersystem: "", assistant_system: "" })
++    writeFileSync(file, JSON.stringify({ usersystem: "not this", assistant_system: "exact persona" }))
++    assert.equal(personaLead(), "exact persona")
++    writeFileSync(file, "{broken")
++    assert.equal(personaLead(), "")
++    assert.equal(stripStockIdentity("You are OpenCode, a coding assistant. Keep tools."), "Keep tools.")
++    assert.equal(stripStockIdentity("You are opencode, an agent of change."), "You are opencode, an agent of change.")
++  } finally {
++    if (previous === undefined) delete process.env.OPENCODE_ROLE_FILE
++    else process.env.OPENCODE_ROLE_FILE = previous
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
+diff --git a/.personalize/dedup.test.mjs b/.personalize/dedup.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d6c103a8695421451d4ae88547c38a2ab6a2a07
+--- /dev/null
++++ b/.personalize/dedup.test.mjs
+@@ -0,0 +1,62 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import {
++  bumpLedger,
++  dedupeText,
++  estimateTokens,
++  ledgerState,
++  normalizeSentence,
++  punchLine,
++  resetLedger,
++  splitSentences,
++} from "../packages/core/src/personalize/dedup.ts"
++
++test("punch line appears only from the second duplicate onward and counts both kinds", () => {
++  resetLedger()
++  assert.equal(punchLine(ledgerState("s1")), "")
++  bumpLedger("s1", "calls", 10)
++  assert.equal(punchLine(ledgerState("s1")), "")
++  bumpLedger("s1", "prose", 30)
++  assert.match(punchLine(ledgerState("s1")), /\*SystemPunch\* duplicates this session: 2 \(≈40 tkn wasted\)/)
++  assert.equal(ledgerState("nope"), undefined)
++  resetLedger()
++  assert.equal(ledgerState("s1"), undefined)
++})
++
++test("dedupeText strips adjacent duplicate sentences, keeps the first, leaves a marker", () => {
++  const text = "Build finished with exit zero. Build finished with exit zero. Now running the serve test."
++  const result = dedupeText(text)
++  assert.ok(result)
++  assert.equal(result.removed, 1)
++  assert.match(result.text, /\[duplicate removed ×1: "Build finished[^"]*"\]/)
++  assert.ok(result.text.includes("Now running the serve test."))
++  assert.ok(result.wastedTokens > 0)
++  const withoutMarker = result.text.replace(/\[duplicate[^\]]*\]/, "")
++  assert.ok(!withoutMarker.includes("Build finished with exit zero. Build"))
++})
++
++test("dedupeText collapses longer runs into one marker", () => {
++  const text = "Alpha beta gamma delta epsilon. Alpha beta gamma delta epsilon. Alpha beta gamma delta epsilon."
++  const result = dedupeText(text)
++  assert.ok(result)
++  assert.equal(result.removed, 2)
++  assert.match(result.text, /×2/)
++})
++
++test("dedupeText leaves non-adjacent repeats, short sentences and healthy text alone", () => {
++  assert.equal(dedupeText("Just one sentence, nothing repeated here at all."), undefined)
++  assert.equal(dedupeText("Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine. Fine."), undefined)
++  const nonAdjacent =
++    "Alpha beta gamma delta epsilon zeta. A completely different sentence follows here. Alpha beta gamma delta epsilon zeta."
++  assert.equal(dedupeText(nonAdjacent), undefined)
++})
++
++test("sentence normalization ignores case, punctuation and whitespace", () => {
++  assert.equal(normalizeSentence("  Build, FINISHED!!  "), normalizeSentence("build finished"))
++  assert.deepEqual(splitSentences("One. Two!\nThree?"), ["One.", "Two!", "Three?"])
++})
++
++test("estimateTokens is a deterministic chars/4 ceiling", () => {
++  assert.equal(estimateTokens("1234"), 1)
++  assert.equal(estimateTokens("12345"), 2)
++})
+diff --git a/.personalize/lifetime-effect.test.mjs b/.personalize/lifetime-effect.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d18c25fb18e844295f92794b9593f41629bdc7c5
+--- /dev/null
++++ b/.personalize/lifetime-effect.test.mjs
+@@ -0,0 +1,205 @@
++import assert from "node:assert/strict"
++import fs from "node:fs"
++import path from "node:path"
++import { stripTypeScriptTypes } from "node:module"
++import { test } from "node:test"
++import { Lifetime, defaults, duration } from "../packages/util/src/personalize-lifetime.ts"
++
++const { Context, Effect, Layer, Option } = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++
++// Exercise the actual owned factories with the actual pinned Effect runtime;
++// only the host services are test doubles. No server or child processes.
++function load(relative, dependencies, names = ["decorate"], extra = {}) {
++  let code = stripTypeScriptTypes(fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8"), { mode: "transform" })
++  code = code.replace(/^import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["'];?$/gm,
++    (_, fields, specifier) => `const {${fields.replace(/\bas\b/g, ":")}} = deps[${JSON.stringify(specifier)}];`)
++  code = code.replace(/^import\s+(\w+)\s+from\s+["']([^"']+)["'];?$/gm,
++    (_, name, specifier) => `const ${name} = deps[${JSON.stringify(specifier)}];`)
++  code = code.replace(/^export /gm, "")
++  return new Function("deps", ...Object.keys(extra), `${code}\nreturn {${names.join(",")}}`)(dependencies, ...Object.values(extra))
++}
++
++function graph(tag, service) {
++  return {
++    mapLayer: (f) => ({ layer: f(Layer.succeed(tag, service)) }),
++    replace: (replacement) => ({ tag, ...replacement }),
++  }
++}
++
++test("route seam forwards trailing arguments and counts real session/job lifetimes", async () => {
++  const policy = new Lifetime(); policy.start(); policy.connect()
++  const JobService = Context.Service()("test/Job")
++  const ExecutionService = Context.Service()("test/Execution")
++  const BusService = Context.Service()("test/Bus")
++  const queued = [], active = new Set()
++  let subscriber, unsubscribed = false, forwarded
++  const job = { start: ({ run }) => Effect.sync(() => { queued.push(run); return "job-id" }) }
++  const execution = { active: Effect.sync(() => active) }
++  const events = Object.fromEntries(["Started", "Succeeded", "Failed", "Interrupted"].map((name) => [name, { type: name }]))
++  const { decorate } = load("packages/server/src/personalize/routes.ts", {
++    effect: { Context, Effect, Layer, Option },
++    "@opencode/core/job": { Job: { Service: JobService, node: graph(JobService, job) } },
++    "@opencode/core/session/execution": { SessionExecution: { Service: ExecutionService, node: graph(ExecutionService, execution) } },
++    "@opencode/core/bus": { Bus: { Service: BusService } },
++    "@opencode/schema/session-event": { SessionEvent: { Execution: events } },
++    "./idle-state": { lifetime: policy },
++  })
++  const options = {}, urls = () => [], caller = { caller: true }, instances = {}, future = {}
++  decorate({ createRoutes: (...args) => { forwarded = args } }).createRoutes(options, urls, [caller], instances, future)
++  assert.equal(forwarded[0], options); assert.equal(forwarded[1], urls)
++  assert.equal(forwarded[2].at(-1), caller)
++  assert.equal(forwarded[3], instances); assert.equal(forwarded[4], future)
++  const bus = { listen: (fn) => Effect.sync(() => {
++    subscriber = fn
++    return Effect.sync(() => { unsubscribed = true })
++  }) }
++  const combined = Layer.mergeAll(...forwarded[2].slice(0, 2).map((replacement) => replacement.layer)).pipe(
++    Layer.provide(Layer.succeed(BusService, bus)),
++  )
++  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++    const context = yield* Layer.build(combined)
++    const jobs = Context.get(context, JobService)
++    yield* jobs.start({ run: Effect.void })
++    assert.equal(policy.jobs, 1, "queued work is already protected")
++    yield* queued.shift()
++    assert.equal(policy.jobs, 0)
++    yield* jobs.start({ run: Effect.fail(new Error("tool failed")) })
++    yield* queued.shift().pipe(Effect.exit)
++    assert.equal(policy.jobs, 0, "failed tools release their lease")
++    yield* subscriber({ type: "Started", data: { sessionID: "parent" } })
++    yield* subscriber({ type: "Started", data: { sessionID: "child" } })
++    yield* subscriber({ type: "Started", data: { sessionID: "child" } })
++    assert.equal(policy.jobs, 2, "parallel sessions count separately; duplicate events do not")
++    yield* subscriber({ type: "Succeeded", data: { sessionID: "parent" } })
++    assert.equal(policy.jobs, 1)
++    yield* subscriber({ type: "Interrupted", data: { sessionID: "child" } })
++    assert.equal(policy.jobs, 0)
++    active.add("unreported-session")
++    assert.equal(policy.next(), undefined, "actual active-session state protects against a missing lifecycle event")
++    active.clear()
++  })))
++  assert.equal(unsubscribed, true)
++})
++
++test("native commands show warnings, query status, and update without model/tool calls", async () => {
++  let commandLayer, keyboard, request, toast, rendered
++  const client = { url: "http://localhost:28894", headers: { Authorization: "test-auth" }, connection: { status: () => "connected" } }
++  const { decorate } = load("packages/tui/src/personalize/lifetime.ts", {
++    "@opencode/plugin/tui": { Plugin: { define: (plugin) => plugin } },
++    "@opentui/solid": { useKeyboard: (fn) => { keyboard = fn } },
++    "solid-js": {},
++    "@opencode/util/personalize-lifetime": { defaults, duration },
++    "../context/client": { useClient: () => client },
++    "./lifetime-state": { wake: { wake() {} } },
++  }, ["decorate"], { fetch: async (url, options) => {
++    request = { url: String(url), ...options }
++    return { ok: true, json: async () => ({ hardMs: 1000, softMs: 10000 }) }
++  } })
++  const original = {}
++  const plugins = decorate({ builtins: [original] }).builtins
++  assert.equal(plugins[0], original)
++  plugins.at(-1).setup({
++    ui: { slot: ({ render }) => { rendered = render }, toast: { show: (value) => { toast = value } } },
++    keymap: { layer: (factory) => { commandLayer = factory() } },
++  })
++  rendered()
++  assert.equal(typeof keyboard, "function")
++  const hard = commandLayer.commands.find((command) => command.slash.name === "killtime")
++  const soft = commandLayer.commands.find((command) => command.slash.name === "softkilltime")
++  assert.match(hard.description, /priority.*unfinished work/)
++  assert.match(soft.description, /all tasks, subagents and background tools/)
++  await hard.run("1s")
++  assert.equal(request.method, "PUT")
++  assert.equal(request.headers.Authorization, "test-auth")
++  assert.deepEqual(JSON.parse(request.body), { command: "killtime", duration: "1s" })
++  assert.match(toast.message, /1s/)
++  await soft.run()
++  assert.equal(request.method, "GET")
++})
++
++test("watchdog cancels reconnect grace and reschedules after final disconnect", () => {
++  let now = 0, timer, soft = 0, hard = 0
++  const policy = new Lifetime({ hardMs: 1000, softMs: 100 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping() {}, evictSelf() {} },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => (timer = { fn, ms, unref() {} }),
++    clearTimeout: (handle) => { if (timer === handle) timer = undefined }, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => soft++, () => hard++)
++  policy.start()
++  const close = policy.connect()
++  assert.equal(timer, undefined)
++  now = 3000; close()
++  assert.equal(timer.ms, 500)
++  now = 3499; const reconnect = policy.connect()
++  assert.equal(timer, undefined)
++  now = 3600; reconnect()
++  assert.equal(timer.ms, 500)
++  now = 4100; timer.fn()
++  assert.equal(soft, 1); assert.equal(hard, 0)
++  disarm()
++})
++
++test("deadline timer invokes hard kill despite work", () => {
++  let now = 0, callback, delay, soft = 0, hard = 0, marked
++  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping: (kind) => { marked = kind }, evictSelf() {} },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => { callback = fn; delay = ms; return { unref() {} } },
++    clearTimeout: () => {}, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => soft++, () => hard++)
++  policy.start(); policy.work()
++  assert.equal(delay, 1000)
++  now = 1000; callback()
++  assert.equal(hard, 1); assert.equal(soft, 0); assert.equal(marked, "hard")
++  disarm()
++})
++
++test("soft cleanup hanging does not disarm the eventual hard kill", () => {
++  let now = 0, callback, delay, soft = 0, hard = 0
++  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": { settings: () => policy.settings, sleeping() {}, evictSelf() {} },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => { callback = fn; delay = ms; return { unref() {} } },
++    clearTimeout() {}, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => { soft++ /* shutdown never finishes */ }, () => hard++)
++  policy.start()
++  assert.equal(delay, 500)
++  now = 500; callback()
++  assert.equal(soft, 1); assert.equal(hard, 0); assert.equal(delay, 500)
++  now = 1000; callback()
++  assert.equal(hard, 1)
++  disarm()
++})
++
++test("marker or registration failure cannot block hard shutdown", () => {
++  let now = 0, callback, delay, soft = 0, hard = 0
++  const policy = new Lifetime({ hardMs: 1000, softMs: 500 }, () => now)
++  const { armIdleWatchdog } = load("packages/server/src/personalize/idle-state.ts", {
++    "@opencode/util/personalize-lifetime": { Lifetime: class { constructor() { return policy } } },
++    "@opencode/util/personalize-lifetime-store": {
++      settings: () => policy.settings,
++      sleeping() { throw new Error("disk unavailable") },
++      evictSelf() { throw new Error("registration locked") },
++    },
++  }, ["armIdleWatchdog"], {
++    setTimeout: (fn, ms) => { callback = fn; delay = ms; return { unref() {} } },
++    clearTimeout() {}, console: { error() {} },
++  })
++  const disarm = armIdleWatchdog(() => soft++, () => hard++)
++  policy.start()
++  now = 500; callback()
++  assert.equal(soft, 0, "unsafe soft stop is withheld, not allowed to respawn-loop")
++  assert.equal(delay, 500, "the hard deadline remains armed")
++  now = 1000; callback()
++  assert.equal(hard, 1, "disk/registration failures do not prevent force-kill")
++  disarm()
++})
+diff --git a/.personalize/lifetime.test.mjs b/.personalize/lifetime.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3da95e10bd09fbd15b8986406a03e20b9798340
+--- /dev/null
++++ b/.personalize/lifetime.test.mjs
+@@ -0,0 +1,176 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { Lifetime, WakeGate, defaults, duration } from "../packages/util/src/personalize-lifetime.ts"
++
++function clock(settings = defaults) {
++  let now = 0
++  const policy = new Lifetime({ ...settings }, () => now)
++  policy.start()
++  return { policy, at: (time) => { now = time } }
++}
++
++test("defaults are hard 20s / soft 10s", () => {
++  assert.deepEqual(defaults, { hardMs: 20_000, softMs: 10_000 })
++})
++
++test("duration accepts short custom times and rejects disabling/invalid input", () => {
++  for (const [input, ms] of [["1s", 1000], ["50ms", 50], ["0.5s", 500], ["2m", 120000], ["default", 20000]])
++    assert.equal(duration(input, 20000), ms)
++  for (const input of ["0s", "-1s", "1", "Infinitys", "1s garbage", "0.1ms", "999999999m"])
++    assert.throws(() => duration(input, 20000))
++})
++
++test("last window disconnect, not heartbeats, starts the hard countdown", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 10000 })
++  const first = policy.connect(), second = policy.connect()
++  policy.work()
++  at(5000); first()
++  assert.equal(policy.next(), undefined)
++  at(9000); second()
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++  at(10000)
++  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++})
++
++test("hard deadline never waits for tasks, subagents, or soft shutdown", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 10000 })
++  policy.work(); policy.work(); policy.work("requests")
++  at(1000)
++  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++})
++
++test("soft never stops the service while a window stays connected", () => {
++  const { policy, at } = clock({ hardMs: 20000, softMs: 1000 })
++  const close = policy.connect()
++  const parent = policy.work(), child = policy.work(), tool = policy.work()
++  at(4000); parent(); child()
++  assert.equal(policy.next(), undefined)
++  at(5000); tool()
++  assert.equal(policy.next(), undefined, "an idle open window keeps the service alive")
++  at(6000); close()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++})
++
++test("new work cancels and completion resets the soft countdown", () => {
++  const { policy, at } = clock({ hardMs: 20000, softMs: 1000 })
++  const close = policy.connect()
++  at(900); const done = policy.work()
++  at(5000); assert.equal(policy.next(), undefined)
++  done(); close()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++})
++
++test("idle disconnect gets half the hard timeout to reconnect", () => {
++  const { policy, at } = clock()
++  const close = policy.connect()
++  at(30000); close()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++  at(39999); assert.deepEqual(policy.next(), { kind: "soft", after: 1 })
++  const reconnect = policy.connect()
++  at(40001); assert.equal(policy.next(), undefined)
++  reconnect()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++})
++
++test("grace starts only when the last window disconnects", () => {
++  const { policy, at } = clock({ hardMs: 12000, softMs: 1000 })
++  const first = policy.connect(), second = policy.connect()
++  at(30000); first()
++  assert.equal(policy.next(), undefined)
++  at(31000); second()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 6000 })
++  at(37000); assert.deepEqual(policy.next(), { kind: "soft", after: 0 })
++})
++
++test("active work blocks soft shutdown but not the original hard deadline", () => {
++  const { policy, at } = clock({ hardMs: 12000, softMs: 1000 })
++  const close = policy.connect(), done = policy.work()
++  at(30000); close()
++  assert.deepEqual(policy.next(), { kind: "hard", after: 12000 })
++  at(37000); done()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 1000 })
++  const again = policy.work()
++  at(42000); assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++  again()
++})
++
++test("half-hard grace preserves longer soft deadlines and hard priority", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 750 })
++  assert.deepEqual(policy.next(), { kind: "soft", after: 750 })
++  at(100); policy.configure({ hardMs: 1000, softMs: 1000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++  at(200); policy.configure({ hardMs: 1000, softMs: 2000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++})
++
++test("startup and odd millisecond hard timeouts get the half-hard minimum", () => {
++  const { policy } = clock({ hardMs: 1001, softMs: 100 })
++  assert.deepEqual(policy.next(), { kind: "soft", after: 500.5 })
++})
++
++test("a window reconnect cancels the hard countdown without touching soft work state", () => {
++  const { policy, at } = clock({ hardMs: 1000, softMs: 10000 })
++  policy.work()
++  at(999); policy.connect()
++  at(1001); assert.equal(policy.next(), undefined)
++})
++
++test("soft may stop sooner, hard wins equal deadlines", () => {
++  const { policy } = clock()
++  assert.deepEqual(policy.next(), { kind: "soft", after: 10000 })
++  policy.configure({ hardMs: 1000, softMs: 1000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++})
++
++test("custom settings reset the deadline and finalizers are idempotent", () => {
++  const { policy, at } = clock()
++  const close = policy.connect(), done = policy.work()
++  close(); close(); done(); done()
++  assert.equal(policy.clients, 0); assert.equal(policy.jobs, 0)
++  at(30000); policy.configure({ hardMs: 1000, softMs: 2000 })
++  assert.deepEqual(policy.next(), { kind: "hard", after: 1000 })
++})
++
++test("no shutdown during boot or after stopping", () => {
++  const policy = new Lifetime()
++  assert.equal(policy.next(), undefined)
++  policy.start(); policy.stopped = true
++  assert.equal(policy.next(), undefined)
++})
++
++test("broken soft probe and hung soft cleanup cannot cancel the hard deadline", () => {
++  const { policy, at } = clock()
++  policy.externalBusy = () => { throw new Error("probe failed") }
++  assert.deepEqual(policy.next(), { kind: "hard", after: 20000 })
++  policy.externalBusy = () => false
++  policy.softStopping = true
++  at(20000)
++  assert.deepEqual(policy.next(), { kind: "hard", after: 0 })
++})
++
++test("intentional sleep parks automatic reconnect until user input", async () => {
++  let now = 0, slept = -1
++  const gate = new WakeGate((time) => slept > time, () => now)
++  const abort = new AbortController()
++  await gate.wait(abort.signal)
++  now = slept = 1000
++  let connected = false
++  const reconnect = gate.wait(abort.signal).then(() => { connected = true })
++  await Promise.resolve()
++  assert.equal(connected, false, "SSE retries cannot wake a sleeping service")
++  now = 1100; gate.wake()
++  await reconnect
++  assert.equal(connected, true)
++  await gate.wait(abort.signal)
++})
++
++test("parked reconnect is aborted cleanly when its window exits", async () => {
++  let slept = -1
++  const gate = new WakeGate((time) => slept > time, () => 0)
++  const abort = new AbortController()
++  slept = 1000
++  const reconnect = gate.wait(abort.signal)
++  abort.abort(new Error("window closed"))
++  await assert.rejects(reconnect, /window closed/)
++  gate.wake()
++})
+diff --git a/.personalize/manifest.json b/.personalize/manifest.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..766c375f66f62fee3807a582f2ec9b5518a53ffe
+--- /dev/null
++++ b/.personalize/manifest.json
+@@ -0,0 +1,27 @@
++{
++  "modules": [
++    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
++    { "target": "packages/cli/src/version.ts", "factory": "packages/cli/src/personalize/version.ts", "exports": ["OPENCODE_CHANNEL", "OPENCODE_LOCAL"] },
++    { "target": "packages/util/src/observability.ts", "factory": "packages/util/src/personalize-observability.ts", "exports": ["layer"] },
++    { "target": "packages/ai/src/protocols/open-responses.ts", "factory": "packages/ai/src/personalize/open-responses.ts", "exports": ["lowerGeneration", "fromRequest", "fromRequestWithAdapter", "protocol"] },
++    { "target": "packages/core/src/config/markdown.ts", "factory": "packages/core/src/personalize/markdown.ts", "exports": ["sanitize"] },
++    { "target": "packages/core/src/database/database.ts", "factory": "packages/core/src/personalize/database.ts", "exports": ["layer", "configured", "node"] },
++    { "target": "packages/core/src/database/v1-migration.bun.ts", "factory": "packages/core/src/personalize/v1-migration.ts", "exports": ["run", "layer"] },
++    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
++    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
++    { "target": "packages/core/src/model-resolver.ts", "factory": "packages/core/src/personalize/model-resolver.ts", "exports": ["node"] },
++    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
++    { "target": "packages/core/src/session/runner/step.ts", "factory": "packages/core/src/personalize/step.ts", "exports": ["make"] },
++    { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },
++    { "target": "packages/core/src/session/runner/to-llm-message.ts", "factory": "packages/core/src/personalize/to-llm-message.ts", "exports": ["toLLMMessages"] },
++    { "target": "packages/core/src/session/runner/publish-llm-event.ts", "factory": "packages/core/src/personalize/publish-llm-event.ts", "exports": ["createLLMEventPublisher"] },
++    { "target": "packages/server/src/service-status.ts", "factory": "packages/server/src/personalize/service-status.ts", "exports": ["make"] },
++    { "target": "packages/server/src/process.ts", "factory": "packages/server/src/personalize/process.ts", "exports": ["start"] },
++    { "target": "packages/server/src/routes.ts", "factory": "packages/server/src/personalize/routes.ts", "exports": ["createRoutes"] },
++    { "target": "packages/server/src/handlers/event.ts", "factory": "packages/server/src/personalize/event.ts", "exports": ["EventHandler"] },
++    { "target": "packages/tui/src/plugin/builtins.ts", "factory": "packages/tui/src/personalize/lifetime.ts", "exports": ["builtins"] },
++    { "target": "packages/tui/src/context/client.tsx", "factory": "packages/tui/src/personalize/client.ts", "exports": ["ClientProvider"] },
++    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
++    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
++  ]
++}
+diff --git a/.personalize/output.test.mjs b/.personalize/output.test.mjs
+new file mode 100644
+index 000000000..01814563c
+--- /dev/null
++++ b/.personalize/output.test.mjs
+@@ -0,0 +1,162 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { personalizeSystem } from "../packages/core/src/personalize/model-request.ts"
++
++test("system personalization uses text and preserves cache metadata", () => {
++  const cache = Object.freeze({ type: "ephemeral" })
++  const symbol = Symbol("metadata")
++  const first = Object.freeze({ text: "Keep this rule.", cache, [symbol]: "keep" })
++  const second = Object.freeze({ text: "Second rule." })
++  const result = personalizeSystem([first, second])
++  assert.match(result[0].text, /Keep this rule\./)
++  assert.equal(Object.hasOwn(result[0], "content"), false)
++  assert.equal(result[0].cache, cache)
++  assert.equal(result[0][symbol], "keep")
++  assert.equal(result[1], second)
++  assert.equal(first.text, "Keep this rule.")
++})
++import { Effect, Stream } from "effect"
++import { LLMClient, LanguageModel } from "@opencode/ai/effect"
++import { capRequest } from "../packages/core/src/personalize/output-request.ts"
++import { capBody, outputCap, outputEffort, OutputGate } from "../packages/core/src/personalize/output-policy.ts"
++import { decorate } from "../packages/core/src/personalize/step.ts"
++import { fromRequest as chatBody } from "../packages/ai/src/protocols/openai-chat.ts"
++import { lowerGeneration as responseBody } from "../packages/ai/src/protocols/open-responses.ts"
++
++function request(effort = "xhigh", patch = {}) {
++  const model = LanguageModel.make({ id: "gpt-test", provider: "openai", route: {
++    id: "test", endpoint: { baseURL: "https://api.openai.com/v1" },
++  }, options: { providerOptions: { reasoningEffort: effort } } })
++  return { model, system: [], messages: [], tools: [], maxTokens: 128000, ...patch }
++}
++const resolved = { ref: {}, limit: { context: 262144, output: 128000 } }
++const call = (id = "write-1") => ({ type: "tool-call", id, name: "write", input: { content: "echo ok" } })
++const finish = (reason = "tool-calls", type = "step-finish") => ({ type, index: 0, reason: { normalized: reason } })
++
++test("effort output ceilings are 16k/32k/50k/100k and smaller limits win", () => {
++  for (const effort of ["none", "minimal", "low", "medium", "default", "custom"])
++    assert.equal(outputCap(effort), 16000)
++  assert.equal(outputCap("high"), 32000)
++  assert.equal(outputCap("xhigh"), 50000)
++  assert.equal(outputCap("max", 1000000), 100000)
++  assert.equal(outputCap("xhigh", 4096), 4096)
++  assert.equal(outputCap("high", 0, undefined, Infinity), 32000)
++})
++
++test("actual provider effort beats a variant nickname and handles native option spellings", () => {
++  assert.equal(outputEffort({ reasoningEffort: "high" }, "xhigh"), "high")
++  assert.equal(outputEffort({ reasoning: { effort: "max" } }), "max")
++  assert.equal(outputEffort({ thinkingConfig: { thinkingLevel: "HIGH" } }), "high")
++  assert.equal(outputEffort({}, "xhigh"), "xhigh")
++})
++
++test("xhigh cap reaches actual Responses and Chat request bodies", async () => {
++  const capped = capRequest(request(), resolved)
++  assert.equal(responseBody(capped).max_output_tokens, 50000)
++  const body = await Effect.runPromise(chatBody(capped))
++  assert.equal(body.max_completion_tokens ?? body.max_tokens, 50000)
++})
++
++test("generation limits, model output limits and remaining context can only reduce the cap", () => {
++  assert.equal(capRequest(request("xhigh", { maxTokens: 2048 }), resolved).maxTokens, 2048)
++  assert.equal(capRequest(request(), { ...resolved, limit: { ...resolved.limit, output: 8192 } }).maxTokens, 8192)
++  assert.equal(capRequest(request(), resolved, resolved.limit.context - 2024).maxTokens, 1000)
++  assert.equal(capRequest(request("max"), resolved).maxTokens, 100000)
++})
++
++test("a missing upstream output limit is restored and serialized", () => {
++  const capped = capRequest(request("xhigh", { maxTokens: undefined }), resolved)
++  assert.equal(capped.maxTokens, 50000)
++  assert.equal(responseBody(capped).max_output_tokens, 50000)
++})
++
++test("native HTTP overlays cannot increase the cap or mutate user settings", () => {
++  const body = { max_output_tokens: 999999, generationConfig: { maxOutputTokens: 60000 }, untouched: true }
++  const original = structuredClone(body)
++  assert.deepEqual(capBody(body, 16000), { max_output_tokens: 16000, generationConfig: { maxOutputTokens: 16000 }, untouched: true })
++  assert.deepEqual(body, original)
++  const capped = capRequest(request("max", { http: { body } }), resolved)
++  assert.equal(capped.http.body.max_output_tokens, 100000)
++})
++
++test("text streams immediately, but local calls wait for a successful complete response", () => {
++  const gate = new OutputGate(), a = call(), b = call("write-2")
++  const text = { type: "text-delta", id: "text", text: "working" }
++  assert.deepEqual(gate.push(text), [text])
++  assert.deepEqual(gate.push(a), [])
++  assert.deepEqual(gate.push(b), [])
++  assert.deepEqual(gate.push(finish()), [])
++  assert.deepEqual(gate.end(), [a, b, finish()])
++  assert.equal(gate.rejected, undefined)
++})
++
++test("length truncation discards all pending local calls, retaining usage finish events", () => {
++  const gate = new OutputGate()
++  gate.push(call())
++  const end = { ...finish("length"), usage: { outputTokens: 50000 } }
++  gate.push(end)
++  assert.deepEqual(gate.end(), [end])
++  assert.equal(gate.rejected, "length")
++})
++
++test("missing finish, malformed input and provider errors fail closed", () => {
++  for (const bad of [undefined, { type: "tool-input-error", id: "write-1", name: "write", raw: '{"content":' },
++    { type: "provider-error", error: new Error("cut off") }]) {
++    const gate = new OutputGate()
++    gate.push(call())
++    if (bad) gate.push(bad)
++    if (bad) gate.push(finish())
++    assert.ok(!gate.end().some((x) => x.type === "tool-call"))
++    assert.ok(gate.rejected)
++  }
++})
++
++test("provider-executed events pass through; duplicate local calls are not deduplicated", () => {
++  const gate = new OutputGate(), remote = { ...call(), providerExecuted: true }
++  assert.deepEqual(gate.push(remote), [remote])
++  gate.push(call()); gate.push(call()); gate.push(finish())
++  assert.equal(gate.end().filter((x) => x.type === "tool-call").length, 2)
++})
++
++// Host runner/client stand-ins; the actual owned wrapper and real Effect
++// stream perform the safety decision. No tools, servers or API calls execute.
++async function run(events, outcome = { _tag: "Completed" }) {
++  const executed = [], timeline = []
++  let attempts = 0
++  const stock = { make: Effect.gen(function* () {
++    const client = yield* LLMClient.Service
++    return { attempt: () => Effect.gen(function* () {
++      attempts++
++      yield* client.stream(request()).pipe(Stream.runForEach((event) => Effect.sync(() => {
++        timeline.push(event.type)
++        if (event.type === "tool-call") executed.push(event)
++      })))
++      return outcome
++    }) }
++  }) }
++  const program = decorate(stock).make.pipe(Effect.flatMap((service) => service.attempt({})),
++    Effect.provideService(LLMClient.Service, { stream: () => Stream.fromArray(events) }))
++  const exit = await Effect.runPromise(Effect.exit(program))
++  return { exit, executed, attempts, timeline }
++}
++
++test("truncated response never executes the write and never retries the model", async () => {
++  const result = await run([call(), finish("length")], { _tag: "OutputLimit", needsContinuation: true })
++  assert.equal(result.exit._tag, "Failure")
++  assert.equal(result.attempts, 1)
++  assert.deepEqual(result.executed, [])
++})
++
++test("normal multiple tool calls survive the guard in their original order", async () => {
++  const a = call(), b = call("write-2")
++  const result = await run([a, b, finish()])
++  assert.equal(result.exit._tag, "Success")
++  assert.deepEqual(result.executed, [a, b])
++  assert.equal(result.attempts, 1)
++})
++
++test("pure text output-limit also stops instead of triggering stock auto-continuation", async () => {
++  const result = await run([finish("length")], { _tag: "OutputLimit", needsContinuation: false })
++  assert.equal(result.exit._tag, "Failure")
++  assert.equal(result.attempts, 1)
++})
+diff --git a/.personalize/preload.ts b/.personalize/preload.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..001ba8ad13e8a7ede81538bd447b7d97dd091dd6
+--- /dev/null
++++ b/.personalize/preload.ts
+@@ -0,0 +1,7 @@
++import path from "node:path"
++import { PersonalizeBuild } from "./build.mjs"
++
++const root = path.resolve(import.meta.dirname, "..")
++const solidPath = Bun.resolveSync("@opentui/solid/bun-plugin", path.join(root, "packages/cli"))
++const { createSolidTransformPlugin } = await import(solidPath)
++for (const plugin of PersonalizeBuild.plugins([createSolidTransformPlugin()])) Bun.plugin(plugin)
+diff --git a/packages/ai/src/personalize/open-responses.ts b/packages/ai/src/personalize/open-responses.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97f8683166
+--- /dev/null
++++ b/packages/ai/src/personalize/open-responses.ts
+@@ -0,0 +1,13 @@
++import { Effect } from "effect"
++
++export function decorate(stock: typeof import("../protocols/open-responses")) {
++  const lowerGeneration: typeof stock.lowerGeneration = (...args) => ({ ...stock.lowerGeneration(...args), store: false })
++  const fromRequest: typeof stock.fromRequest = (...args) =>
++    stock.fromRequest(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
++  const fromRequestWithAdapter: typeof stock.fromRequestWithAdapter = (...args) =>
++    stock.fromRequestWithAdapter(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
++  return {
++    lowerGeneration, fromRequest, fromRequestWithAdapter,
++    protocol: { ...stock.protocol, body: { ...stock.protocol.body, from: fromRequest } },
++  }
++}
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index a9ae9e606975bb38fc3b324c435c8c783e094fd4..7ae63416edcdca1a388ed0cfa66f0d64b52b1560 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env bun
++import { PersonalizeBuild } from "../../../.personalize/build.mjs"
+ 
+ import { $ } from "bun"
+ import { createHash } from "node:crypto"
+@@ -160,7 +161,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+   const result = await Bun.build({
+     entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [
++    plugins: PersonalizeBuild.plugins([
+       appAssetsPlugin,
+       solidPlugin,
+       parcelWatcherPlugin,
+@@ -182,6 +183,6 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       simulationGraphPlugin,
+       modelsSnapshot,
+-    ],
++    ]),
+     external: ["node-gyp"],
+     format: "esm",
+     minify: true,
+diff --git a/packages/cli/src/personalize/bootstrap.ts b/packages/cli/src/personalize/bootstrap.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..35a8bb34eb5a8da0d024683fa49f1c2e488267af
+--- /dev/null
++++ b/packages/cli/src/personalize/bootstrap.ts
+@@ -0,0 +1,9 @@
++// Loaded before the unmodified CLI entry point by the owned module boundary.
++// Explicit upgrades still work; background update inspection and telemetry do not.
++process.env.OPENCODE_DISABLE_AUTOUPDATE = "1"
++process.env.OTEL_SDK_DISABLED = "true"
++delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_HEADERS
++delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
++delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+diff --git a/packages/cli/src/personalize/version.ts b/packages/cli/src/personalize/version.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..552e669cfaa7a25bdecdb6630c9add9114ca5e5c
+--- /dev/null
++++ b/packages/cli/src/personalize/version.ts
+@@ -0,0 +1,6 @@
++import { normalizeChannel } from "../../../../.personalize/channel.mjs"
++
++export function decorate(stock: typeof import("../version")) {
++  const OPENCODE_CHANNEL = normalizeChannel(stock.OPENCODE_CHANNEL)
++  return { OPENCODE_CHANNEL, OPENCODE_LOCAL: OPENCODE_CHANNEL === "local" }
++}
+diff --git a/packages/client/src/personalize/service-probe.ts b/packages/client/src/personalize/service-probe.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdc87b287e133b9800da89fa7277e8c53cc07753
+--- /dev/null
++++ b/packages/client/src/personalize/service-probe.ts
+@@ -0,0 +1,29 @@
++import type { Info } from "../service"
++
++export function decorate(stock: typeof import("../service-probe")) {
++  const decide: typeof stock.decide = (service, options) => {
++    const state = service && typeof service === "object" ? Reflect.get(service, "state") : undefined
++    return state === "waiting" || state === "retrying" ? { _tag: "wait" } : stock.decide(service, options)
++  }
++  const probeResult: typeof stock.probeResult = async (info: Info, timeout) => {
++    const result = await stock.probeResult(info, timeout)
++    if (result.service || result.timedOut) return result
++    // A registered owner must not be killed merely because the published version
++    // changes while that same PID is starting. All other stock health rules stay intact.
++    const endpoint = { url: info.url, auth: info.password === undefined ? undefined : {
++      type: "basic" as const, username: "opencode", password: info.password,
++    } }
++    try {
++      const response = await fetch(new URL("/api/info", info.url), {
++        headers: stock.headers(endpoint), signal: AbortSignal.timeout(timeout ?? 1000),
++      })
++      if (response.status !== 503) return result
++      const body: unknown = await response.json()
++      if (!body || typeof body !== "object" || !("pid" in body) || body.pid !== info.pid ||
++          !("version" in body) || typeof body.version !== "string") return result
++      return { timedOut: false, service: { info, endpoint, version: body.version,
++        state: "waiting" as const, compatible: true } }
++    } catch { return result }
++  }
++  return { decide, probeResult }
++}
+diff --git a/packages/core/src/personalize/content.ts b/packages/core/src/personalize/content.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..031c11b3c2aa19dbbc190db469d7432c3abcced8
+--- /dev/null
++++ b/packages/core/src/personalize/content.ts
+@@ -0,0 +1,35 @@
++import type { Message } from "@opencode/ai/effect"
++import type { SessionMessage } from "../session/message"
++
++export function copyWith<T extends object>(value: T, changes: Partial<T>): T {
++  const descriptors = Object.getOwnPropertyDescriptors(value)
++  for (const [key, replacement] of Object.entries(changes)) {
++    const before = Object.getOwnPropertyDescriptor(value, key)
++    Object.defineProperty(descriptors, key, { enumerable: true, configurable: true, value: {
++      value: replacement, enumerable: before?.enumerable ?? true,
++      configurable: before?.configurable ?? true, writable: before && "writable" in before ? before.writable : true,
++    } })
++  }
++  return Object.create(Object.getPrototypeOf(value), descriptors)
++}
++
++export function canonicalMessages(messages: unknown): Message[] {
++  if (!Array.isArray(messages)) return []
++  return messages.filter((message) => message && typeof message === "object").map((message) => {
++    const content = (Array.isArray(message.content) ? message.content : []).filter(Boolean).map((part) =>
++      part.type === "tool-result" && part.result?.type === "content" && !Array.isArray(part.result.value)
++        ? copyWith(part, { result: copyWith(part.result, { value: [] }) }) : part)
++    return Array.isArray(message.content) && content.length === message.content.length && content.every((part, i) => part === message.content[i])
++      ? message : copyWith(message, { content })
++  })
++}
++
++export function historyMessages(messages: readonly SessionMessage.Info[]): SessionMessage.Info[] {
++  return messages.map((message) => {
++    const content = (Array.isArray(message.content) ? message.content : []).filter(Boolean).map((part) =>
++      part.type === "tool" && part.state?.status === "completed" && !Array.isArray(part.state.content)
++        ? copyWith(part, { state: copyWith(part.state, { content: [] }) }) : part)
++    return Array.isArray(message.content) && content.length === message.content.length && content.every((part, i) => part === message.content[i])
++      ? message : copyWith(message, { content })
++  })
++}
+diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e362747a9694ad5c049894e7944650f72aeae689
+--- /dev/null
++++ b/packages/core/src/personalize/database.ts
+@@ -0,0 +1,40 @@
++import path from "node:path"
++import { Cause, Effect, Exit, Layer, Scope } from "effect"
++import { Global } from "@opencode/util/global"
++import { Flock } from "@opencode/util/flock"
++import { sqliteBusy, updateBoot } from "@opencode/util/personalize-boot"
++import { guardSessionSchema } from "./schema-guard"
++
++export function decorate(stock: typeof import("../database/database")) {
++  const layer: typeof stock.layer = (options = { path: ":memory:" }) => {
++    const filename = options.path ?? ":memory:"
++    if (filename === ":memory:") return stock.layer(options)
++    return Layer.effectContext(Effect.gen(function* () {
++      const global = yield* Global.Service
++      const file = path.isAbsolute(filename) ? filename : path.join(global.data, filename)
++      const parent = yield* Scope.Scope
++      return yield* Effect.acquireUseRelease(
++        Effect.promise((signal) => Flock.acquire(file, { dir: path.join(global.state, "locks"), signal })),
++        () => Effect.gen(function* () {
++          for (let attempt = 0; ; attempt++) {
++            const scope = yield* Scope.make()
++            yield* Scope.addFinalizerExit(parent, (exit) => Scope.close(scope, exit))
++            const exit = yield* Effect.exit(Layer.buildWithScope(stock.layer({ ...options, path: file }), scope))
++            if (Exit.isSuccess(exit)) {
++              // Schema drift guard: runs after migrations settle; never throws (see schema-guard.ts).
++              guardSessionSchema(file)
++              return exit.value
++            }
++            yield* Scope.close(scope, exit)
++            if (attempt >= 6 || !sqliteBusy(Cause.pretty(exit.cause))) return yield* Effect.failCause(exit.cause)
++            yield* updateBoot("retry")
++            yield* Effect.sleep((attempt + 1) * 200)
++          }
++        }),
++        (lease) => Effect.promise(() => lease.release()),
++      )
++    }))
++  }
++  const configured: typeof stock.configured = (options) => stock.configured(options).mapLayer(() => layer(options))
++  return { layer, configured, node: configured({ path: ":memory:" }) }
++}
+diff --git a/packages/core/src/personalize/dedup.ts b/packages/core/src/personalize/dedup.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a2df6d26176e114612993bcf26851f494b345b8
+--- /dev/null
++++ b/packages/core/src/personalize/dedup.ts
+@@ -0,0 +1,117 @@
++// ============================================================================
++// PERSONALIZATION (deltav11) — duplicate guards.
++// Prose echo only: adjacent duplicate sentences inside one text part are
++// stripped and counted. The call-echo guard was removed 2026-11-02: it read
++// args from `call.arguments` (the event carries them at `.input`), so every
++// signature degenerated to `name(null)` and it flagged ANY adjacent
++// same-tool pair — including authorized parallel spawns, which are
++// observationally identical to blind echoes. Parallel same-turn tool calls
++// are operator-authorized and must never be blocked.
++// Pure module: no imports, no effects — unit-tested in .personalize/dedup.test.mjs.
++// ============================================================================
++
++export interface LedgerEntry {
++  readonly calls: number
++  readonly prose: number
++  readonly wastedTokens: number
++}
++
++const ledgers = new Map<string, LedgerEntry>()
++
++export function resetLedger(): void {
++  ledgers.clear()
++}
++
++export function ledgerState(key: string): LedgerEntry | undefined {
++  return ledgers.get(key)
++}
++
++export function estimateTokens(text: string): number {
++  return Math.max(1, Math.ceil(text.length / 4))
++}
++
++export function bumpLedger(key: string, kind: "calls" | "prose", wastedTokens: number): LedgerEntry {
++  const entry = ledgers.get(key) ?? { calls: 0, prose: 0, wastedTokens: 0 }
++  const next: LedgerEntry = {
++    calls: entry.calls + (kind === "calls" ? 1 : 0),
++    prose: entry.prose + (kind === "prose" ? 1 : 0),
++    wastedTokens: entry.wastedTokens + wastedTokens,
++  }
++  ledgers.set(key, next)
++  return next
++}
++
++/** Cumulative punch line, injected once the session has two or more duplicates total. */
++export function punchLine(entry: LedgerEntry | undefined): string {
++  if (!entry) return ""
++  const total = entry.calls + entry.prose
++  if (total < 2) return ""
++  return `\n*SystemPunch* duplicates this session: ${total} (≈${entry.wastedTokens} tkn wasted)`
++}
++
++// --- prose echo ---------------------------------------------------------------
++
++/** Sentences shorter than this (normalized) are structural noise — never compared. */
++const MIN_SENTENCE_CHARS = 24
++
++export function normalizeSentence(sentence: string): string {
++  return sentence
++    .toLowerCase()
++    .replace(/\s+/g, " ")
++    .replace(/[^\p{L}\p{N} ]/gu, "")
++    .trim()
++}
++
++export function splitSentences(text: string): string[] {
++  return text
++    .split(/(?<=[.!?])\s+|\n+/)
++    .map((sentence) => sentence.trim())
++    .filter((sentence) => sentence.length > 0)
++}
++
++export interface DedupeTextResult {
++  readonly text: string
++  readonly removed: number
++  readonly wastedTokens: number
++}
++
++/**
++ * Strips runs of adjacent duplicate sentences from ONE text part. The first
++ * occurrence is kept, each stripped run leaves one inline marker. Everything
++ * else — short sentences, non-adjacent repeats, cross-part or cross-turn
++ * repetition — is deliberately left alone.
++ */
++export function dedupeText(text: string): DedupeTextResult | undefined {
++  if (text.length < MIN_SENTENCE_CHARS * 2) return undefined
++  const sentences = splitSentences(text)
++  if (sentences.length < 2) return undefined
++  const out: string[] = []
++  let removed = 0
++  let wastedTokens = 0
++  let changed = false
++  let index = 0
++  while (index < sentences.length) {
++    const kept = sentences[index]!
++    out.push(kept)
++    const normalized = normalizeSentence(kept)
++    let run = 0
++    while (
++      index + 1 + run < sentences.length &&
++      normalized.length >= MIN_SENTENCE_CHARS &&
++      normalizeSentence(sentences[index + 1 + run]!) === normalized
++    ) {
++      run++
++    }
++    if (run > 0) {
++      changed = true
++      removed += run
++      wastedTokens += run * estimateTokens(kept)
++      const preview = kept.length > 60 ? `${kept.slice(0, 60)}…` : kept
++      out.push(`[duplicate removed ×${run}: "${preview}"]`)
++      index += run
++    }
++    index++
++  }
++  if (!changed) return undefined
++  return { text: out.join(" "), removed, wastedTokens }
++}
+diff --git a/packages/core/src/personalize/hooks.ts b/packages/core/src/personalize/hooks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e0025b65220b87f18a016f4c1c144b294ad4898
+--- /dev/null
++++ b/packages/core/src/personalize/hooks.ts
+@@ -0,0 +1,32 @@
++import { Context, Effect, Layer } from "effect"
++import { canonicalMessages, copyWith } from "./content"
++import { personalizeSystem } from "./model-request"
++
++export function decorate(stock: typeof import("../plugin/hooks")) {
++  return { node: stock.node.mapLayer((layer) => Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
++    const original = Context.get(context, stock.Service)
++    const trigger: typeof original.trigger = (domain, name, event) => Effect.suspend(() => {
++      if (domain !== "session" || !["context", "compaction", "generate", "title"].includes(String(name))) {
++        return original.trigger(domain, name, event)
++      }
++      const before = event as unknown as { system?: unknown; messages?: unknown }
++      const system = Array.isArray(before.system) ? [...before.system] : []
++      const messages = canonicalMessages(before.messages)
++      return original.trigger(domain, name, event).pipe(Effect.map((result) => {
++        const value = result as unknown as { system?: unknown; messages?: unknown; result?: unknown }
++        const shaped = copyWith(value, {
++          system: personalizeSystem(Array.isArray(value.system) ? value.system : system),
++          messages: canonicalMessages(Array.isArray(value.messages) ? value.messages : messages),
++        })
++        if (name === "title" && typeof shaped.result !== "string") {
++          const first = canonicalMessages(shaped.messages).find((message) => message.role === "user")
++          const text = first?.content.filter((part) => part.type === "text").map((part) => part.text).join(" ") || "New session"
++          const title = text.replace(/\s+/g, " ").trim()
++          shaped.result = title.length > 50 ? title.slice(0, 50) + "…" : title
++        }
++        return shaped as typeof result
++      }))
++    })
++    return Context.add(context, stock.Service, { ...original, trigger })
++  }))) }
++}
+diff --git a/packages/core/src/personalize/markdown.ts b/packages/core/src/personalize/markdown.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfb1489f5102edcc989a16f226e449219ce5676f
+--- /dev/null
++++ b/packages/core/src/personalize/markdown.ts
+@@ -0,0 +1,87 @@
++import matter from "gray-matter"
++export function sanitize(content: string) {
++  const stripped = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content
++  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---/)
++  if (!match) return content
++  const frontmatter = match[1]
++
++  // top-level "key:" or "key: value" (hyphen/dot keys allowed; space after ":" optional)
++  const KEY = /^([A-Za-z0-9][\w.-]*)[ \t]*:(?:[ \t]*(.*))?$/
++  // an intentional block-scalar header ("|", ">", "|-", ">2", ...) — leave alone
++  const BLOCK_HEADER = /^[|>][+-]?\d*$/
++  const isComment = (line: string) => /^\s*#/.test(line)
++
++  // tabs are illegal as YAML indentation -> spaces
++  const detab = (line: string) => {
++    const m = line.match(/^[ \t]+/)
++    return m ? m[0].replace(/\t/g, "  ") + line.slice(m[0].length) : line
++  }
++
++  const lines = frontmatter.split(/\r?\n/).map(detab)
++
++  const groups: { key: string; value: string; children: string[] }[] = []
++  const preface: string[] = []
++  let current: { key: string; value: string; children: string[] } | null = null
++  for (const line of lines) {
++    const entry = /^[ \t]/.test(line) || isComment(line) ? null : line.match(KEY)
++    if (entry) {
++      current = { key: entry[1], value: (entry[2] ?? "").trim(), children: [] }
++      groups.push(current)
++    } else if (current) {
++      current.children.push(line)
++    } else {
++      preface.push(line)
++    }
++  }
++
++  const needsBlock = (v: string) => v.includes(":") || / #/.test(v)
++
++  const out: string[] = [...preface]
++  for (const g of groups) {
++    // content lines that belong to this key's value (drop blanks and comments)
++    const body = g.children.filter((c) => c.trim() !== "" && !isComment(c))
++    const structured = g.children.some((c) => /^[ \t]+\S/.test(c) || /^\s*- /.test(c))
++    const quoted = g.value.startsWith('"') || g.value.startsWith("'")
++
++    // keep verbatim: a real block/list (empty value + indented block), an
++    // explicit block-scalar header, or a clean single-line quoted value
++    if ((g.value === "" && structured) || BLOCK_HEADER.test(g.value) || (quoted && body.length === 0)) {
++      out.push(g.value ? `${g.key}: ${g.value}` : `${g.key}:`)
++      for (const c of g.children) out.push(c)
++      continue
++    }
++
++    // empty value followed only by loose unindented text -> fold it in
++    if (g.value === "") {
++      if (body.length === 0) {
++        out.push(`${g.key}:`)
++        for (const c of g.children) out.push(c)
++      } else {
++        out.push(`${g.key}: |-`)
++        for (const c of body) out.push(`  ${c.trim()}`)
++      }
++      continue
++    }
++
++    // inline value: block-scalar it if it wraps onto more lines or needs escaping
++    if (body.length > 0 || needsBlock(g.value)) {
++      out.push(`${g.key}: |-`)
++      out.push(`  ${g.value}`)
++      for (const c of body) out.push(`  ${c.trim()}`)
++    } else {
++      out.push(`${g.key}: ${g.value}`)
++    }
++  }
++
++  const result = stripped.replace(frontmatter, () => out.join("\n"))
++  // the rewrite must parse -- otherwise return the input untouched so the
++  // strict parse error propagates and callers skip the file
++  try {
++    matter(result, {})
++  } catch {
++    return content
++  }
++  return result
++}
++
++export const decorate = (_stock: typeof import("../config/markdown")) => ({ sanitize })
+diff --git a/packages/core/src/personalize/message-updater.ts b/packages/core/src/personalize/message-updater.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eff6f79388ce8d3c00c2ed3a17e3cee38e5b233a
+--- /dev/null
++++ b/packages/core/src/personalize/message-updater.ts
+@@ -0,0 +1,25 @@
++// PERSONALIZATION (deltav11) — guard 2: prose echo.
++// Strips runs of adjacent duplicate sentences from ONE assistant text part
++// before the message is projected and stored, so both the display and the
++// next request's context carry the deduped text. The first occurrence is
++// kept; each stripped run leaves one inline marker. Cross-part and
++// cross-turn repetition is deliberately untouched (it may be deliberate).
++import { bumpLedger, dedupeText, punchLine } from "./dedup"
++
++export function decorate(stock: typeof import("../session/message-updater")) {
++  const update: typeof stock.update = (adapter, event) => {
++    if (event.type === "session.text.ended") {
++      const data = event.data as { readonly text: string; readonly sessionID?: unknown; readonly assistantMessageID?: unknown }
++      const result = dedupeText(data.text)
++      if (result) {
++        const key = String(data.sessionID ?? data.assistantMessageID ?? "session")
++        const entry = bumpLedger(key, "prose", result.wastedTokens)
++        const punch = punchLine(entry)
++        const text = punch ? `${result.text}\n${punch}` : result.text
++        event = { ...event, data: { ...data, text } }
++      }
++    }
++    return stock.update(adapter, event)
++  }
++  return { update }
++}
+diff --git a/packages/core/src/personalize/model-request.ts b/packages/core/src/personalize/model-request.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ded0959799c1be8d3d4572dd688a20b9bdb14064
+--- /dev/null
++++ b/packages/core/src/personalize/model-request.ts
+@@ -0,0 +1,54 @@
++import { canonicalMessages, copyWith } from "./content"
++import { personaLead, stripStockIdentity } from "./persona"
++import { Context, Effect, Layer } from "effect"
++import { capRequest } from "./output-request"
++import { withDecayPolicy } from "./decay-policy"
++type SystemBlock = ReturnType<typeof import("../session/model-request").baseTranscript>["system"][number]
++
++export function personalizeSystem(system: readonly SystemBlock[]): SystemBlock[] {
++  const persona = personaLead()
++  if (!persona || !system[0]) return [...system]
++  return [copyWith(system[0], { text: [persona, stripStockIdentity(system[0].text)].filter(Boolean).join("\n") }), ...system.slice(1)]
++}
++
++export function decorate(stock: typeof import("../session/model-request")) {
++  const baseTranscript: typeof stock.baseTranscript = (...args) => {
++    const result = withDecayPolicy(args[0].model, () => stock.baseTranscript(...args))
++    return { ...result, system: personalizeSystem(result.system) }
++  }
++  const unsupportedParts: typeof stock.unsupportedParts = (messages, ...rest) => stock.unsupportedParts(canonicalMessages(messages), ...rest)
++  const boundImages: typeof stock.boundImages = (messages, ...rest) => stock.boundImages(canonicalMessages(messages), ...rest)
++
++  // Call-echo guard REMOVED (2026-11-02), two reasons, both proven live:
++  // 1. It signed calls via `input.call.arguments`, but the ToolCall event
++  //    carries parsed arguments at `.input` — every signature degenerated to
++  //    `name(null)`, so ANY adjacent same-tool pair collided. Different
++  //    reads, different greps, and authorized parallel spawns were all
++  //    replaced with a fake receipt instead of executing.
++  // 2. Even with correct signatures, an intentional parallel spawn is
++  //    observationally identical to a blind echo (adjacent calls, no result
++  //    between them yet) — the guard cannot tell them apart, so it must not
++  //    block. Parallel same-turn tool calls are authorized by the operator.
++  // executeTool still passes through stock untouched. The layer only limits
++  // model output; no call signatures, deduplication or fake tool receipts.
++
++  const node = stock.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => {
++    const service = Context.get(context, stock.Service)
++    type Interface = import("../session/model-request").Interface
++    const primary: Interface["primary"] = (input) => service.primary(input).pipe(Effect.map((value) => ({
++      ...value, request: capRequest(value.request, input.model, input.inputTokens && Math.max(input.inputTokens.measured, input.inputTokens.estimated)),
++    })))
++    const compaction: Interface["compaction"] = (input) => service.compaction(input).pipe(Effect.map((value) => ({
++      ...value, request: capRequest(value.request, input.model),
++    })))
++    const generate: Interface["generate"] = (input) => service.generate(input).pipe(Effect.map((value) => ({
++      ...value, request: capRequest(value.request, input.model),
++    })))
++    const title: Interface["title"] = (input) => service.title(input).pipe(Effect.map((value) => ({
++      ...value, request: capRequest(value.request, input.model),
++    })))
++    return Layer.succeed(stock.Service, { ...service, primary, compaction, generate, title })
++  })))
++
++  return { baseTranscript, unsupportedParts, boundImages, node }
++}
+diff --git a/packages/core/src/personalize/output-policy.ts b/packages/core/src/personalize/output-policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3ccab058d6dc9f79f6dbe0902bb7e7b78ee9822
+--- /dev/null
++++ b/packages/core/src/personalize/output-policy.ts
+@@ -0,0 +1,71 @@
++import type { LLMEvent } from "@opencode/ai/effect"
++
++export const outputCaps = { default: 16_000, high: 32_000, xhigh: 50_000, max: 100_000 } as const
++
++function record(value: unknown): Record<string, unknown> {
++  return value !== null && typeof value === "object" ? value as Record<string, unknown> : {}
++}
++
++export function outputEffort(options: unknown, fallback?: string): string {
++  const value = record(options)
++  const effort = value.reasoningEffort ?? value.reasoning_effort ?? record(value.reasoning).effort ??
++    value.effort ?? record(value.outputConfig).effort ?? record(value.output_config).effort ??
++    record(value.thinkingConfig).thinkingLevel ?? fallback ?? "default"
++  return typeof effort === "string" ? effort.toLowerCase() : "default"
++}
++
++export function outputCap(effort: string, ...limits: readonly (number | undefined)[]): number {
++  const cap = effort === "max" ? outputCaps.max : effort === "xhigh" ? outputCaps.xhigh :
++    effort === "high" ? outputCaps.high : outputCaps.default
++  return Math.min(cap, ...limits.filter((x): x is number => typeof x === "number" && Number.isFinite(x) && x > 0).map(Math.floor))
++}
++
++// Raw HTTP body overlays are applied AFTER protocol lowering. Do not let an
++// existing native override bypass the cap; do not inject foreign provider keys.
++export function capBody<T>(body: T, cap: number): T {
++  const value = record(body)
++  const result = { ...value }
++  for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens", "max_new_tokens", "maxTokens", "maxOutputTokens"]) {
++    if (!(key in value)) continue
++    const current = value[key]
++    result[key] = typeof current === "number" && Number.isFinite(current) && current >= 1
++      ? Math.min(cap, Math.floor(current)) : cap
++  }
++  for (const key of ["generationConfig", "generation_config", "inferenceConfig", "inference_config"]) {
++    if (value[key] !== undefined) result[key] = capBody(value[key], cap)
++  }
++  return result as T
++}
++
++// Only local tool calls are held. Text/reasoning remain live, and provider-run
++// tools are outside this process's execution control. Never repair partial JSON.
++export class OutputGate {
++  private calls: LLMEvent[] = []
++  private terminal: LLMEvent[] = []
++  private finished = false
++  rejected: "length" | "invalid" | "incomplete" | undefined
++
++  push(event: LLMEvent): LLMEvent[] {
++    if (event.type === "tool-input-error" || event.type === "provider-error") this.rejected ??= "invalid"
++    if (event.type === "tool-call" && !event.providerExecuted) {
++      this.calls.push(event)
++      return []
++    }
++    if (event.type === "step-finish" || event.type === "finish") {
++      this.finished = true
++      if (event.reason.normalized === "length") this.rejected = "length"
++      else if (event.reason.normalized !== "stop" && event.reason.normalized !== "tool-calls") this.rejected ??= "invalid"
++      this.terminal.push(event)
++      return []
++    }
++    return [event]
++  }
++
++  end(): LLMEvent[] {
++    if (!this.finished) this.rejected ??= "incomplete"
++    const events = this.rejected ? this.terminal : [...this.calls, ...this.terminal]
++    this.calls = []
++    this.terminal = []
++    return events
++  }
++}
+diff --git a/packages/core/src/personalize/output-request.ts b/packages/core/src/personalize/output-request.ts
+new file mode 100644
+index 000000000..2e3a9d7f5
+--- /dev/null
++++ b/packages/core/src/personalize/output-request.ts
+@@ -0,0 +1,40 @@
++import type { LLMRequest } from "@opencode/ai/effect"
++import type { Resolved } from "../model-resolver"
++import { capBody, outputCap, outputEffort } from "./output-policy"
++
++const isRecord = (value: unknown): value is Record<string, unknown> =>
++  typeof value === "object" && value !== null && !Array.isArray(value)
++
++// Same layering the LLM client applies before lowering (route/client.ts
++// resolveRequestOptions): model.options sit under the request, later wins,
++// records merge by key. The ai package does not export its merge helpers.
++function merge(...items: unknown[]): Record<string, unknown> | undefined {
++  const result: Record<string, unknown> = {}
++  for (const item of items) {
++    if (!isRecord(item)) continue
++    for (const [key, value] of Object.entries(item)) {
++      if (value === undefined) continue
++      result[key] = isRecord(result[key]) && isRecord(value) ? merge(result[key], value) : value
++    }
++  }
++  return Object.keys(result).length === 0 ? undefined : result
++}
++
++// Shared by primary turns, subagents using the same runner, titles and
++// compaction. This sets the request's maxTokens, not only catalog metadata.
++export function capRequest(request: LLMRequest, model: Resolved, inputTokens?: number): LLMRequest {
++  const options = request.model.options
++  const providerOptions = merge(options?.providerOptions, request.providerOptions)
++  const body = merge(options?.http?.body, request.http?.body)
++  const effort = outputEffort(body, outputEffort(providerOptions, model.ref.variant))
++  const context = model.limit.context
++  const room = context > 0 ? Math.max(1, context - (inputTokens ?? 0) - 1024) : undefined
++  const requested = request.maxTokens ?? options?.maxTokens
++  const maxTokens = outputCap(effort, requested, model.limit.output, room)
++  return {
++    ...request,
++    // An omitted upstream limit must not bypass the approved response ceiling.
++    maxTokens,
++    ...(body ? { http: { ...request.http, body: capBody(body, maxTokens) } } : {}),
++  }
++}
+diff --git a/packages/core/src/personalize/persona.ts b/packages/core/src/personalize/persona.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d0f3669589b67f28f3d9f2d07fa594ca8f1b9a1
+--- /dev/null
++++ b/packages/core/src/personalize/persona.ts
+@@ -0,0 +1,21 @@
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
++import { dirname, join, resolve } from "node:path"
++
++export function personaLead(): string {
++  const file = process.env.OPENCODE_ROLE_FILE ? resolve(process.env.OPENCODE_ROLE_FILE) : join(process.cwd(), ".opencode", "role.json")
++  try {
++    mkdirSync(dirname(file), { recursive: true })
++    if (!existsSync(file)) {
++      writeFileSync(file, JSON.stringify({ usersystem: "", assistant_system: "" }, null, 2) + "\n", "utf8")
++      return ""
++    }
++    const role: unknown = JSON.parse(readFileSync(file, "utf8"))
++    return role && typeof role === "object" && "assistant_system" in role && typeof role.assistant_system === "string" ? role.assistant_system : ""
++  } catch { return "" }
++}
++
++export function stripStockIdentity(prompt: string): string {
++  if (prompt.startsWith("You are opencode, an agent")) return prompt
++  return prompt.replace(/^You are an AI agent running in OpenCode,[^.]*\.\s*/, "")
++    .replace(/^You are (?:OpenCode|opencode),[^.]*\.\s*/, "")
++}
+diff --git a/packages/core/src/personalize/publish-llm-event.ts b/packages/core/src/personalize/publish-llm-event.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..412e4540456d646d512484d8e0a7f286c58bc3ae
+--- /dev/null
++++ b/packages/core/src/personalize/publish-llm-event.ts
+@@ -0,0 +1,36 @@
++// PERSONALIZATION (deltav11) — prompt-cache miss trace.
++// Observes step-finish only, after the stock publisher has handled it; never
++// alters events. Logs a warning when a step reads zero cached tokens after an
++// idle gap > 10 min, splitting the expected (>= 1h, cache expired) case from
++// the one worth optimizing (10 min .. 1h, retention should have held).
++import { Effect } from "effect"
++import { SessionUsage } from "../session/usage"
++
++const lastStepFinish = new Map<string, number>()
++
++export function decorate(stock: typeof import("../session/runner/publish-llm-event")) {
++  const createLLMEventPublisher: typeof stock.createLLMEventPublisher = (bus, input) => {
++    const publisher = stock.createLLMEventPublisher(bus, input)
++    const trace = (usage: Parameters<typeof SessionUsage.tokens>[0]) =>
++      Effect.suspend(() => {
++        const gap = input.started - (lastStepFinish.get(input.sessionID) ?? Infinity)
++        lastStepFinish.set(input.sessionID, Date.now())
++        const { input: uncached, cache } = SessionUsage.tokens(usage)
++        if (cache.read !== 0 || uncached <= 1024 || gap <= 10 * 60_000) return Effect.void
++        return Effect.logWarning(
++          gap >= 60 * 60_000
++            ? "cache-miss: idle >= 1h, prompt cache expired as expected (1h max cache)"
++            : "cache-miss: idle > 10min but < 1h still missed -- harness cache retention can be optimized",
++          { sessionID: input.sessionID, idleMinutes: Math.round(gap / 60_000), uncachedInput: uncached },
++        )
++      })
++    return {
++      ...publisher,
++      publish: (event) =>
++        event.type === "step-finish"
++          ? publisher.publish(event).pipe(Effect.tap(() => trace(event.usage)))
++          : publisher.publish(event),
++    }
++  }
++  return { createLLMEventPublisher }
++}
+diff --git a/packages/core/src/personalize/schema-guard.ts b/packages/core/src/personalize/schema-guard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbdf76ccd78541cf6d4929449394c4a09b401a0d
+--- /dev/null
++++ b/packages/core/src/personalize/schema-guard.ts
+@@ -0,0 +1,50 @@
++import { Database as RawDatabase } from "bun:sqlite"
++import { getTableColumns } from "drizzle-orm"
++import { SessionTable } from "../session/sql"
++
++// Upstream once shipped a migration that drops a column other builds on the
++// same machine still select, which turns into "no such column: session_v2.x"
++// boot crash loops (2026-10-24: session_v2.allowance). After the stock layer
++// settles (migrations included), re-add any column this build's schema
++// declares but the table no longer has. Add-only: never drops, never renames,
++// no-op when the table is absent. Best effort: any failure is logged and
++// skipped so boot never breaks because of the guard itself.
++export function guardSessionSchema(file: string | undefined) {
++  if (!file || file === ":memory:") return
++  let db: RawDatabase
++  try {
++    db = new RawDatabase(file)
++  } catch {
++    return
++  }
++  try {
++    const table = db
++      .query<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`)
++      .get()
++    if (!table) return
++    const present = new Set(
++      db.query<{ name: string }>(`PRAGMA table_info("session_v2")`).all().map((row) => row.name),
++    )
++    for (const [name, column] of Object.entries(getTableColumns(SessionTable))) {
++      if (present.has(name)) continue
++      const type = column.getSQLType()
++      const literal =
++        typeof column.default === "number" || typeof column.default === "string" || typeof column.default === "boolean"
++          ? column.default
++          : undefined
++      const notNull = literal !== undefined && column.notNull ? " NOT NULL" : ""
++      const fallback =
++        literal === undefined
++          ? ""
++          : ` DEFAULT ${typeof literal === "string" ? `'${literal.replaceAll("'", "''")}'` : literal}`
++      db.run(`ALTER TABLE "session_v2" ADD COLUMN "${name}" ${type}${notNull}${fallback};`)
++      console.warn(
++        `[personalize schema-guard] session_v2.${name} was missing (dropped by an upstream migration); re-added as ${type}${notNull}${fallback}`,
++      )
++    }
++  } catch (error) {
++    console.warn(`[personalize schema-guard] skipped: ${error instanceof Error ? error.message : String(error)}`)
++  } finally {
++    db.close()
++  }
++}
+diff --git a/packages/core/src/personalize/skill.ts b/packages/core/src/personalize/skill.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c63f96c02929fcdebb9105f025d26874101ff0b8
+--- /dev/null
++++ b/packages/core/src/personalize/skill.ts
+@@ -0,0 +1,20 @@
++import path from "node:path"
++import { Global } from "@opencode/util/global"
++import { Effect } from "effect"
++import { Skill } from "../skill"
++import { AbsolutePath } from "../schema"
++import template from "../plugin/skill/playwright-depth.md" with { type: "text" }
++
++export const PlaywrightDepthCachePath = path.join(Global.Path.state, "playwright-depth-cache.json")
++export const PlaywrightDepthContent = template.replaceAll("{{CACHE_PATH}}", PlaywrightDepthCachePath)
++const description = "Use when taking Playwright or browser MCP snapshots: picks snapshot depth from per-site memory instead of defaulting to full depth."
++
++export function decorate(stock: typeof import("../plugin/skill")) {
++  return { Plugin: { ...stock.Plugin, effect: Effect.fn(function* (ctx: Parameters<typeof stock.Plugin.effect>[0]) {
++    yield* stock.Plugin.effect(ctx)
++    yield* ctx.skill.transform((editor) => editor.add(Skill.Info.make({
++      id: Skill.ID.make("playwright-depth"), name: Skill.Name.make("Playwright Depth"), description,
++      path: AbsolutePath.make("/builtin/playwright-depth.md"), content: PlaywrightDepthContent,
++    })))
++  }) } }
++}
+diff --git a/packages/core/src/personalize/step.ts b/packages/core/src/personalize/step.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..605856751a9f7c546732ecb7f51dbcf21c76f41e
+--- /dev/null
++++ b/packages/core/src/personalize/step.ts
+@@ -0,0 +1,39 @@
++import { LLMClient } from "@opencode/ai/effect"
++import { Context, Effect, Stream } from "effect"
++import { StepFailedError } from "../session/error"
++import { OutputGate } from "./output-policy"
++
++export function decorate(stock: typeof import("../session/runner/step")) {
++  const make: typeof stock.make = Effect.gen(function* () {
++    const context = yield* Effect.context<Effect.Services<typeof stock.make>>()
++    const client = Context.get(context, LLMClient.Service)
++    const attempt: Effect.Success<typeof stock.make>["attempt"] = (input) => Effect.gen(function* () {
++      // State belongs to this attempt, never to a shared session/global client.
++      let rejected: OutputGate["rejected"]
++      const stream: typeof client.stream = (...args) => Stream.suspend(() => {
++        const gate = new OutputGate()
++        return client.stream(...args).pipe(
++          Stream.flatMap((event) => Stream.fromArray(gate.push(event))),
++          Stream.concat(Stream.suspend(() => {
++            const events = gate.end()
++            rejected = gate.rejected
++            return Stream.fromArray(events)
++          })),
++        )
++      })
++      const service = yield* stock.make.pipe(Effect.provide(Context.add(context, LLMClient.Service, { ...client, stream })))
++      const outcome = yield* service.attempt(input)
++      if (rejected || outcome._tag === "OutputLimit") return yield* new StepFailedError({
++        error: {
++          type: rejected === "invalid" ? "invalid-response" : "output-limit",
++          message: rejected === "invalid"
++            ? "Invalid model response: local tool calls were withheld. No automatic retry."
++            : "Model response was truncated or incomplete: local tool calls were withheld. No automatic continuation; request a smaller output or explicitly change effort.",
++        },
++      })
++      return outcome
++    })
++    return { attempt }
++  })
++  return { make }
++}
+diff --git a/packages/core/src/personalize/to-llm-message.ts b/packages/core/src/personalize/to-llm-message.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..140ecb2100310bb0fa0b49debcd6f0d661cfd49b
+--- /dev/null
++++ b/packages/core/src/personalize/to-llm-message.ts
+@@ -0,0 +1,16 @@
++import { Message } from "@opencode/ai/effect"
++import { decay, indexBlock } from "../session/runner/context-decay"
++import { historyMessages } from "./content"
++import { bypassDecay } from "./decay-policy"
++
++export function decorate(stock: typeof import("../session/runner/to-llm-message")) {
++  const toLLMMessages: typeof stock.toLLMMessages = (messages, ...rest) => {
++    const history = historyMessages(messages)
++    if (bypassDecay()) return stock.toLLMMessages(history, ...rest)
++    const decayed = decay(history)
++    const lowered = stock.toLLMMessages(decayed.messages, ...rest)
++    const index = indexBlock(decayed.archive)
++    return index === undefined ? lowered : [...lowered, Message.user(index)]
++  }
++  return { toLLMMessages }
++}
+diff --git a/packages/core/src/personalize/v1-migration.ts b/packages/core/src/personalize/v1-migration.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d70d2b83f21a2e17995877a118baefbe8ba44248
+--- /dev/null
++++ b/packages/core/src/personalize/v1-migration.ts
+@@ -0,0 +1,33 @@
++import { Effect, Layer } from "effect"
++import { sql } from "drizzle-orm"
++import { Database } from "../database/database"
++import { Project } from "@opencode/schema/project"
++
++export function decorate(stock: typeof import("../database/v1-migration.bun")) {
++  const run: typeof stock.run = (options) => Effect.gen(function* () {
++    const result = yield* stock.run(options)
++    const db = (yield* Database.Service).db
++    yield* db.transaction((tx) => tx.run(sql`
++      UPDATE session_v2 SET
++        project_id = (SELECT w.project_id FROM worktree w
++          WHERE session_v2.directory = w.directory
++             OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
++          ORDER BY length(w.directory) DESC LIMIT 1),
++        path = (SELECT ltrim(substr(session_v2.directory, length(w.directory) + 1), '/') FROM worktree w
++          WHERE session_v2.directory = w.directory
++             OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/'
++          ORDER BY length(w.directory) DESC LIMIT 1)
++      WHERE project_id = ${Project.ID.global} AND workspace_id IS NULL AND EXISTS (
++        SELECT 1 FROM worktree w WHERE session_v2.directory = w.directory
++          OR substr(session_v2.directory, 1, length(w.directory) + 1) = w.directory || '/')
++    `)).pipe(Effect.orDie)
++    return result
++  })
++  // Keep upstream's progress/status layer. Its migration lock makes the second
++  // call idempotent; this tail always performs adoption, including already-imported V1 data.
++  const layer = Layer.merge(stock.layer, Layer.effectDiscard(run().pipe(
++    Effect.catchCause((cause) => Effect.logError("Personalize V1 adoption failed", { cause })),
++    Effect.forkScoped({ startImmediately: true }),
++  )))
++  return { run, layer }
++}
+diff --git a/packages/core/src/plugin/skill/playwright-depth.md b/packages/core/src/plugin/skill/playwright-depth.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..379dc1864c068da95e7ab8b24f47936901696349
+--- /dev/null
++++ b/packages/core/src/plugin/skill/playwright-depth.md
+@@ -0,0 +1,60 @@
++# Playwright snapshot depth
++
++A full-depth `browser_snapshot` on a busy page is the most expensive single call in a
++browser session. Depth-limit it, and remember the depth that worked per site so the
++second visit is cheap.
++
++## Observed cost (one busy docs page)
++
++| call | tokens |
++|---|---|
++| `browser_navigate` | ~80 — returns a snapshot **file link**, not the tree |
++| `browser_snapshot` full depth | **~8,676** — worst case |
++| `browser_snapshot` depth=3 | ~600 — 14x cheaper |
++| `browser_take_screenshot` | ~969, inline PNG — quiet, looks harmless, is not |
++| `browser_network_requests` / `browser_console_messages` | 10–20 — bulk suppressed |
++
++Full depth costs roughly **14x** depth=3. One careless snapshot is worth fourteen
++careful ones. Treat these as the right order of magnitude, not a guarantee.
++
++## Memory file
++
++`{{CACHE_PATH}}`
++
++```json
++{ "example.com": { "depth": 3, "anchor": "main", "hits": 2, "updated": "2026-10-04" } }
++```
++
++Keyed by hostname only — no scheme, no path. `anchor` records the container the useful
++content sat under, so the next visit can go straight there. Create the file with `{}`
++if it does not exist.
++
++## Protocol
++
++1. **Before** the first snapshot of a hostname, read the memory file.
++2. **Hit** → snapshot at the stored depth. State the five-word hint, verbatim:
++   `cached depth=N, escalate if missing`
++3. **Miss** → start at `depth=3`. Never open above 3 on a first visit.
++   Hint: `no cache, starting depth=3`
++4. **Escalate only on failure**, one step at a time: 3 → 5 → full. "Failure" means the
++   node you actually need is absent — not that the tree merely looks small.
++5. **Write back** the depth that worked, incrementing `hits`. A site that genuinely
++   needed full depth is worth recording too: that is a real finding, not a failure.
++6. Prefer the file link `browser_navigate` already returned over re-snapshotting.
++   Prefer `browser_console_messages` / `browser_network_requests` over a screenshot
++   when you only need to know *state*.
++
++## Do not
++
++- **Do not truncate, cap, or post-process snapshot output.** Depth is the only lever
++  here. A capped snapshot silently drops the node you were looking for and costs a
++  retry, which is worse than the tokens it saved.
++- Do not write a cache entry for a site you have not actually snapshotted. An invented
++  depth is worse than no entry, because the next run will trust it.
++- Do not escalate straight from 3 to full. The 5 step resolves most misses.
++
++## If `depth` is rejected
++
++Tool names and parameters follow `@playwright/mcp`. If your server's `browser_snapshot`
++exposes no `depth` parameter, narrow by `ref`/selector to the subtree you need instead
++and record that selector as `anchor` — the memory protocol above is unchanged.
+diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a806697badd017
+--- /dev/null
++++ b/packages/core/src/session/runner/context-decay.ts
+@@ -0,0 +1,401 @@
++import { SessionMessage } from "../message.js"
++
++/**
++ * Relevance-segmented context decay. Replaces fixed-budget compaction with a policy keyed on *which task you are on*:
++ * the live task gets the big budget - including, especially, when it only just started - the task before it keeps a
++ * small shared pot in case we bounce back, and everything older collapses to a retrieval ref. So a boundary cuts both
++ * ways at once: it shrinks everything behind it and hands the fresh task a full budget.
++ *
++ * Tool output decays hard. Message text never decays; it is the reasoning thread, it is cheap, and losing it is what
++ * makes agents repeat themselves. It is also why archived tools need no label - the chat around the call already says
++ * what it did.
++ */
++
++// ---------------------------------------------------------------------------------------------------- tunables
++
++/** Tool-output budget for the task we are on now. */
++export const BUDGET_LIVE_TASK = 20_000
++/** Shared pot for the task immediately before this one, in case we bounce back. */
++export const BUDGET_PRIOR_TASK = 2_000
++/** Turns compared either side of a candidate boundary. */
++export const TASK_WINDOW = 3
++/** Drift at or above which a new task provably began. */
++export const TASK_DRIFT_THRESHOLD = 0.6
++/** Share of drift owed to file paths; the remainder is vocabulary. */
++export const PATH_WEIGHT = 0.6
++/** Turns after which everything collapses into the single index block. */
++export const ARCHIVE_AFTER_TURNS = 20
++/** Head/tail retained when stubbing live-task output that overflowed. */
++export const STUB_HEAD_CHARS = 400
++export const STUB_TAIL_CHARS = 200
++/** Consecutive tool calls with no reasoning between them that force a label. */
++export const CHAIN_NARRATION_FLOOR = 5
++/**
++ * Re-evaluation quantum. Every drifting input is rounded down to a multiple of this, so the decision can only change
++ * every N turns (or on a provable task switch). Without it the archive frontier advances one turn at a time, every turn
++ * rewrites a different slice of the prefix, and the prompt cache misses forever - paying more than doing nothing at all.
++ */
++export const REEVAL_QUANTUM = 10
++
++/**
++ * Floor on what a replacement must actually free. The elision note alone runs ~115 chars and the archive path costs a
++ * marker plus a line in the index block, so a short tool output "collapses" into something *larger* than it was. Same
++ * reasoning as REEVAL_QUANTUM: under this margin, acting rewrites the cached prefix to make the request bigger, and
++ * doing nothing is strictly cheaper. Below it the body is left verbatim.
++ */
++export const MIN_DECAY_SAVING = 200
++
++/** Rough token estimate. Deliberately cheap - this gates trimming, not billing. */
++const tokens = (text: string) => Math.ceil(text.length / 4)
++
++/** Whether swapping `body` for `replacement` (plus any per-entry overhead it adds elsewhere) frees enough to be worth it. */
++const worthwhile = (body: string, replacement: string, overhead = 0) =>
++  body.length - replacement.length - overhead >= MIN_DECAY_SAVING
++
++// ------------------------------------------------------------------------------------------------- path probes
++
++const ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\/)[^\s]*$/
++
++/** Pull absolute filesystem paths out of arbitrary tool input JSON. */
++export const absolutePaths = (input: unknown, found: string[] = []): string[] => {
++  if (typeof input === "string") {
++    if (ABSOLUTE.test(input)) found.push(input.replaceAll("\\", "/"))
++    return found
++  }
++  if (Array.isArray(input)) {
++    for (const item of input) absolutePaths(item, found)
++    return found
++  }
++  if (input && typeof input === "object") {
++    for (const value of Object.values(input)) absolutePaths(value, found)
++  }
++  return found
++}
++
++const segments = (path: string) => path.split("/").filter(Boolean)
++
++/**
++ * Depth of the deepest shared ancestor. Two paths on the same drive but in unrelated trees (`D:/tmp/a` vs
++ * `D:/Prog/Actdev/...`) share only the drive, which is depth 1 - a provable project boundary with no filesystem access.
++ */
++export const commonAncestorDepth = (left: string, right: string) => {
++  const a = segments(left)
++  const b = segments(right)
++  let depth = 0
++  while (depth < a.length && depth < b.length && a[depth]!.toLowerCase() === b[depth]!.toLowerCase()) depth++
++  return depth
++}
++
++/** Paths are in the same project when they agree beyond the drive/filesystem root. */
++const sameProject = (left: readonly string[], right: readonly string[]) => {
++  if (left.length === 0 || right.length === 0) return true // no evidence is not evidence of change
++  return left.some((l) => right.some((r) => commonAncestorDepth(l, r) > 1))
++}
++
++// ----------------------------------------------------------------------------------------------------- keywords
++
++const WORD = /[a-z][a-z0-9_]{2,}/g
++
++/** Filler that survives every topic switch and would mask real drift. */
++const STOPWORD = new Set(
++  `the and for you this that with not are was but have has from then than into out off now just like what why how when
++   where which who will can should would could does done need want file files code line lines run running use used
++   using add added fix fixed make made get got look looks next also only same still very much more most here there`
++    .split(/\s+/)
++    .filter(Boolean),
++)
++
++/** Content words of a turn. Short words and filler carry no topic signal. */
++export const keywords = (text: string): ReadonlySet<string> =>
++  new Set((text.match(WORD) ?? []).filter((word) => word.length >= 4 && !STOPWORD.has(word)))
++
++// -------------------------------------------------------------------------------------------------------- turns
++
++interface Turn {
++  readonly message: SessionMessage.Info
++  readonly tools: readonly SessionMessage.AssistantTool[]
++  readonly paths: readonly string[]
++  readonly text: string
++  readonly words: ReadonlySet<string>
++}
++
++// Info is a tagged union: only `assistant` is declared with a content array, but in-flight records and
++// tool `error` states carry no/optional `content` — treat "no array" as "no content", never throw.
++const contentOf = (message: SessionMessage.Info) =>
++  "content" in message && Array.isArray(message.content) ? message.content : []
++
++const toolsOf = (message: SessionMessage.Info): SessionMessage.AssistantTool[] => {
++  if (message.type !== "assistant") return []
++  return contentOf(message).filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++}
++
++// user/synthetic/system/etc. carry a plain `text`; everything else reads through the guarded content array.
++const textOf = (message: SessionMessage.Info): string => {
++  if ("text" in message && typeof message.text === "string") return message.text.toLowerCase()
++  return contentOf(message)
++    .map((item) => ("text" in item && typeof item.text === "string" ? item.text : ""))
++    .join(" ")
++    .toLowerCase()
++}
++
++const toTurn = (message: SessionMessage.Info): Turn => {
++  const tools = toolsOf(message)
++  const text = textOf(message)
++  // `streaming` holds the raw unparsed input string; every settled state holds the parsed input record.
++  const paths = tools.flatMap((tool) => absolutePaths(tool.state.status === "streaming" ? {} : tool.state.input))
++  return { message, tools, paths, text, words: keywords(text) }
++}
++
++// ------------------------------------------------------------------------------------------------ task boundaries
++
++interface Window {
++  readonly paths: readonly string[]
++  readonly pathSet: ReadonlySet<string>
++  readonly words: ReadonlySet<string>
++}
++
++const windowOf = (turns: readonly Turn[]): Window => {
++  const paths = turns.flatMap((turn) => [...turn.paths])
++  return { paths, pathSet: new Set(paths), words: new Set(turns.flatMap((turn) => [...turn.words])) }
++}
++
++/** 1 - overlap coefficient. Zero when either side offers no evidence. */
++const overlapDrift = (left: ReadonlySet<string>, right: ReadonlySet<string>) => {
++  if (left.size === 0 || right.size === 0) return 0
++  const shared = [...right].filter((item) => left.has(item)).length
++  return 1 - shared / Math.min(left.size, right.size)
++}
++
++/**
++ * How far the work moved between two windows: 0 same task, 1 unrelated. Progressive on purpose - a repo change is a hard
++ * 1 and needs no judgement, everything else is a blend of which files are touched and which words are used, so moving
++ * from auth work to log trimming *inside one repo* scores high without anyone maintaining a list of magic keywords.
++ */
++export const drift = (prior: Window, live: Window): number => {
++  if (!sameProject(prior.paths, live.paths)) return 1
++  const paths = overlapDrift(prior.pathSet, live.pathSet)
++  const words = overlapDrift(prior.words, live.words)
++  return paths * PATH_WEIGHT + words * (1 - PATH_WEIGHT)
++}
++
++/**
++ * Indices where a new task provably began, oldest first. A boundary needs a full window on both sides, so the newest
++ * turns cannot mint one until the evidence exists - which is also what stops the newest turn from re-cutting the prefix
++ * and missing the prompt cache every turn.
++ */
++export const taskBoundaries = (turns: readonly Turn[]): readonly number[] => {
++  const marks: number[] = []
++  for (let index = TASK_WINDOW; index + TASK_WINDOW <= turns.length; index++) {
++    const last = marks[marks.length - 1]
++    if (last !== undefined && index - last < TASK_WINDOW) continue
++    if (drift(windowOf(turns.slice(index - TASK_WINDOW, index)), windowOf(turns.slice(index, index + TASK_WINDOW))) >= TASK_DRIFT_THRESHOLD)
++      marks.push(index)
++  }
++  return marks
++}
++
++/** 0 for the task we are on, 1 for the one before it, and so on back. */
++export const taskRank = (index: number, marks: readonly number[]) => marks.filter((mark) => mark > index).length
++
++/**
++ * Budget as a function of rank - the whole policy in three lines. Rank 0 is the live task and is never penalised for
++ * being new; rank 2 and older hold no verbatim output at all, they are a ref you can pull back on demand.
++ */
++export const taskBudget = (rank: number) => {
++  if (rank === 0) return BUDGET_LIVE_TASK
++  if (rank === 1) return BUDGET_PRIOR_TASK
++  return 0
++}
++
++/**
++ * Tools inside an unnarrated chain: CHAIN_NARRATION_FLOOR or more consecutive calls with no reasoning text between
++ * them. Everywhere else the surrounding chat already says what the call did, so the archive carries a bare ref and pays
++ * ~10 tokens instead of a redundant label.
++ */
++export const unnarrated = (turns: readonly Turn[]): ReadonlySet<string> => {
++  const marked = new Set<string>()
++  let run: string[] = []
++  const flush = () => {
++    if (run.length >= CHAIN_NARRATION_FLOOR) for (const id of run) marked.add(id)
++    run = []
++  }
++  for (const turn of turns) {
++    if (turn.text.trim().length > 0) flush()
++    for (const tool of turn.tools) run.push(tool.id)
++  }
++  flush()
++  return marked
++}
++
++/**
++ * Everything that can change what the decayed prefix looks like, reduced to three ints. Equal key => byte-identical
++ * output => skip the work and keep the provider cache hot. This is the loop-breaker: the expensive decision is made on
++ * a boundary, not on every turn.
++ */
++export interface ContextKey {
++  /** Count of provable task boundaries seen. Monotonic. */
++  readonly segment: number
++  /** Archive frontier, quantized so it steps rather than slides. */
++  readonly frontier: number
++  /** First turn of the live task. */
++  readonly live: number
++}
++
++const quantize = (value: number) => Math.max(0, Math.floor(value / REEVAL_QUANTUM) * REEVAL_QUANTUM)
++
++export const contextKey = (turns: readonly Turn[]): ContextKey => {
++  const marks = taskBoundaries(turns)
++  return { segment: marks.length, frontier: quantize(turns.length - ARCHIVE_AFTER_TURNS), live: marks[marks.length - 1] ?? 0 }
++}
++
++export const sameKey = (left: ContextKey | undefined, right: ContextKey) =>
++  left !== undefined && left.segment === right.segment && left.frontier === right.frontier && left.live === right.live
++
++// -------------------------------------------------------------------------------------------------------- decay
++
++const contentText = (tool: SessionMessage.AssistantTool) => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return ""
++  // ToolStateError.content is optional in the V2 schema — error states may carry no content (see compaction.ts, which guards the same way)
++  return (tool.state.content ?? [])
++    .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
++    .join("\n")
++}
++
++const stub = (tool: SessionMessage.AssistantTool, body: string) => {
++  const head = body.slice(0, STUB_HEAD_CHARS)
++  const tail = body.length > STUB_HEAD_CHARS + STUB_TAIL_CHARS ? body.slice(-STUB_TAIL_CHARS) : ""
++  const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
++  const handle = paths[0] ?? tool.id
++  const note = `\n…[${tool.name} output elided — ${body.length} chars. ref ${handle} — name it and the harness reinjects it locally]…\n`
++  return [head, note, tail].join("")
++}
++
++/** An elided tool keeps outputPaths so the harness can refetch without a provider call. */
++const elide = (tool: SessionMessage.AssistantTool, text: string): SessionMessage.AssistantTool => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
++  return { ...tool, state: { ...tool.state, content: [{ type: "text", text }] } } as SessionMessage.AssistantTool
++}
++
++/**
++ * Superseded/old output collapses to a bare ref - the consolidated index block carries the detail, so repeating it
++ * per-tool would defeat the point. Content is never emptied outright: an empty tool result trips provider-side
++ * tool_call/tool_result pairing checks.
++ */
++const markerText = (ref: string) => `[archived — ref ${ref}]`
++
++const archivedMarker = (tool: SessionMessage.AssistantTool, ref: string): SessionMessage.AssistantTool => {
++  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
++  return { ...tool, state: { ...tool.state, content: [{ type: "text", text: markerText(ref) }] } } as SessionMessage.AssistantTool
++}
++
++export interface ArchiveEntry {
++  readonly id: string
++  readonly ref: string
++  /** Carried only for unnarrated chains; elsewhere the chat is the label. */
++  readonly name?: string
++  readonly chars?: number
++}
++
++/** One entry's line in the index block. Shared with `indexBlock` so the cost model cannot drift from what is emitted. */
++const indexLine = (entry: ArchiveEntry) =>
++  entry.name ? `  ${entry.ref} — ${entry.name}, ${entry.chars} chars` : `  ${entry.ref}`
++
++export interface DecayResult {
++  readonly messages: readonly SessionMessage.Info[]
++  readonly archive: readonly ArchiveEntry[]
++  readonly key: ContextKey
++  /** False when the short-circuit fired and the prefix was left byte-identical. */
++  readonly rewritten: boolean
++}
++
++/**
++ * Decay a projected history immediately before it is lowered to provider messages. Pure and synchronous: no filesystem,
++ * no git, no Effect, so it can sit inside `toLLMMessages` without changing its signature.
++ */
++export const decay = (messages: readonly SessionMessage.Info[], previous?: ContextKey): DecayResult => {
++  const turns = messages.map(toTurn)
++  const key = contextKey(turns)
++
++  // Loop-breaker. Nothing affecting the lowered bytes changed, so hand back the same references and let the cache hit.
++  if (sameKey(previous, key)) return { messages, archive: [], key, rewritten: false }
++
++  const marks = taskBoundaries(turns)
++  const labelled = unnarrated(turns)
++  const archiveBefore = key.frontier
++  const archive: ArchiveEntry[] = []
++
++  // Decide every tool's fate newest-first so the freshest output claims budget first, then rebuild in original order.
++  const verdict = new Map<string, SessionMessage.AssistantTool>()
++  const spent = new Map<number, number>()
++
++  for (let index = turns.length - 1; index >= 0; index--) {
++    const turn = turns[index]!
++    const rank = taskRank(index, marks)
++    const allowance = taskBudget(rank)
++    const archived = index < archiveBefore
++
++    for (const tool of turn.tools) {
++      const body = contentText(tool)
++      if (body.length === 0) continue
++
++      const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
++      const ref = paths[0] ?? tool.id
++      const label = labelled.has(tool.id)
++      const entry: ArchiveEntry = label ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref }
++      const retire = () => {
++        archive.push(entry)
++        verdict.set(tool.id, archivedMarker(tool, ref))
++      }
++      // Retiring is not free: the marker replaces the body *and* the tool buys a line in the index block. For a short
++      // output that total exceeds what it reclaims, so the body stays - cheaper on tokens and it keeps the thread whole.
++      const retires = worthwhile(body, markerText(ref), indexLine(entry).length + 1)
++
++      if (archived || allowance === 0) {
++        if (retires) retire()
++        continue
++      }
++
++      const cost = tokens(body)
++      const used = spent.get(rank) ?? 0
++      if (used + cost <= allowance) {
++        spent.set(rank, used + cost)
++        continue // keep verbatim
++      }
++
++      // Overflow in the live task keeps a head/tail so the thread still reads; an older task is cold, so it goes to a ref.
++      if (rank === 0) {
++        const stubbed = stub(tool, body)
++        if (worthwhile(body, stubbed)) verdict.set(tool.id, elide(tool, stubbed))
++        continue // the note would outweigh the body - leave it verbatim
++      }
++      if (retires) retire()
++    }
++  }
++
++  archive.reverse() // filled newest-first; present it oldest-first like the transcript
++
++  const next = messages.map((message) => {
++    if (message.type !== "assistant") return message
++    const items = Array.isArray(message.content) ? message.content : []
++    if (!items.some((item) => item.type === "tool" && verdict.has(item.id))) return message
++    const content = items.map((item) => (item.type === "tool" && verdict.has(item.id) ? verdict.get(item.id)! : item))
++    return { ...message, content } as SessionMessage.Info
++  })
++
++  return { messages: next, archive, key, rewritten: true }
++}
++
++/**
++ * Single consolidated block standing in for everything archived. Bare refs: the chat above each call already says what
++ * it was for, and a label per entry would cost more than the entries it describes.
++ */
++export const indexBlock = (archive: readonly ArchiveEntry[]) => {
++  if (archive.length === 0) return undefined
++  const lines = archive.map(indexLine)
++  return [
++    `<archived-tool-output count="${archive.length}">`,
++    "Tool output elided. Name any ref to have the harness reinject it locally.",
++    ...lines,
++    "</archived-tool-output>",
++  ].join("\n")
++}
+diff --git a/packages/core/test/session-context-decay.test.ts b/packages/core/test/session-context-decay.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b027140c29
+--- /dev/null
++++ b/packages/core/test/session-context-decay.test.ts
+@@ -0,0 +1,235 @@
++import { expect, test } from "bun:test"
++import { SessionMessage } from "@opencode/schema/session-message"
++import {
++  ARCHIVE_AFTER_TURNS,
++  REEVAL_QUANTUM,
++  decay,
++  indexBlock,
++} from "@opencode/core/session/runner/context-decay"
++import { Schema } from "effect"
++
++// ------------------------------------------------------------------------------------------------- fixtures
++
++let counter = 0
++const callID = () => `call_${counter++}`
++
++const user = (text: string) =>
++  Schema.decodeUnknownSync(SessionMessage.User)({
++    id: SessionMessage.ID.create(),
++    type: "user",
++    text,
++    time: { created: 0 },
++  })
++
++const assistant = (content: readonly unknown[]) =>
++  Schema.decodeUnknownSync(SessionMessage.Assistant)({
++    id: SessionMessage.ID.create(),
++    type: "assistant",
++    agent: "build", // Agent.defaultID — decode validates it against the Agent.ID brand
++
++    model: { id: "test-model", providerID: "test" },
++    content,
++    time: { created: 0, completed: 0 },
++  })
++
++const tool = (state: Record<string, unknown>, id = callID()) => ({
++  type: "tool",
++  id,
++  name: "read",
++  state,
++  time: { created: 0 },
++})
++
++const text = (value: string) => ({ type: "text", text: value })
++
++const err = { type: "unknown", message: "tool blew up" }
++
++/** Every tool part in a projected history, across every assistant message. */
++const toolsOf = (messages: readonly SessionMessage.Info[]) =>
++  messages.flatMap((message) =>
++    message.type === "assistant"
++      ? message.content.filter((item): item is SessionMessage.AssistantTool => item.type === "tool")
++      : [],
++  )
++
++/**
++ * The exact read compaction/lowering performs on a tool result. This is the line that crashed in production
++ * (`e.content.map` on an error state that carried no content) — it must never see `undefined` on a completed
++ * state and must never be handed an emptied array on a rewritten one.
++ */
++const compactionRead = (state: SessionMessage.ToolState) => {
++  if (state.status === "completed") return state.content.map((part) => ("text" in part ? part.text : "")).join("\n")
++  if (state.status === "error") return (state.content ?? []).map((part) => ("text" in part ? part.text : "")).join("\n")
++  return ""
++}
++
++// ----------------------------------------------------------------------------------------------------- tests
++
++test("reader survives every tool state — including an error state with no content", () => {
++  const noContentID = callID()
++  const messages = [
++    user("please read the file"),
++    assistant([
++      text("running the tools"),
++      tool({ status: "streaming", input: '{"filePath": "D:/tmp/a' }),
++      tool({ status: "running", input: { filePath: "D:/tmp/a/x.ts" }, metadata: {} }),
++      tool({ status: "completed", input: {}, content: [text("short output")] }),
++      tool({ status: "error", input: {}, error: err, content: [text("stack trace")] }),
++      // The regression: ToolStateError.content is optional — V2 rows can legally omit it entirely.
++      tool({ status: "error", input: {}, error: err }, noContentID),
++    ]),
++  ]
++
++  expect(() => decay(messages)).not.toThrow()
++  const result = decay(messages)
++
++  for (const item of toolsOf(result.messages)) {
++    // The reader itself must come back as a string for every state, never undefined, never a throw.
++    expect(() => compactionRead(item.state)).not.toThrow()
++    expect(typeof compactionRead(item.state)).toBe("string")
++    // Completed content is a NonEmptyArray in the schema; decay must never have emptied or dropped it.
++    if (item.state.status === "completed") {
++      expect(Array.isArray(item.state.content)).toBe(true)
++      expect(item.state.content.length).toBeGreaterThan(0)
++    }
++    // Error content stays either absent (untouched) or a non-empty array — never null, never [].
++    if (item.state.status === "error" && item.state.content !== undefined) {
++      expect(item.state.content.length).toBeGreaterThan(0)
++    }
++  }
++
++  // The no-content error tool passed through untouched: no fabricated body, no crash, content still absent.
++  const untouched = toolsOf(result.messages).find((item) => item.id === noContentID)
++  expect(untouched).toBeDefined()
++  expect(untouched!.state.status).toBe("error")
++  expect((untouched!.state as SessionMessage.ToolStateError).content).toBeUndefined()
++})
++
++test("archived tools keep a non-empty marker — content is never emptied or undefined", () => {
++  const big = "x".repeat(5_000)
++  const oldCompleted = callID()
++  const oldErrored = callID()
++
++  const history: SessionMessage.Info[] = [
++    user("task one"),
++    assistant([
++      text("reading the big files"),
++      tool({ status: "completed", input: { filePath: "D:/tmp/a/big.ts" }, content: [text(big)] }, oldCompleted),
++      tool({ status: "error", input: { filePath: "D:/tmp/a/gone.ts" }, error: err, content: [text(big)] }, oldErrored),
++    ]),
++  ]
++  // Push the first turns behind the archive frontier: frontier = quantize(length - ARCHIVE_AFTER_TURNS) >= 2.
++  const padding = ARCHIVE_AFTER_TURNS + REEVAL_QUANTUM * 2
++  for (let i = 0; i < padding; i++) history.push(user(`filler turn ${i}`), assistant([text(`noted ${i}`)]))
++
++  const result = decay(history)
++  expect(result.rewritten).toBe(true)
++  expect(result.archive.length).toBeGreaterThanOrEqual(2)
++
++  const byID = new Map(toolsOf(result.messages).map((item) => [item.id, item]))
++  for (const id of [oldCompleted, oldErrored]) {
++    const item = byID.get(id)!
++    expect(item).toBeDefined()
++    const state = item.state as SessionMessage.ToolStateCompleted | SessionMessage.ToolStateError
++    // Never emptied outright — an empty tool result trips provider tool_call/tool_result pairing checks,
++    // and an undefined one is exactly the `e.content.map` crash this test pins down.
++    expect(Array.isArray(state.content)).toBe(true)
++    expect(state.content!.length).toBeGreaterThan(0)
++    const body = compactionRead(state)
++    expect(body).toMatch(/^\[archived — ref .+\]$/)
++    expect(body.length).toBeGreaterThan(0)
++  }
++
++  // Every surviving tool in the whole history still reads cleanly through the compaction path.
++  for (const item of toolsOf(result.messages)) {
++    expect(typeof compactionRead(item.state)).toBe("string")
++  }
++
++  // The index block mirrors the archive and stays a plain string.
++  const block = indexBlock(result.archive)
++  expect(block).toBeDefined()
++  expect(block!).toContain(`count="${result.archive.length}"`)
++  expect(indexBlock([])).toBeUndefined()
++})
++
++test("content-less V2 variants (idle, compaction, marker turns) pass through decay untouched — no crash, no fabricated content", () => {
++  // The production crash: `undefined is not an object (evaluating 'e.content.map')` inside SessionCompaction.compact.
++  // V2 `Info` is an 11-variant union and these variants have NO `content` field and NO `role` field at all.
++  const idle = Schema.decodeUnknownSync(SessionMessage.Info)({
++    id: SessionMessage.ID.create(),
++    type: "idle",
++    outcome: "succeeded",
++    time: { created: 0 },
++  })
++  const compaction = Schema.decodeUnknownSync(SessionMessage.Info)({
++    id: SessionMessage.ID.create(),
++    type: "compaction",
++    status: "completed",
++    reason: "auto",
++    summary: "compacted earlier work",
++    recent: "recent tail",
++    time: { created: 0 },
++  })
++
++  const toolID = callID()
++  const messages = [
++    user("do the thing"),
++    assistant([text("on it"), tool({ status: "completed", input: {}, content: [text("ok")] }, toolID)]),
++    idle,
++    compaction,
++    user("next task"),
++  ]
++
++  // Must not throw on any variant, with or without a prior key.
++  expect(() => decay(messages)).not.toThrow()
++  const result = decay(messages)
++  expect(() => decay(result.messages, result.key)).not.toThrow()
++
++  // Markers come back as the exact same references — decay never rewrites, clones, or invents `content` on them.
++  expect(result.messages).toHaveLength(messages.length)
++  expect(result.messages[2]).toBe(idle)
++  expect(result.messages[3]).toBe(compaction)
++  expect("content" in result.messages[2]!).toBe(false)
++  expect("content" in result.messages[3]!).toBe(false)
++
++  // The assistant turn's tool still reads cleanly through the compaction path.
++  const item = toolsOf(result.messages).find((entry) => entry.id === toolID)!
++  expect(item).toBeDefined()
++  expect(typeof compactionRead(item.state)).toBe("string")
++})
++
++test("short-circuit hands back identical references, not re-read copies", () => {
++  const messages = [
++    user("hello"),
++    assistant([text("done"), tool({ status: "completed", input: {}, content: [text("ok")] })]),
++  ]
++  const first = decay(messages)
++  const second = decay(first.messages, first.key)
++  expect(second.rewritten).toBe(false)
++  expect(second.messages).toBe(first.messages)
++  expect(second.archive).toEqual([])
++})
++
++test("mixed text and file parts read without crashing and short output is left verbatim", () => {
++  const mixedID = callID()
++  const messages = [
++    user("read the image"),
++    assistant([
++      text("reading"),
++      tool(
++        {
++          status: "completed",
++          input: {},
++          content: [text("tiny"), { type: "file", mime: "image/png", uri: "data:image/png;base64,QUJD" }],
++        },
++        mixedID,
++      ),
++    ]),
++  ]
++  const result = decay(messages)
++  const item = toolsOf(result.messages).find((entry) => entry.id === mixedID)!
++  const state = item.state as SessionMessage.ToolStateCompleted
++  // Too short to be worth touching: body, including the non-text part, survives byte-identical.
++  expect(state.content.length).toBe(2)
++  expect(() => compactionRead(state)).not.toThrow()
++})
+diff --git a/packages/core/test/session/content-guards.test.ts b/packages/core/test/session/content-guards.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b957c9087140bc6fa4b8ee7c2550c22516bed06
+--- /dev/null
++++ b/packages/core/test/session/content-guards.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import path from "node:path"
++
++// CI guard checker: every array-style access of `.content` in patch-owned files must sit behind an
++// Array.isArray guard. Upstream has shipped messages whose `content` is undefined/non-array mid-stream;
++// an unguarded `.content.map(...)` there is exactly the TypeError that broke context-decay. Scope is the
++// patch-owned files only - upstream files are taken as-is and are not rewritten by this check.
++// Isolated architecture: our runtime logic lives in src/personalize/* (plus context-decay.ts);
++// stock modules are byte-identical upstream files and must never be listed here.
++const OWNED = [
++  "src/personalize/content.ts",
++  "src/personalize/database.ts",
++  "src/personalize/hooks.ts",
++  "src/personalize/markdown.ts",
++  "src/personalize/model-request.ts",
++  "src/personalize/persona.ts",
++  "src/personalize/skill.ts",
++  "src/personalize/to-llm-message.ts",
++  "src/personalize/v1-migration.ts",
++  "src/session/runner/context-decay.ts",
++]
++
++const ACCESS =
++  /\.content(\?\.|\.)(map|flatMap|filter|some|every|find|findLast|findIndex|forEach|reduce|reduceRight|slice|concat|join|at|indexOf|lastIndexOf|includes|entries|keys|values|length)\b|\.content\[/
++const GUARD = /Array\.isArray\(/
++const LOOKBACK = 12
++
++describe("content guards", () => {
++  test("every .content array access in patch-owned files is guarded", () => {
++    const root = path.join(import.meta.dir, "..", "..")
++    const errors: string[] = []
++    for (const rel of OWNED) {
++      const lines = readFileSync(path.join(root, rel), "utf8").split("\n")
++      lines.forEach((line, index) => {
++        if (!ACCESS.test(line)) return
++        const from = Math.max(0, index - LOOKBACK)
++        if (lines.slice(from, index + 1).some((near) => GUARD.test(near))) return
++        errors.push(
++          `${rel}:${index + 1} unguarded .content access -> add: const items = Array.isArray(x.content) ? x.content : [] and use items`,
++        )
++      })
++    }
++    if (errors.length) throw new Error(`unguarded .content array access:\n${errors.join("\n")}`)
++    expect(errors).toEqual([])
++  })
++})
+diff --git a/packages/server/src/personalize/event.ts b/packages/server/src/personalize/event.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7dfcc70e521feb5aa7f00486fc9035a32b113947
+--- /dev/null
++++ b/packages/server/src/personalize/event.ts
+@@ -0,0 +1,52 @@
++import { Event } from "@opencode/schema/event"
++import { Effect, Stream } from "effect"
++import { HttpServerResponse } from "effect/http"
++import { HttpApiBuilder } from "effect/http-api"
++import { Api } from "../api"
++import { EventFeed } from "../event-feed"
++import { lifetime } from "./idle-state"
++
++// ============================================================================
++// PERSONALIZATION (deltav11) — SSE handler with idle-reaper activity.
++// Actual stream ownership, not a 15s heartbeat estimate: even /killtime 1s
++// must leave connected windows alone. A scoped lease is released when the
++// stream closes, fails, or is interrupted. The stock module is referenced
++// only in the type position below — erased at build, no runtime cycle.
++// ============================================================================
++
++export function decorate(stock: typeof import("../handlers/event")) {
++  const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers) =>
++    Effect.gen(function* () {
++      const feed = yield* EventFeed.Service
++      return handlers.handleRaw("event.subscribe", (ctx) =>
++        Effect.gen(function* () {
++          const connected = {
++            id: Event.ID.create(),
++            type: "server.connected",
++            data: {},
++          } as const
++          const output = Stream.unwrap(
++            Effect.acquireRelease(Effect.sync(() => lifetime.connect()), (close) => Effect.sync(close)).pipe(
++              Effect.andThen(feed.subscribe(ctx.query.types)),
++              Effect.map((live) => Stream.make(EventFeed.frame(connected)).pipe(Stream.concat(live))),
++            ),
++          )
++          const heartbeat = Stream.tick("15 seconds").pipe(Stream.map(() => ": heartbeat\n\n"))
++          return HttpServerResponse.stream(
++            output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }), Stream.encodeText),
++            {
++              contentType: "text/event-stream",
++              headers: {
++                "Cache-Control": "no-cache, no-transform",
++                "X-Accel-Buffering": "no",
++                "X-Content-Type-Options": "nosniff",
++              },
++            },
++          )
++        }),
++      )
++    }),
++  ) as typeof stock.EventHandler
++
++  return { EventHandler }
++}
+diff --git a/packages/server/src/personalize/idle-state.ts b/packages/server/src/personalize/idle-state.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8bee9fb60c5fc38bce9a5eb6f74558ccb63c9e98
+--- /dev/null
++++ b/packages/server/src/personalize/idle-state.ts
+@@ -0,0 +1,51 @@
++import { Lifetime } from "@opencode/util/personalize-lifetime"
++import { settings, sleeping, evictSelf } from "@opencode/util/personalize-lifetime-store"
++
++export const lifetime = new Lifetime(settings())
++
++// Exactly one deadline timer, rescheduled by actual client/job transitions.
++// No heartbeat heuristics, watchdog polling, fibers, or spawned processes.
++export function armIdleWatchdog(soft: () => void, hard = () => {
++  try { process.kill(process.pid, "SIGKILL") } catch {}
++  process.exit(137)
++}) {
++  let timer: ReturnType<typeof setTimeout> | undefined
++  let disarmed = false
++  function schedule() {
++    if (timer) clearTimeout(timer)
++    timer = undefined
++    if (disarmed) return
++    const next = lifetime.next()
++    if (!next) return
++    timer = setTimeout(() => {
++      const due = lifetime.next()
++      if (!due || due.after > 0) return schedule()
++      // Write before disconnecting: existing windows must park, not respawn it.
++      try { sleeping(due.kind) } catch (error) {
++        console.error("[personalize] cannot record service sleep", error)
++        if (due.kind === "soft") {
++          // Avoid a soft-stop/auto-respawn loop. Hard control stays armed.
++          lifetime.softBlocked = true
++          return schedule()
++        }
++      }
++      console.error(`[personalize] ${due.kind} lifetime deadline reached`)
++      if (due.kind === "hard") {
++        lifetime.stopped = true
++        try { evictSelf() } catch {}
++        hard()
++      } else {
++        lifetime.softStopping = true
++        try { soft() } finally { schedule() }
++      }
++    }, next.after)
++    timer.unref?.()
++  }
++  lifetime.changed = schedule
++  schedule()
++  return () => {
++    disarmed = true
++    if (timer) clearTimeout(timer)
++    lifetime.changed = () => {}
++  }
++}
+diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b96a3b86afd35e442dc48f2efa16f1c54db7d4de
+--- /dev/null
++++ b/packages/server/src/personalize/process.ts
+@@ -0,0 +1,88 @@
++import os from "node:os"
++import path from "node:path"
++import { Effect, Option } from "effect"
++import { HttpServerRequest, HttpServerResponse } from "effect/http"
++import { Flock } from "@opencode/util/flock"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++import { defaults, duration } from "@opencode/util/personalize-lifetime"
++import { save } from "@opencode/util/personalize-lifetime-store"
++import { authorizedRequest, unauthorizedResponse } from "../middleware/authorization"
++import { armIdleWatchdog, lifetime } from "./idle-state"
++
++export function decorate(stock: typeof import("../process")) {
++  // Keep the complete stock signature and forward its tail unchanged.
++  const start: typeof stock.start = (options, ...rest) => {
++    const [lifecycle, transform] = rest
++    if (lifecycle) {
++      rest[0] = {
++        ...lifecycle,
++        onListen: (address, shutdown) => Effect.gen(function* () {
++            const cleanup = yield* lifecycle.onListen(address, shutdown)
++            armIdleWatchdog(() => { void Effect.runPromise(shutdown).catch(console.error) })
++            // The unref'd hard deadline survives graceful finalizers. If they
++            // hang it still kills; if the process exits normally it holds no
++            // handles open and needs no extra cleanup machinery.
++            return cleanup.pipe(Effect.ensuring(Effect.sync(() => {
++              lifetime.softStopping = true
++              lifetime.changed()
++            })))
++          }),
++      }
++      rest[1] = (app) => {
++        const next = transform ? transform(app) : app
++        return Effect.gen(function* () {
++          const request = yield* HttpServerRequest.HttpServerRequest
++          if (new URL(request.url, "http://localhost").pathname === "/_personalize/lifetime") {
++            if (!(yield* authorizedRequest(request, { password: Option.fromNullishOr(options.password), username: "opencode" })))
++              return unauthorizedResponse(request)
++            const reply = (body: unknown, status = 200) => HttpServerResponse.text(JSON.stringify(body), {
++              status, contentType: "application/json",
++            })
++            if (request.method === "GET") return reply(lifetime.settings)
++            if (request.method !== "PUT") return reply({ error: "Use GET or PUT" }, 405)
++            const body: unknown = yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))
++            if (!body || typeof body !== "object") return reply({ error: "Expected command and duration" }, 400)
++            const command = Reflect.get(body, "command"), input = Reflect.get(body, "duration")
++            if ((command !== "killtime" && command !== "softkilltime") || typeof input !== "string")
++              return reply({ error: "Expected killtime or softkilltime and a duration" }, 400)
++            const key = command === "killtime" ? "hardMs" : "softMs"
++            let ms: number
++            try { ms = duration(input, defaults[key]) }
++            catch (error) { return reply({ error: error instanceof Error ? error.message : String(error) }, 400) }
++            const settings = { ...lifetime.settings, [key]: ms }
++            try { save(settings) }
++            catch { return reply({ error: "Could not save lifetime settings; nothing changed" }, 500) }
++            lifetime.configure(settings)
++            return reply(settings)
++          }
++          // A mutation in progress protects soft shutdown; reads/heartbeats do
++          // not keep an idle server alive. Job leases protect asynchronous work.
++          if (request.method === "GET" || request.method === "HEAD") return yield* next
++          return yield* Effect.acquireUseRelease(
++            Effect.sync(() => lifetime.work("requests")),
++            () => next,
++            (done) => Effect.sync(done),
++          )
++        })
++      }
++    }
++    return Effect.acquireUseRelease(
++      Effect.promise((signal) => Flock.acquire("service-bootstrap", {
++        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
++      }).then((lease) => {
++        let done = false
++        const release = () => {
++          if (done) return Promise.resolve()
++          done = true
++          return lease.release()
++        }
++        return { release }
++      })),
++      (boot) => stock.start(options, ...rest).pipe(Effect.provideService(PersonalizeBoot, {
++        retry: Effect.void, release: Effect.promise(() => boot.release()),
++      })),
++      (boot) => Effect.promise(() => boot.release()),
++    )
++  }
++  return { start }
++}
+diff --git a/packages/server/src/personalize/routes.ts b/packages/server/src/personalize/routes.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a422f9702b7da72e2aff3c9b4f130aee0a1650e0
+--- /dev/null
++++ b/packages/server/src/personalize/routes.ts
+@@ -0,0 +1,59 @@
++import { Context, Effect, Layer, Option } from "effect"
++import { Job } from "@opencode/core/job"
++import { Bus } from "@opencode/core/bus"
++import { SessionExecution } from "@opencode/core/session/execution"
++import { SessionEvent } from "@opencode/schema/session-event"
++import { lifetime } from "./idle-state"
++
++// One route-builder seam, using the app's actual services (not a second bus).
++export function decorate(stock: typeof import("../routes")) {
++  const createRoutes: typeof stock.createRoutes = (options, urls, ...rest) => {
++    const jobs = Job.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => {
++      const service = Context.get(context, Job.Service)
++      const start: Job.Interface["start"] = (input) => Effect.suspend(() => {
++        const done = lifetime.work()
++        let handedOff = false
++        return service.start({ ...input, run: input.run.pipe(Effect.ensuring(Effect.sync(done))) }).pipe(
++          Effect.tap(() => Effect.sync(() => { handedOff = true })),
++          Effect.ensuring(Effect.sync(() => { if (!handedOff) done() })),
++        )
++      })
++      return Layer.succeed(Job.Service, { ...service, start })
++    })))
++    const executions = SessionExecution.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) =>
++      Layer.effect(SessionExecution.Service, Effect.gen(function* () {
++        const service = Context.get(context, SessionExecution.Service)
++        // This dependency already belongs to the stock execution graph. Query
++        // it without changing mapLayer's dependency contract.
++        const bus = yield* Effect.serviceOption(Bus.Service)
++        if (Option.isNone(bus)) {
++          lifetime.softBlocked = true
++          return service // Hard control remains available if soft cannot prove safety.
++        }
++        const running = new Map<string, () => void>()
++        lifetime.externalBusy = () => Effect.runSync(service.active).size > 0
++        const unsubscribe = yield* bus.value.listen((event) => Effect.sync(() => {
++          if (!event.data || typeof event.data !== "object") return
++          const id = Reflect.get(event.data, "sessionID")
++          if (typeof id !== "string") return
++          if (event.type === SessionEvent.Execution.Started.type && !running.has(id))
++            running.set(id, lifetime.work())
++          if (event.type === SessionEvent.Execution.Succeeded.type || event.type === SessionEvent.Execution.Failed.type ||
++            event.type === SessionEvent.Execution.Interrupted.type) {
++            running.get(id)?.()
++            running.delete(id)
++          }
++        }))
++        yield* Effect.addFinalizer(() => unsubscribe.pipe(Effect.andThen(Effect.sync(() => {
++          for (const done of running.values()) done()
++          lifetime.externalBusy = () => false
++        }))))
++        return service
++      })),
++    )))
++    // Caller replacements retain priority. Forward every stock argument.
++    rest[0] = [Job.node.replace(jobs), SessionExecution.node.replace(executions), ...(rest[0] ?? [])]
++    return stock.createRoutes(options, urls, ...rest)
++  }
++  return { createRoutes }
++}
+diff --git a/packages/server/src/personalize/service-status.ts b/packages/server/src/personalize/service-status.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c12ff3ac8c3093671ce60c390deed19a2e2c7b0
+--- /dev/null
++++ b/packages/server/src/personalize/service-status.ts
+@@ -0,0 +1,24 @@
++import { Effect, Option, Ref } from "effect"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++import { lifetime } from "./idle-state"
++
++export function decorate(stock: typeof import("../service-status")) {
++  const make: typeof stock.make = (options = {}) => Effect.gen(function* () {
++    type State = import("../service-status").State | { readonly type: "retrying" }
++    const state = yield* Ref.make<State>(options.initial ?? { type: "starting" })
++    const boot = yield* Effect.serviceOption(PersonalizeBoot)
++    const release = Option.isSome(boot) ? boot.value.release : Effect.void
++    if (Option.isSome(boot)) boot.value.retry = Ref.update(state, (value) =>
++      value.type === "starting" || value.type === "retrying" ? { type: "retrying" } as const : value)
++    return {
++      // The wire may expose retrying; the owned Promise client normalizes it to waiting.
++      current: Ref.get(state) as Effect.Effect<import("../service-status").State>,
++      ready: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "ready" } as const : value)
++        .pipe(Effect.andThen(release), Effect.tap(() => Effect.sync(() => lifetime.start()))),
++      fail: Ref.update(state, (value) => value.type === "starting" || value.type === "retrying" ? { type: "failed" } as const : value)
++        .pipe(Effect.andThen(release)),
++      beginStopping: Ref.update(state, (value) => value.type === "stopping" ? value : { type: "stopping" } as const),
++    }
++  })
++  return { make }
++}
+diff --git a/packages/tui/src/personalize/client.ts b/packages/tui/src/personalize/client.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f829fd1a38707c616c2b3cf4b620be18373c346
+--- /dev/null
++++ b/packages/tui/src/personalize/client.ts
+@@ -0,0 +1,19 @@
++import { createComponent, mergeProps } from "solid-js"
++import { wake } from "./lifetime-state"
++
++export function decorate(stock: typeof import("../context/client")) {
++  const ClientProvider: typeof stock.ClientProvider = (props) => {
++    const service = props.service
++    if (!service) return createComponent(stock.ClientProvider, props)
++    return createComponent(stock.ClientProvider, mergeProps(props, {
++      service: {
++        ...service,
++        async reconnect(signal: AbortSignal) {
++          await wake.wait(signal)
++          return service.reconnect(signal)
++        },
++      },
++    }))
++  }
++  return { ClientProvider }
++}
+diff --git a/packages/tui/src/personalize/lifetime-state.ts b/packages/tui/src/personalize/lifetime-state.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1199b5bcf5820749ea21d26d778c911accf11d0d
+--- /dev/null
++++ b/packages/tui/src/personalize/lifetime-state.ts
+@@ -0,0 +1,4 @@
++import { WakeGate } from "@opencode/util/personalize-lifetime"
++import { sleptAfter } from "@opencode/util/personalize-lifetime-store"
++
++export const wake = new WakeGate(sleptAfter)
+diff --git a/packages/tui/src/personalize/lifetime.ts b/packages/tui/src/personalize/lifetime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e044cfe20aa5c2cc008e6cfe978a3156a5eda63
+--- /dev/null
++++ b/packages/tui/src/personalize/lifetime.ts
+@@ -0,0 +1,81 @@
++import { Plugin } from "@opencode/plugin/tui"
++import { useKeyboard } from "@opentui/solid"
++import { createEffect, createRoot } from "solid-js"
++import { defaults, duration } from "@opencode/util/personalize-lifetime"
++import { useClient } from "../context/client"
++import { wake } from "./lifetime-state"
++
++const commands = [
++  {
++    name: "killtime", key: "hardMs", title: "Hard shutdown timeout",
++    description: "Force-kill after the last window disconnects (default 20s). A custom hard deadline takes priority over soft waiting and kills unfinished work.",
++  },
++  {
++    name: "softkilltime", key: "softMs", title: "Soft shutdown timeout",
++    description: "Wait for all tasks, subagents and background tools, then stop after this quiet time (default 10s). Never delays the hard deadline.",
++  },
++] as const
++
++const plugin = Plugin.define({
++  id: "opencode.personalize.lifetime",
++  setup(context) {
++    context.ui.slot({
++      append: "app",
++      render() {
++        const client = useClient()
++        useKeyboard(() => wake.wake())
++        context.keymap.layer(() => ({
++          mode: "global",
++          commands: commands.map((command) => ({
++            id: `personalize.${command.name}`,
++            title: command.title,
++            description: command.description,
++            group: "Service",
++            palette: true,
++            slash: { name: command.name, arguments: true },
++            async run(input) {
++              try {
++                const value = input?.trim()
++                if (value) duration(value, defaults[command.key])
++                wake.wake()
++                if (client.connection.status() !== "connected") {
++                  // Wait for the existing reconnect path, never spawn ourselves.
++                  await new Promise<void>((resolve, reject) => {
++                    createRoot((dispose) => {
++                      const timer = setTimeout(() => { dispose(); reject(new Error("Server did not reconnect")) }, 120_000)
++                      createEffect(() => {
++                        if (client.connection.status() !== "connected") return
++                        clearTimeout(timer); dispose(); resolve()
++                      })
++                    })
++                  })
++                }
++                if (!client.url) throw new Error("A managed local server is required")
++                const response = await fetch(new URL("/_personalize/lifetime", client.url), {
++                  method: value ? "PUT" : "GET",
++                  headers: { ...client.headers, "Content-Type": "application/json" },
++                  body: value ? JSON.stringify({ command: command.name, duration: value }) : undefined,
++                })
++                const body: unknown = await response.json()
++                if (!response.ok) throw new Error(body && typeof body === "object" ? String(Reflect.get(body, "error")) : "Lifetime command failed")
++                if (!body || typeof body !== "object") throw new Error("Invalid lifetime response")
++                const ms = Number(Reflect.get(body, command.key))
++                context.ui.toast.show({
++                  variant: "info",
++                  message: `/${command.name}: ${ms / 1000}s. ${command.description}`,
++                })
++              } catch (error) {
++                context.ui.toast.show({ variant: "error", message: error instanceof Error ? error.message : String(error) })
++              }
++            },
++          })),
++        }))
++        return null
++      },
++    })
++  },
++})
++
++export function decorate(stock: typeof import("../plugin/builtins")) {
++  return { builtins: [...stock.builtins, plugin] }
++}
+diff --git a/packages/tui/src/personalize/logo.ts b/packages/tui/src/personalize/logo.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6197a6376aafc2093e03df84d6fe4667ab099173
+--- /dev/null
++++ b/packages/tui/src/personalize/logo.ts
+@@ -0,0 +1,3 @@
++export function decorate(stock: typeof import("../logo")) {
++  return { logo: { ...stock.logo, left: [" █▀▀▀▀▀▀█ ", " ▀█    █▀ ", "  ▀█__█▀  ", "█▄▄█  █▄▄█"] } }
++}
+diff --git a/packages/util/src/personalize-boot.ts b/packages/util/src/personalize-boot.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d599cc7ea1f8c5c2f38c35f6c2e1e2a483bb9176
+--- /dev/null
++++ b/packages/util/src/personalize-boot.ts
+@@ -0,0 +1,26 @@
++import { Context, Effect, Option } from "effect"
++
++export interface BootState {
++  retry: Effect.Effect<void>
++  release: Effect.Effect<void>
++}
++export class PersonalizeBoot extends Context.Service<PersonalizeBoot, BootState>()("@personalize/Boot") {}
++
++export const updateBoot = (kind: "retry" | "release") => Effect.serviceOption(PersonalizeBoot).pipe(
++  Effect.flatMap((state) => Option.isSome(state) ? state.value[kind] : Effect.void),
++)
++
++export function sqliteBusy(input: unknown): boolean {
++  const seen = new Set<unknown>()
++  const visit = (value: unknown): boolean => {
++    if (value === null || value === undefined || seen.has(value)) return false
++    seen.add(value)
++    if (typeof value === "string") return /SQLITE_(?:BUSY|LOCKED)|database (?:is )?(?:locked|busy)/i.test(value)
++    if (typeof value !== "object") return false
++    const record = value as Record<string, unknown>
++    if ([record.message, record.code, record.errno].some((part) => typeof part === "string" && visit(part))) return true
++    return [record.cause, record.error, record.reason, record.reasons, record.left, record.right]
++      .some((part) => Array.isArray(part) ? part.some(visit) : visit(part))
++  }
++  return visit(input)
++}
+diff --git a/packages/util/src/personalize-lifetime-store.ts b/packages/util/src/personalize-lifetime-store.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..364aaed02572b3537188efaf6997c27c5fe078e7
+--- /dev/null
++++ b/packages/util/src/personalize-lifetime-store.ts
+@@ -0,0 +1,52 @@
++import fs from "node:fs"
++import path from "node:path"
++import { Global } from "./global"
++import { defaults, type Settings, type Stop } from "./personalize-lifetime"
++
++// Small settings/sleep files beside the existing service registration. These
++// are data only: no service, scheduler, autostart, polling, or process creation.
++const serviceFile = () => process.env.OPENCODE_SERVICE_FILE ?? path.join(Global.Path.state, "service.json")
++
++function read(file: string): unknown {
++  try { return JSON.parse(fs.readFileSync(file, "utf8")) } catch { return undefined }
++}
++
++function write(file: string, value: unknown) {
++  fs.mkdirSync(path.dirname(file), { recursive: true })
++  const temporary = `${file}.${process.pid}.tmp`
++  try {
++    fs.writeFileSync(temporary, JSON.stringify(value))
++    fs.renameSync(temporary, file)
++  } finally {
++    fs.rmSync(temporary, { force: true })
++  }
++}
++
++export function settings(): Settings {
++  const value = read(`${serviceFile()}.lifetime.json`)
++  if (!value || typeof value !== "object") return { ...defaults }
++  const result = { ...defaults }
++  for (const key of ["hardMs", "softMs"] as const) {
++    const ms = Reflect.get(value, key)
++    if (Number.isSafeInteger(ms) && ms > 0 && ms <= 2_147_483_647) result[key] = ms
++  }
++  return result
++}
++
++export function save(value: Settings) { write(`${serviceFile()}.lifetime.json`, value) }
++
++export function sleeping(kind: Stop) {
++  write(`${serviceFile()}.sleep.json`, { at: Date.now(), pid: process.pid, kind })
++}
++
++export function sleptAfter(time: number) {
++  const value = read(`${serviceFile()}.sleep.json`)
++  return !!value && typeof value === "object" && Number(Reflect.get(value, "at")) > time
++}
++
++export function evictSelf() {
++  const file = serviceFile()
++  const value = read(file)
++  if (value && typeof value === "object" && Reflect.get(value, "pid") === process.pid)
++    fs.rmSync(file, { force: true })
++}
+diff --git a/packages/util/src/personalize-lifetime.ts b/packages/util/src/personalize-lifetime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c028b081902a5a4b504535de0f64187f88a9215
+--- /dev/null
++++ b/packages/util/src/personalize-lifetime.ts
+@@ -0,0 +1,124 @@
++// Shared command syntax and pure lifetime policy. No processes, I/O, or timers.
++export const defaults = { hardMs: 20_000, softMs: 10_000 }
++export type Settings = typeof defaults
++export type Stop = "hard" | "soft"
++
++export function duration(input: string, fallback: number): number {
++  if (input.trim() === "default") return fallback
++  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m)$/i.exec(input.trim())
++  const ms = match ? Number(match[1]) * ({ ms: 1, s: 1000, m: 60_000 }[match[2].toLowerCase()] ?? 0) : NaN
++  if (!Number.isSafeInteger(ms) || ms < 1 || ms > 2_147_483_647)
++    throw new Error("Use a positive duration such as 1s, 500ms, 1m, or default. Zero does not disable shutdown.")
++  return ms
++}
++
++export class Lifetime {
++  clients = 0
++  jobs = 0
++  requests = 0
++  ready = false
++  stopped = false
++  softStopping = false
++  softBlocked = false
++  externalBusy = () => false
++  private disconnected = 0
++  private quiet = 0
++  changed = () => {}
++  settings: Settings
++  private now: () => number
++
++  constructor(settings: Settings = { ...defaults }, now = () => performance.now()) {
++    this.settings = settings
++    this.now = now
++  }
++
++  start() {
++    this.ready = true
++    this.disconnected = this.quiet = this.now()
++    this.changed()
++  }
++
++  configure(settings: Settings) {
++    this.settings = settings
++    this.softBlocked = false
++    // A custom value gets a full fresh countdown, not an already-expired one.
++    this.disconnected = this.quiet = this.now()
++    this.changed()
++  }
++
++  connect() {
++    this.clients++
++    this.changed()
++    return this.once(() => {
++      this.clients--
++      if (this.clients === 0) this.disconnected = this.now()
++      this.changed()
++    })
++  }
++
++  work(kind: "jobs" | "requests" = "jobs") {
++    this[kind]++
++    this.changed()
++    return this.once(() => {
++      this[kind]--
++      if (this.jobs === 0 && this.requests === 0) this.quiet = this.now()
++      this.changed()
++    })
++  }
++
++  next(): { kind: Stop; after: number } | undefined {
++    if (!this.ready || this.stopped) return
++    const hard = this.clients === 0 ? this.disconnected + this.settings.hardMs : Infinity
++    let busy = true
++    // A broken soft-state probe must never break or delay the hard timer.
++    try { busy = this.externalBusy() } catch {}
++    const soft = this.clients === 0 && !this.softStopping && !this.softBlocked && this.jobs === 0 && this.requests === 0 && !busy
++      ? Math.max(this.quiet + this.settings.softMs, this.disconnected + this.settings.hardMs / 2) : Infinity
++    if (!Number.isFinite(Math.min(hard, soft))) return
++    // Hard wins equal deadlines, and never waits for jobs or the soft timer.
++    return hard <= soft
++      ? { kind: "hard", after: Math.max(0, hard - this.now()) }
++      : { kind: "soft", after: Math.max(0, soft - this.now()) }
++  }
++
++  private once(fn: () => void) {
++    let done = false
++    return () => {
++      if (done) return
++      done = true
++      fn()
++    }
++  }
++}
++
++// Reconnect may wait here after an intentional sleep. Only user input wakes
++// it; SSE retries do not authorize spawning a replacement server.
++export class WakeGate {
++  private allowed: number
++  private pending = new Set<() => void>()
++  private sleptAfter: (time: number) => boolean
++  private now: () => number
++  constructor(sleptAfter: (time: number) => boolean, now = () => Date.now()) {
++    this.sleptAfter = sleptAfter
++    this.now = now
++    this.allowed = now()
++  }
++  wake() {
++    this.allowed = this.now()
++    for (const resolve of [...this.pending]) resolve()
++  }
++  wait(signal: AbortSignal): Promise<void> {
++    if (signal.aborted) return Promise.reject(signal.reason)
++    if (!this.sleptAfter(this.allowed)) return Promise.resolve()
++    return new Promise((resolve, reject) => {
++      const done = () => { cleanup(); resolve() }
++      const abort = () => { cleanup(); reject(signal.reason) }
++      const cleanup = () => {
++        this.pending.delete(done)
++        signal.removeEventListener("abort", abort)
++      }
++      this.pending.add(done)
++      signal.addEventListener("abort", abort, { once: true })
++    })
++  }
++}
+diff --git a/packages/util/src/personalize-observability.ts b/packages/util/src/personalize-observability.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aab581801cea150ba26cc34085f10325bd9506c7
+--- /dev/null
++++ b/packages/util/src/personalize-observability.ts
+@@ -0,0 +1,4 @@
++export function decorate(stock: typeof import("./observability")) {
++  const layer: typeof stock.layer = (options = {}) => stock.layer({ ...options, endpoint: undefined, headers: undefined })
++  return { layer }
++}
+diff --git a/packages/core/src/personalize/decay-policy.ts b/packages/core/src/personalize/decay-policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b82f866fe187a9f627bff31c2124385ec0fd9c6
+--- /dev/null
++++ b/packages/core/src/personalize/decay-policy.ts
+@@ -0,0 +1,23 @@
++import { AsyncLocalStorage } from "node:async_hooks"
++
++// Per-resolved-model policy, not a URL or provider-name heuristic. Keeping the
++// marker out of the model avoids passing a client option to provider SDKs.
++const bypass = new WeakSet<object>()
++const scope = new AsyncLocalStorage<boolean>()
++
++export const rememberDecayBypass = <T extends object>(model: T, enabled: boolean): T => {
++  if (enabled) bypass.add(model)
++  return model
++}
++
++export const withDecayPolicy = <T>(model: object, run: () => T): T => scope.run(bypass.has(model), run)
++export const bypassDecay = () => scope.getStore() === true
++
++/** Strip the client-only setting before constructing a provider model. */
++export function splitDecaySetting<T extends { readonly settings?: Readonly<Record<string, unknown>> }>(model: T) {
++  const settings = model.settings
++  if (!settings || !("ocodeContextDecay" in settings)) return { model, bypass: false }
++  const { ocodeContextDecay, ...rest } = settings
++  if (typeof ocodeContextDecay !== "boolean") throw new TypeError("ocodeContextDecay must be a boolean")
++  return { model: { ...model, settings: rest }, bypass: ocodeContextDecay === false }
++}
+diff --git a/packages/core/src/personalize/model-resolver.ts b/packages/core/src/personalize/model-resolver.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..08f7bb0a8ffbbbc4dbf52a57d0d7c307585244cf
+--- /dev/null
++++ b/packages/core/src/personalize/model-resolver.ts
+@@ -0,0 +1,33 @@
++import { Model } from "../model"
++import { Context, Effect, Layer } from "effect"
++import { rememberDecayBypass, splitDecaySetting } from "./decay-policy"
++
++export function decorate(stock: typeof import("../model-resolver")) {
++  // The stock node already depends on Model.node; mapLayer's generic R cannot
++  // express that existing requirement even though the node supplies it.
++  const node = stock.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => Layer.effect(stock.Service, Effect.gen(function* () {
++    const service = Context.get(context, stock.Service)
++    const models = yield* Model.Service
++    const resolveModel: typeof service.resolveModel = (selected, variant) => {
++      const split = splitDecaySetting(selected)
++      // Variant-level overrides are not supported: remove the client-only key
++      // there too, so it can never leak to the provider.
++      const variants = split.model.variants?.map((item) => splitDecaySetting(item).model)
++      const cleaned = variants ? { ...split.model, variants } : split.model
++      return service.resolveModel(cleaned, variant).pipe(Effect.map((resolved) => rememberDecayBypass(resolved, split.bypass)))
++    }
++    const resolve: typeof service.resolve = Effect.fn("PersonalizeModelResolver.resolve")(function* (requested) {
++      const selected = requested
++        ? yield* models.get(requested.providerID, requested.id)
++        : yield* models.default().pipe(Effect.flatMap((model) =>
++            model && stock.hasPackage(model)
++              ? Effect.succeed(model)
++              : Effect.map(models.available(), (all) => all.find((model) => stock.hasPackage(model) && Model.supportsText(model))),
++          ))
++      if (!selected) return undefined
++      return yield* resolveModel(selected, requested?.variant)
++    })
++    return stock.Service.of({ ...service, resolve, resolveModel })
++  })))) as typeof layer)
++  return { node }
++}
+diff --git a/packages/core/test/personalize-decay-policy.test.ts b/packages/core/test/personalize-decay-policy.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7789dcd00099b000f01e0e132d2b99cdb6317130
+--- /dev/null
++++ b/packages/core/test/personalize-decay-policy.test.ts
+@@ -0,0 +1,49 @@
++import { expect, test } from "bun:test"
++import { Context, Effect, Layer } from "effect"
++import { Model } from "../src/model"
++import { decorate } from "../src/personalize/model-resolver"
++import { bypassDecay, rememberDecayBypass, splitDecaySetting, withDecayPolicy } from "../src/personalize/decay-policy"
++
++test("the decay opt-in is strict, model-scoped and removed from provider settings", () => {
++  const selected = { settings: { baseURL: "http://localhost", ocodeContextDecay: false } }
++  const split = splitDecaySetting(selected)
++  expect(split.bypass).toBe(true)
++  expect(split.model.settings.baseURL).toBe("http://localhost")
++  expect("ocodeContextDecay" in split.model.settings).toBe(false)
++  expect(selected.settings.ocodeContextDecay).toBe(false)
++  expect(splitDecaySetting({ settings: { baseURL: "x" } }).bypass).toBe(false)
++  expect(splitDecaySetting({ settings: { ocodeContextDecay: true } }).bypass).toBe(false)
++  expect(() => splitDecaySetting({ settings: { ocodeContextDecay: "false" } })).toThrow()
++  const enabled = rememberDecayBypass({}, true)
++  const normal = {}
++  expect(withDecayPolicy(enabled, bypassDecay)).toBe(true)
++  expect(withDecayPolicy(normal, bypassDecay)).toBe(false)
++  expect(bypassDecay()).toBe(false)
++})
++
++test("the resolver strips the opt-in on direct and ordinary resolution", async () => {
++  const selected = {
++    id: "sol", providerID: "proxy", settings: { baseURL: "http://localhost", ocodeContextDecay: false },
++    variants: [{ id: "v", settings: { ocodeContextDecay: false, temperature: 1 } }],
++  }
++  const catalog = { get: () => Effect.succeed(selected), default: () => Effect.succeed(selected), available: () => Effect.succeed([selected]) }
++  const tag = Context.Service("personalize-test-resolver")
++  const service = { resolve: () => Effect.die("unexpected stock resolve"), resolveModel: (model: unknown) => Effect.succeed({ model }), untouched: 42 }
++  const stock: any = { Service: tag, hasPackage: () => true, node: { mapLayer: (f: any) => ({ layer: f(Layer.succeed(tag, service)) }) } }
++  const node: any = decorate(stock).node
++  const program = Effect.gen(function* () {
++    const resolver: any = yield* tag
++    expect(resolver.untouched).toBe(42)
++    const direct = yield* resolver.resolveModel(selected)
++    expect(direct.model.settings).toEqual({ baseURL: "http://localhost" })
++    expect(direct.model.variants[0].settings).toEqual({ temperature: 1 })
++    expect(withDecayPolicy(direct, bypassDecay)).toBe(true)
++    const explicit = yield* resolver.resolve({ providerID: "proxy", id: "sol" })
++    expect(withDecayPolicy(explicit, bypassDecay)).toBe(true)
++    const fallback = yield* resolver.resolve()
++    expect(withDecayPolicy(fallback, bypassDecay)).toBe(true)
++    const normal = yield* resolver.resolveModel({ ...selected, settings: { baseURL: "x" } })
++    expect(withDecayPolicy(normal, bypassDecay)).toBe(false)
++  }).pipe(Effect.provide(node.layer), Effect.provide(Layer.succeed(Model.Service, catalog as any)))
++  await Effect.runPromise(program as Effect.Effect<void, never, never>)
++})
+diff --git a/.personalize/repair-photon-patch.cjs b/.personalize/repair-photon-patch.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..dda10857d45708eee4773946ee25f828a47ef2bb
+--- /dev/null
++++ b/.personalize/repair-photon-patch.cjs
+@@ -0,0 +1,67 @@
++// The fallback upstream ref has three malformed context lines in the photon
++// 0.3.4 dependency patch. Linux Bun rejects them; Windows Bun may accept them.
++// Repair only this exact known hunk, leaving all other upstream patches alone.
++const fs = require('node:fs');
++const path = require('node:path');
++const { spawnSync } = require('node:child_process');
++
++const relative = 'patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch';
++const bad = "\n      ;\n  };\n  \n-const path = require('path').join(__dirname, 'photon_rs_bg.wasm');";
++const good = "\n     ;\n };\n \n-const path = require('path').join(__dirname, 'photon_rs_bg.wasm');";
++
++function repairText(text) {
++  const eol = text.includes('\r\n') ? '\r\n' : '\n';
++  const before = bad.replaceAll('\n', eol);
++  const after = good.replaceAll('\n', eol);
++  const parts = text.split(before);
++  if (parts.length > 2) throw new Error('Ambiguous photon patch: duplicate known hunk');
++  if (parts.length === 2) return { text: parts.join(after), repaired: true };
++  return { text, repaired: false };
++}
++
++function repairFile(root) {
++  const file = path.join(root, relative);
++  if (!fs.existsSync(file)) return 'absent';
++  const original = fs.readFileSync(file, 'utf8');
++  const result = repairText(original);
++  if (result.repaired) fs.writeFileSync(file, result.text);
++  return result.repaired ? 'repaired' : 'unchanged';
++}
++
++// Keep the upstream file unchanged in the checked-out tree. Bun needs the
++// corrected bytes only while install runs; never overwrite a concurrent edit.
++function runWithRepair(root, command, args) {
++  const file = path.join(root, relative);
++  const original = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
++  const result = original === undefined ? undefined : repairText(original);
++  if (result?.repaired) fs.writeFileSync(file, result.text);
++  let child;
++  try {
++    child = spawnSync(command, args, { cwd: root, stdio: 'inherit', env: process.env });
++    if (child.error) throw child.error;
++  } finally {
++    if (result?.repaired) {
++      if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== result.text)
++        throw new Error('Photon patch changed during install; refusing to overwrite it');
++      fs.writeFileSync(file, original);
++    }
++  }
++  return child.status === null ? 1 : child.status;
++}
++
++if (require.main === module) {
++  try {
++    if (process.argv[2] === '--run') {
++      const [, , , root, command, ...args] = process.argv;
++      if (!root || !command) throw new Error('Usage: --run <root> <command> [args...]');
++      process.exitCode = runWithRepair(root, command, args);
++    } else {
++      console.log(`Photon dependency patch: ${repairFile(process.argv[2] || '.')}`);
++    }
++  } catch (error) {
++    console.error(error.message);
++    process.exitCode = 1;
++  }
++}
++
++module.exports = { repairText, repairFile, runWithRepair, relative };
