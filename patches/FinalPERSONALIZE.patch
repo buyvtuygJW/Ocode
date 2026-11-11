@@ -13,10 +13,10 @@ index 0000000000000000000000000000000000000000..bc05d0d68a8c3f46c027cfb7b190a25b
 +export const PersonalizeBuild: { plugins: typeof personalizationPlugins }
 diff --git a/.personalize/build.mjs b/.personalize/build.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a82f635eff1e8108137a47cb378116dd4456350a
+index 000000000..5429a07b8
 --- /dev/null
 +++ b/.personalize/build.mjs
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,138 @@
 +import { existsSync, readFileSync } from "node:fs"
 +import path from "node:path"
 +import { fileURLToPath } from "node:url"
@@ -91,7 +91,18 @@ index 0000000000000000000000000000000000000000..a82f635eff1e8108137a47cb378116dd
 +  return {
 +    ...plugin,
 +    setup(build) {
-+      const facade = Object.create(build)
++      // Native methods and accessors must receive the actual builder. A separate
++      // target permits registration overrides even when the builder is frozen.
++      const bound = new Map()
++      const facade = new Proxy(Object.create(build), {
++        get(target, key, receiver) {
++          if (Object.hasOwn(target, key)) return Reflect.get(target, key, receiver)
++          const value = Reflect.get(build, key, build)
++          if (typeof value !== "function") return value
++          if (!bound.has(value)) bound.set(value, value.bind(build))
++          return bound.get(value)
++        },
++      })
 +      for (const method of ["onLoad", "onResolve"]) Object.defineProperty(facade, method, {
 +        value(options, callback) {
 +          build[method]({ namespace: "file", ...options }, callback)
@@ -146,10 +157,10 @@ index 0000000000000000000000000000000000000000..a82f635eff1e8108137a47cb378116dd
 +export const PersonalizeBuild = { plugins: personalizationPlugins }
 diff --git a/.personalize/build.test.mjs b/.personalize/build.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f889883cdc027a5ab1e74e3fd3a5cb1e1fd5f299
+index 000000000..27223de12
 --- /dev/null
 +++ b/.personalize/build.test.mjs
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,136 @@
 +import { afterEach, test } from "node:test"
 +import assert from "node:assert/strict"
 +import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -252,6 +263,39 @@ index 0000000000000000000000000000000000000000..f889883cdc027a5ab1e74e3fd3a5cb1e
 +  const root = fixture()
 +  const plugins = personalizationPlugins([{ name: "stock", setup() {} }], { root })
 +  assert.deepEqual(plugins.map((p) => p.name), ["personalize-owned-module-boundaries", "stock", "personalize-stock-modules-unchanged"])
++})
++
++test("forwarded builder methods and getters retain their native receiver", async () => {
++  const calls = [], config = { target: "bun" }
++  class Builder {
++    #config = config
++    constructor() {
++      for (const name of ["resolve", "onEnd", "onLoad", "onResolve"]) Object.defineProperty(this, name, { value: this[name] })
++    }
++    get config() { return this.#config }
++    resolve(name) { assert.equal(this, build); return `resolved:${name}` }
++    onEnd(callback) { assert.equal(this, build); calls.push(callback) }
++    onLoad(options, callback) { assert.equal(this, build); calls.push({ options, callback }) }
++    onResolve(options, callback) { assert.equal(this, build); calls.push({ options, callback }) }
++  }
++  const build = Object.freeze(new Builder())
++  const plugin = {
++    name: "receiver-sensitive",
++    async setup(forwarded) {
++      assert.equal(this, plugin)
++      assert.equal(forwarded.config, config)
++      const resolve = forwarded.resolve
++      assert.equal(resolve, forwarded.resolve)
++      assert.equal(resolve("solid-js"), "resolved:solid-js")
++      forwarded.onEnd(() => {})
++      forwarded.onLoad({ filter: /\.tsx$/ }, () => ({ contents: "stock", loader: "js" }))
++      forwarded.onResolve({ filter: /^native:/, namespace: "native" }, () => undefined)
++      return "setup-result"
++    },
++  }
++  assert.equal(await forwardPlugin(plugin).setup(build), "setup-result")
++  assert.equal(calls.length, 4)
++  assert.deepEqual(calls.slice(1).map((call) => call.options.namespace), ["file", "personalize-original", "native"])
 +})
 diff --git a/.personalize/channel.d.mts b/.personalize/channel.d.mts
 new file mode 100644
@@ -847,7 +891,7 @@ index 0000000000000000000000000000000000000000..766c375f66f62fee3807a582f2ec9b55
 +}
 diff --git a/.personalize/output.test.mjs b/.personalize/output.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b7be6d8f94d76b49a0d7c843b3823c66df64256
+index 000000000..01814563c
 --- /dev/null
 +++ b/.personalize/output.test.mjs
 @@ -0,0 +1,162 @@
@@ -917,10 +961,10 @@ index 0000000000000000000000000000000000000000..1b7be6d8f94d76b49a0d7c843b3823c6
 +  assert.equal(capRequest(request("max"), resolved).maxTokens, 100000)
 +})
 +
-+test("a request without an output limit stays without one (ChatGPT/Codex rejects any)", () => {
++test("a missing upstream output limit is restored and serialized", () => {
 +  const capped = capRequest(request("xhigh", { maxTokens: undefined }), resolved)
-+  assert.equal(Object.hasOwn(capped, "maxTokens") && capped.maxTokens !== undefined, false)
-+  assert.equal(responseBody(capped).max_output_tokens, undefined)
++  assert.equal(capped.maxTokens, 50000)
++  assert.equal(responseBody(capped).max_output_tokens, 50000)
 +})
 +
 +test("native HTTP overlays cannot increase the cap or mutate user settings", () => {
@@ -1645,10 +1689,10 @@ index 0000000000000000000000000000000000000000..e3ccab058d6dc9f79f6dbe0902bb7e7b
 +}
 diff --git a/packages/core/src/personalize/output-request.ts b/packages/core/src/personalize/output-request.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..86b93bbdd95ad0c6c99982d74320f6d728ac14e1
+index 000000000..2e3a9d7f5
 --- /dev/null
 +++ b/packages/core/src/personalize/output-request.ts
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,40 @@
 +import type { LLMRequest } from "@opencode/ai/effect"
 +import type { Resolved } from "../model-resolver"
 +import { capBody, outputCap, outputEffort } from "./output-policy"
@@ -1684,9 +1728,8 @@ index 0000000000000000000000000000000000000000..86b93bbdd95ad0c6c99982d74320f6d7
 +  const maxTokens = outputCap(effort, requested, model.limit.output, room)
 +  return {
 +    ...request,
-+    // Only lower a limit the request already carries. Stock deliberately omits
-+    // it for some routes (the ChatGPT/Codex backend rejects any output limit).
-+    ...(requested === undefined ? {} : { maxTokens }),
++    // An omitted upstream limit must not bypass the approved response ceiling.
++    maxTokens,
 +    ...(body ? { http: { ...request.http, body: capBody(body, maxTokens) } } : {}),
 +  }
 +}

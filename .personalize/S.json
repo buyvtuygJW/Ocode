@@ -1,5 +1,0 @@
-{
-  "modules": [
-    { "target": "packages/core/src/plugin/agent.ts", "factory": "packages/core/src/personalize/science.ts", "exports": ["Plugin"] }
-  ]
-}

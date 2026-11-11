@@ -101,6 +101,11 @@ jobs:
 
           echo "Patch validation OK."
 
+      - name: Set up Node for offline personalization checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Personalize isolation checks (hook budget, owned modules, shims)
         # Hard gate: the patch set must keep the isolation contract (max 4 upstream
         # hook hunks, only packages/cli/script/build.ts; everything else owned files)
@@ -114,6 +119,7 @@ jobs:
           node --test .github/scripts/personalize-hooks.test.cjs
           node --test .github/scripts/personalize-workflow.test.cjs
           node --experimental-vm-modules --test .github/scripts/personalize-runtime.test.cjs
+          node --test .github/scripts/personalize-theme.test.cjs
           node --test .github/scripts/repair-photon-patch.test.cjs
 
           echo "Checking patch-set isolation contract..."
@@ -942,6 +948,7 @@ jobs:
           cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
           cp ../.github/scripts/personalize-workflow.test.cjs .github/scripts/personalize-workflow.test.cjs
           cp ../.github/scripts/personalize-runtime.test.cjs .github/scripts/personalize-runtime.test.cjs
+          cp ../.github/scripts/personalize-theme.test.cjs .github/scripts/personalize-theme.test.cjs
           cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
           cp ../.github/scripts/repair-photon-patch.test.cjs .github/scripts/repair-photon-patch.test.cjs
 

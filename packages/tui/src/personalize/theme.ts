@@ -39,16 +39,17 @@ export function decorate(stock: typeof import("../context/theme")) {
     const theme = stock.useTheme()
     const source = stock.useThemes()
     const facade = useThemes()
-    // Retain the upstream ambient surface. Only aliases of the base background
-    // become transparent; explicit selection/diff/dialog backgrounds stay intact.
-    const cache = new WeakMap<object, object>()
-    const view = <T extends object>(value: T): T => {
+    // Color references can be shared by backgrounds, selection text and hues.
+    // Only background tokens may become transparent; never erase a foreground.
+    const caches = [new WeakMap<object, object>(), new WeakMap<object, object>()]
+    const view = <T extends object>(value: T, background = false): T => {
+      const cache = caches[background ? 1 : 0]!
       const existing = cache.get(value)
       if (existing) return existing as T
       const wrapped = new Proxy(value, { get(target, key, receiver) {
         const item = Reflect.get(target, key, receiver)
-        if (item instanceof RGBA) return facade.transparent() && item === source.currentTokens().background.base ? NONE : item
-        return item && typeof item === "object" ? view(item) : item
+        if (item instanceof RGBA) return background && facade.transparent() && item === source.currentTokens().background.base ? NONE : item
+        return item && typeof item === "object" ? view(item, background || key === "background") : item
       } })
       cache.set(value, wrapped)
       return wrapped

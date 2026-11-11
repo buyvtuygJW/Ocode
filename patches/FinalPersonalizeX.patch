@@ -95,10 +95,10 @@ index 0000000000000000000000000000000000000000..c8be4e343725a9e9b3f6cba385537606
 +}
 diff --git a/packages/tui/src/personalize/theme.ts b/packages/tui/src/personalize/theme.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..342ee297f7097f40992fdd4db8f1f5691d2e66da
+index 0000000000000000000000000000000000000000..a495820f7e553d4e815f0e65b70fd59c98394cd6
 --- /dev/null
 +++ b/packages/tui/src/personalize/theme.ts
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,60 @@
 +import { RGBA } from "@opentui/core"
 +import { useRenderer } from "@opentui/solid"
 +import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
@@ -140,16 +140,17 @@ index 0000000000000000000000000000000000000000..342ee297f7097f40992fdd4db8f1f569
 +    const theme = stock.useTheme()
 +    const source = stock.useThemes()
 +    const facade = useThemes()
-+    // Retain the upstream ambient surface. Only aliases of the base background
-+    // become transparent; explicit selection/diff/dialog backgrounds stay intact.
-+    const cache = new WeakMap<object, object>()
-+    const view = <T extends object>(value: T): T => {
++    // Color references can be shared by backgrounds, selection text and hues.
++    // Only background tokens may become transparent; never erase a foreground.
++    const caches = [new WeakMap<object, object>(), new WeakMap<object, object>()]
++    const view = <T extends object>(value: T, background = false): T => {
++      const cache = caches[background ? 1 : 0]!
 +      const existing = cache.get(value)
 +      if (existing) return existing as T
 +      const wrapped = new Proxy(value, { get(target, key, receiver) {
 +        const item = Reflect.get(target, key, receiver)
-+        if (item instanceof RGBA) return facade.transparent() && item === source.currentTokens().background.base ? NONE : item
-+        return item && typeof item === "object" ? view(item) : item
++        if (item instanceof RGBA) return background && facade.transparent() && item === source.currentTokens().background.base ? NONE : item
++        return item && typeof item === "object" ? view(item, background || key === "background") : item
 +      } })
 +      cache.set(value, wrapped)
 +      return wrapped

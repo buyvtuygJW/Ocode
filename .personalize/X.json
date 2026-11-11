@@ -1,8 +1,0 @@
-{
-  "modules": [
-    { "target": "packages/tui/src/config/keybind.ts", "factory": "packages/tui/src/personalize/keybind.ts", "exports": ["Definitions", "Descriptions", "KeybindOverrides", "parse", "unknownKeys"] },
-    { "target": "packages/tui/src/context/theme.tsx", "factory": "packages/tui/src/personalize/theme.ts", "exports": ["useThemes", "useTheme"] },
-    { "target": "packages/tui/src/context/keymap.tsx", "factory": "packages/tui/src/personalize/keymap.ts", "exports": ["Keymap"] },
-    { "target": "packages/tui/src/ui/dialog-select.tsx", "factory": "packages/tui/src/personalize/dialog-select.ts", "exports": ["DialogSelect"] }
-  ]
-}

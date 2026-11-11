@@ -33,9 +33,8 @@ export function capRequest(request: LLMRequest, model: Resolved, inputTokens?: n
   const maxTokens = outputCap(effort, requested, model.limit.output, room)
   return {
     ...request,
-    // Only lower a limit the request already carries. Stock deliberately omits
-    // it for some routes (the ChatGPT/Codex backend rejects any output limit).
-    ...(requested === undefined ? {} : { maxTokens }),
+    // An omitted upstream limit must not bypass the approved response ceiling.
+    maxTokens,
     ...(body ? { http: { ...request.http, body: capBody(body, maxTokens) } } : {}),
   }
 }

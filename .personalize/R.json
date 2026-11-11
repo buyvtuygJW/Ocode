@@ -1,5 +1,0 @@
-{
-  "modules": [
-    { "target": "packages/core/src/plugin/internal.ts", "factory": "packages/core/src/personalize/tools.ts", "exports": ["list", "requirements"] }
-  ]
-}

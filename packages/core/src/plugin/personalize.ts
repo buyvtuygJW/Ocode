@@ -5,8 +5,8 @@ export * as PersonalizePlugin from "./personalize.js"
 // Everything for /distill, /schedule, /council lives HERE: tools, commands,
 // config resolution. Ported onto the 2.0.29 plugin architecture: tools are
 // registered via ctx.tool.transform, commands via ctx.command.transform, and
-// one-shot member generations run through child sessions pinned to a model
-// (Session.Service.generate) so every provider path stays canonical.
+// owned one-shot generation uses the shared model resolver/client; session-aware
+// chair/distill requests retain prepared context without stock generation retries.
 // ============================================================================
 
 import { define } from "@opencode/plugin/effect/plugin"
@@ -17,13 +17,19 @@ import type { Session as SessionSchema } from "@opencode/schema/session"
 import type { SessionMessage } from "@opencode/schema/session-message"
 import { Global } from "@opencode/util/global"
 import { FSUtil } from "@opencode/util/fs-util"
-import { Effect } from "effect"
+import { Cron, DateTime, Effect } from "effect"
 import path from "path"
 import { randomUUID } from "node:crypto"
 import { LanguageModel, LLMClient, Message, type RequestOptions } from "@opencode/ai/effect"
 import { HttpClientRequest } from "effect/http"
 import { Model } from "../model.js"
 import { Session } from "../session.js"
+import { Schedule } from "../schedule.js"
+import { SessionContext } from "../session/context.js"
+import { Instance } from "../instance/service.js"
+import { Database } from "../database/database.js"
+import { SessionHistory } from "../session/history.js"
+import { SessionModelRequest } from "../session/model-request.js"
 import { Service as ModelResolverService } from "../model-resolver.js"
 import { capRequest } from "../personalize/output-request"
 
@@ -45,8 +51,23 @@ const parseModelRef = (raw: string): ModelSchema.Ref | undefined => {
 
 const refToString = (ref: ModelSchema.Ref) => `${ref.providerID}/${ref.id}`
 
-const readJsonSafe = (fs: FSUtil.Interface, file: string) =>
-  fs.readJson(file).pipe(Effect.orElseSucceed(() => undefined))
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+
+const readJsonSafe = (fs: FSUtil.Interface, file: string) => Effect.gen(function* () {
+  const raw = yield* fs.readFileString(file).pipe(
+    Effect.catchIf((cause) => record(cause) &&
+      (cause.code === "ENOENT" || (record(cause.reason) && cause.reason._tag === "NotFound")),
+    () => Effect.succeed(undefined)),
+    Effect.mapError((cause) => new Tool.Error({ message: `Cannot read ${file}; file preserved: ${cause}` })),
+  )
+  if (raw === undefined || raw.trim() === "") return undefined
+  const parsed: unknown = yield* Effect.try({
+    try: () => JSON.parse(raw),
+    catch: () => new Tool.Error({ message: `Invalid JSON in ${file}; file preserved. Repair it, or explicitly empty it/reset it to {}.` }),
+  })
+  return record(parsed) && Object.keys(parsed).length === 0 ? undefined : parsed
+})
 
 const writeJsonSafe = (fs: FSUtil.Interface, file: string, value: unknown) =>
   fs.ensureDir(path.dirname(file)).pipe(
@@ -156,22 +177,21 @@ const slugify = (value: string) =>
     .slice(0, 48) || "learned-skill"
 
 // ----------------------------------------------------------------------------
-// SCHEDULE — deterministic qm-style scheduler. Crons and plain JSON in the
-// global config dir; schedules whose due time has come are surfaced on list.
-// NO LLM involvement. Self-contained: parse, next-run, add/remove/list/export.
+// SCHEDULE — adapter to the shared, database-backed execution engine.
+// Old JSON records remain exportable; never silently activate legacy jobs.
 // ----------------------------------------------------------------------------
 
 const DESC_SCHEDULE =
-  "Manage deterministic qm-style background schedules (crons and watches run work while nobody's " +
-  "watching) — ported as native code. NO LLM, NO server, NO Postgres: it's a schedule_task tool + " +
-  "plain JSON in global opencode config dir; built-in /schedule command executes whatever is due. " +
-  "Actions: add (name + cadence), list (with due markers), remove, export.\n"
+  "Manage executable schedules for the current session using the shared schedule engine. " +
+  "Requires experimental.schedules=true and a running server; due prompts may invoke the model/tools. " +
+  "Actions: add (name + cadence + prompt), list, remove (name or id), export. " +
+  "Legacy scheduled_tasks.json records are export-only until explicitly recreated.\n"
 
 const PROMPT_SCHEDULE =
   "Manage schedules via the `schedule_task` tool.\n\n$ARGUMENTS\n\n" +
   "Map the request onto one action: add (needs name + cadence + prompt), list, remove (name), or " +
   "export. Cadence accepts 5-field cron (m h dom mon dow) or shorthand: @hourly, @daily, @weekly, " +
-  "every <N> minutes/hours. Relay the tool output as-is, including DUE NOW markers.\n"
+  "every <N> minutes/hours. Relay actual engine status/errors; never claim execution merely from a stored record.\n"
 
 type ScheduleEntry = {
   name: string
@@ -217,11 +237,13 @@ const normalizeCadence = (cadence: string): string | undefined => {
   const every = value.match(/^every\s+(\d+)\s+(minute|minutes|hour|hours)$/)
   if (every) {
     const n = Number(every[1])
-    if (!Number.isFinite(n) || n <= 0) return undefined
-    return every[2]!.startsWith("minute") ? `*/${n} * * * *` : `0 */${n} * * *`
+    const unit = every[2]!.startsWith("minute") ? "minutes" : "hours"
+    if (n <= 0 || !Number.isSafeInteger(n * (unit === "hours" ? 3_600_000 : 60_000))) return undefined
+    return `every ${n} ${unit}`
   }
   const fields = value.split(/\s+/)
-  return fields.length === 5 ? fields.join(" ") : undefined
+  if (fields.length !== 5) return undefined
+  try { Cron.parseUnsafe(fields.join(" ")); return fields.join(" ") } catch { return undefined }
 }
 
 const cronMatches = (cron: string, date: Date): boolean => {
@@ -236,13 +258,12 @@ const cronMatches = (cron: string, date: Date): boolean => {
 }
 
 const nextRun = (cron: string, from: Date): Date | undefined => {
-  const probe = new Date(from.getTime())
-  probe.setSeconds(0, 0)
-  for (let i = 0; i < 366 * 24 * 60; i += 1) {
-    probe.setMinutes(probe.getMinutes() + 1)
-    if (cronMatches(cron, probe)) return new Date(probe.getTime())
+  const interval = cron.match(/^every (\d+) (minutes|hours)$/)
+  if (interval) {
+    const next = new Date(from.getTime() + Number(interval[1]) * (interval[2] === "hours" ? 3_600_000 : 60_000))
+    return Number.isFinite(next.getTime()) ? next : undefined
   }
-  return undefined
+  try { return Cron.next(Cron.parseUnsafe(cron), from) } catch { return undefined }
 }
 
 const isDue = (entry: ScheduleEntry, now: Date): boolean => {
@@ -260,7 +281,7 @@ const DESC_COUNCIL =
   "task tool's single-model limit) and combine their answers by strategy. See the `strategy` " +
   "parameter for the seven modes and their aliases.\n\nMembers come from council.json — a " +
   'per-project ".opencode/council.json" overrides the global config dir. Resolution: the inline ' +
-  "`members` argument, else the per-project file (a blank template is auto-created; entries with " +
+  "`members` argument, else the per-project file (entries with " +
   'an empty "model" are skipped), else the global file.\n\nIf nothing is configured, the tool ' +
   "seeds the global council.json with your current model and prints its path. A council needs at " +
   "least two models; with one, use the normal task/subagent flow.\n"
@@ -300,7 +321,41 @@ type CouncilInput = {
   rounds?: number
 }
 
-type MemberAnswer = { readonly member: MemberRef; readonly answer: string }
+type MemberAnswer = { readonly member: MemberRef; readonly answer: string; readonly failed?: boolean }
+
+type Checked<T> = { ok: true; value: T } | { ok: false; error: string }
+const checkJson = <T>(raw: string, validate: (value: unknown) => T): Checked<T> => {
+  try { return { ok: true, value: validate(JSON.parse(raw)) } }
+  catch (cause) { return { ok: false, error: cause instanceof SyntaxError ? "Invalid JSON; return one JSON object without markdown." : String(cause) } }
+}
+const exactKeys = (value: unknown, keys: readonly string[]): value is Record<string, unknown> =>
+  record(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+
+const validateBallot = (raw: string, count: number) => checkJson(raw, (value) => {
+  if (!exactKeys(value, ["scores"]) || !Array.isArray(value.scores) || value.scores.length !== count)
+    throw new Error(`Expected {"scores":[{"member":1,"score":1},...]} with exactly ${count} entries.`)
+  const scores = new Map<number, number>()
+  for (const entry of value.scores) {
+    if (!exactKeys(entry, ["member", "score"]) || !Number.isInteger(entry.member) ||
+      typeof entry.member !== "number" || entry.member < 1 || entry.member > count || scores.has(entry.member) ||
+      typeof entry.score !== "number" || !Number.isFinite(entry.score) || entry.score < 1 || entry.score > 10)
+      throw new Error("Each numbered member must occur exactly once; scores must be finite numbers from 1 through 10.")
+    scores.set(entry.member, entry.score)
+  }
+  return scores
+})
+
+const validateRoute = (raw: string, count: number) => checkJson(raw, (value) => {
+  if (!exactKeys(value, ["member"]) || typeof value.member !== "number" || !Number.isInteger(value.member) || value.member < 1 || value.member > count)
+    throw new Error(`Expected {"member":N}, where N is an integer from 1 through ${count}.`)
+  return value.member - 1
+})
+
+const validateAnswer = (raw: string) => checkJson(raw, (value) => {
+  if (!exactKeys(value, ["answer"]) || typeof value.answer !== "string" || !value.answer.trim())
+    throw new Error('Expected {"answer":"non-empty answer text"}.')
+  return value.answer
+})
 
 // ----------------------------------------------------------------------------
 // Plugin
@@ -396,28 +451,46 @@ export const Plugin = define({
     const models = yield* Model.Service
     const memberModels = yield* ModelResolverService
     const memberClient = yield* LLMClient.Service
+    const instances = yield* Instance.Service
+    const database = yield* Database.Service
+    const schedules = yield* Schedule.Service
     const projectDirectory = ctx.location.directory
 
     const globalCouncilPath = path.join(global.config, "council.json")
     const schedulePath = path.join(global.config, "scheduled_tasks.json")
 
-    // -- shared: one-shot generation against a specific model -----------------
-    const askModel = Effect.fn(function* (input: {
-      parentID: SessionSchema.ID
-      title: string
-      model: ModelSchema.Ref
-      prompt: string
-    }) {
-      const child = yield* sessions.create({
-        parentID: input.parentID,
-        title: input.title,
-        model: input.model,
-      })
-      return yield* sessions.generate({ sessionID: child.id, prompt: input.prompt })
+    const complete = Effect.fn(function* (request: Parameters<typeof memberClient.generate>[0], options?: Parameters<typeof memberClient.generate>[1]) {
+      const generate = () => memberClient.generate(request, options)
+      const first = yield* generate()
+      // One retry for length only, with the identical request/cap and no partial.
+      const result = first.finishReason.normalized === "length" ? yield* generate() : first
+      if (result.finishReason.normalized !== "stop" || !result.text.trim())
+        return yield* new Tool.Error({ message: `Owned generation did not produce a complete answer (${result.finishReason.normalized}); partial output discarded.` })
+      return result.text
     })
 
-    // Owned one-shot member path. Do not change askModel, the chair, or stock
-    // generation: their context/lifecycle policies are deliberately different.
+    const askSession = Effect.fn(function* (sessionID: SessionSchema.ID, prompt: string) {
+      const session = yield* sessions.get(sessionID)
+      return yield* Effect.gen(function* () {
+        const context = yield* SessionContext.Service
+        const selection = yield* context.select(sessionID)
+        const model = yield* context.resolveModel(selection.session)
+        const history = yield* SessionHistory.preview(database.db, selection.session.id, selection.instructions, model.ref)
+        const transcript = SessionModelRequest.baseTranscript({
+          agent: selection.agent.info, model, tools: selection.tools, initial: history.initial, messages: history.messages,
+        })
+        const prepared = yield* context.request.generate({
+          session: selection.session, agent: selection.agent.id, model, tools: selection.tools,
+          system: transcript.system,
+          messages: [...transcript.messages, ...(history.instructionUpdate ? [Message.system(history.instructionUpdate)] : []), Message.user(prompt)],
+        })
+        // Preserve the chair's canonical session identity and prepared transports.
+        // Stateless member scrubbing belongs only to askCouncilMember below.
+        return yield* complete(capRequest(prepared.request, model), prepared.options)
+      }).pipe(instances.provide(session))
+    })
+
+    // Stateless member prompts; chair/distill use askSession's prepared context.
     const askCouncilMember = Effect.fn(function* (input: {
       parentID: SessionSchema.ID
       model: ModelSchema.Ref
@@ -441,18 +514,9 @@ export const Plugin = define({
           traceID: trace.id, proxyOrigin: trace.origin, parentID: input.parentID, sessionID: child.id,
         })
       }
-      const generate = () => memberClient.generate(request, {
+      return yield* complete(request, {
         http: (wire, next) => Effect.suspend(() => next(councilMemberWire(wire, trace))),
       })
-      const first = yield* generate()
-      if (first.finishReason.normalized !== "length") return first.text
-      // Same original request and cap; no partial answer, continuation, larger
-      // budget, or general-error retry. This is the one authorized length retry.
-      const second = yield* generate()
-      if (second.finishReason.normalized === "length") {
-        return yield* new Tool.Error({ message: "Council member output was length-limited twice; partial answers discarded." })
-      }
-      return second.text
     })
 
     const loadMembers = Effect.fn(function* (inline: readonly string[] | undefined) {
@@ -468,25 +532,38 @@ export const Plugin = define({
       const projectPath = path.join(projectDirectory, ".opencode", "council.json")
       for (const file of [projectPath, globalCouncilPath]) {
         const parsed = yield* readJsonSafe(fs, file)
-        if (parsed === undefined || typeof parsed !== "object" || parsed === null) continue
-        const entries = (parsed as { members?: { name?: string; model?: string }[] }).members ?? []
+        if (parsed === undefined) continue
+        if (!record(parsed) || !Array.isArray(parsed.members))
+          return yield* new Tool.Error({ message: `Invalid council structure in ${file}; expected a members array. File preserved.` })
+        const entries = parsed.members as unknown[]
         const members: MemberRef[] = []
         for (const entry of entries) {
-          if (!entry.model) continue // blank template entries are skipped
+          if (!record(entry) || typeof entry.model !== "string" || (entry.name !== undefined && typeof entry.name !== "string"))
+            return yield* new Tool.Error({ message: `Invalid council member in ${file}; model and optional name must be strings. File preserved.` })
+          if (!entry.model.trim()) continue // blank template entries are skipped
           const ref = parseModelRef(entry.model)
-          if (ref === undefined) continue
-          members.push({ name: entry.name || `member${members.length + 1}`, model: ref })
+          if (ref === undefined) return yield* new Tool.Error({ message: `Invalid member model in ${file}: ${entry.model}. File preserved.` })
+          const name = typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : `member${members.length + 1}`
+          if (members.some((member) => member.name === name)) return yield* new Tool.Error({ message: `Duplicate member name in ${file}: ${name}. File preserved.` })
+          members.push({ name, model: ref })
         }
-        if (members.length > 0) return { members }
+        return { members, path: file }
       }
       return { members: [] as MemberRef[] }
     })
 
     const seedCouncil = Effect.fn(function* (sessionID: SessionSchema.ID) {
+      // Recheck immediately before writing. A valid but blank members array is
+      // intentional configuration, not permission to overwrite the file.
+      if ((yield* readJsonSafe(fs, globalCouncilPath)) !== undefined) return { path: globalCouncilPath, seeded: false }
       const session = yield* sessions
         .get(sessionID)
         .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Cannot read session: ${cause}` })))
-      const current = session.model === undefined ? undefined : refToString(session.model)
+      const available = yield* models.available()
+      const current = session.model && available.some((model) => refToString(model) === refToString(session.model!))
+        ? refToString(session.model) : undefined
+      // Session/model lookup yields; recheck after it immediately before saving.
+      if ((yield* readJsonSafe(fs, globalCouncilPath)) !== undefined) return { path: globalCouncilPath, seeded: false }
       const seed = {
         members: [
           { name: "current", model: current ?? "" },
@@ -494,7 +571,7 @@ export const Plugin = define({
         ],
       }
       yield* writeJsonSafe(fs, globalCouncilPath, seed)
-      return globalCouncilPath
+      return { path: globalCouncilPath, seeded: true }
     })
 
     // -------------------------------------------------------------------------
@@ -535,14 +612,11 @@ export const Plugin = define({
               .get(context.sessionID)
               .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Cannot read session: ${cause}` })))
             const skillName = slugify(input.name ?? session.title ?? stats.firstUserText)
-            const body = yield* sessions
-              .generate({
-                sessionID: context.sessionID,
-                prompt:
+            const body = yield* askSession(context.sessionID,
                   "Distill THIS session's trajectory into a reusable skill document (markdown). " +
                   "Sections: Goal, Preconditions, Steps (tool-level, concrete), Pitfalls, Verification. " +
                   "Be terse and imperative. Do not include transcript quotes or user-identifying data.",
-              })
+              )
               .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Skill generation failed: ${cause}` })))
             const dir = input.project
               ? path.join(projectDirectory, ".opencode", "skills", skillName)
@@ -577,14 +651,10 @@ export const Plugin = define({
           required: ["action"],
           additionalProperties: false,
         },
-        execute: (raw) =>
+        execute: (raw, context) =>
           Effect.gen(function* () {
             const input = (raw ?? {}) as ScheduleInput
-            const stored = yield* readJsonSafe(fs, schedulePath)
-            const tasks: ScheduleEntry[] = Array.isArray((stored as { tasks?: unknown[] } | undefined)?.tasks)
-              ? ((stored as { tasks: ScheduleEntry[] }).tasks ?? [])
-              : []
-            const now = new Date()
+            const tasks = yield* schedules.list({ sessionID: context.sessionID })
             switch (input.action) {
               case "add": {
                 if (!input.name || !input.cadence || !input.prompt)
@@ -592,47 +662,38 @@ export const Plugin = define({
                 const cron = normalizeCadence(input.cadence)
                 if (cron === undefined)
                   return yield* new Tool.Error({ message: `Unparseable cadence: "${input.cadence}"` })
-                const existing = tasks.findIndex((task) => task.name === input.name)
-                const entry: ScheduleEntry = {
-                  name: input.name,
-                  cadence: cron,
-                  prompt: input.prompt,
-                  created: now.toISOString(),
-                }
-                if (existing >= 0) tasks[existing] = entry
-                else tasks.push(entry)
-                yield* writeJsonSafe(fs, schedulePath, { tasks })
-                const upcoming = nextRun(cron, now)
-                return text(
-                  `${existing >= 0 ? "Updated" : "Recorded"} schedule "${input.name}" (${cron}). Next: ${
-                    upcoming === undefined ? "never" : upcoming.toISOString()
-                  }\nTotal schedules: ${tasks.length}`,
-                )
+                if (!(yield* schedules.enabled(context.sessionID)))
+                  return yield* new Tool.Error({ message: "Schedule execution is disabled: enable experimental.schedules for this session's location before adding jobs." })
+                if (tasks.some((task) => task.name === input.name))
+                  return yield* new Tool.Error({ message: `Schedule "${input.name}" already exists; remove it explicitly before replacing it.` })
+                const interval = cron.match(/^every (\d+) (minutes|hours)$/)
+                const task = yield* schedules.create({
+                  sessionID: context.sessionID, name: input.name,
+                  when: interval ? { type: "every", every: `${interval[1]} ${interval[2]}` } : { type: "cron", cron },
+                  action: { type: "prompt", prompt: input.prompt },
+                })
+                return text(`Scheduled "${task.name}" [${task.id}] (${cron}). Status: ${task.status}; next: ${task.nextDueAt ? DateTime.formatIso(task.nextDueAt) : "none"}. Runs through the server schedule engine.`)
               }
               case "remove": {
                 if (!input.name) return yield* new Tool.Error({ message: "remove requires name." })
-                const remaining = tasks.filter((task) => task.name !== input.name)
-                if (remaining.length === tasks.length)
-                  return text(`No schedule named "${input.name}". ${tasks.length} schedule(s) remain.`)
-                yield* writeJsonSafe(fs, schedulePath, { tasks: remaining })
-                return text(`Removed "${input.name}". ${remaining.length} schedule(s) remain.`)
+                const matching = tasks.filter((task) => task.name === input.name || task.id === input.name)
+                if (matching.length === 0) return text(`No schedule named "${input.name}" in this session.`)
+                if (matching.length > 1) return yield* new Tool.Error({ message: "Schedule name is ambiguous; use its id." })
+                yield* schedules.remove(matching[0]!.id)
+                return text(`Removed "${input.name}".`)
               }
               case "export":
-                return text(JSON.stringify({ path: schedulePath, tasks }, null, 2))
+                return text(JSON.stringify({ tasks, legacy: { path: schedulePath, active: false, data: yield* readJsonSafe(fs, schedulePath) } }, null, 2))
               case "list":
               default: {
-                if (tasks.length === 0) return text(`No schedules. Store: ${schedulePath}`)
+                if (tasks.length === 0) return text(`No executable schedules in this session. Legacy JSON records, if any, are available via export and are not active.`)
                 const lines = tasks.map((task) => {
-                  const due = isDue(task, now)
-                  const upcoming = nextRun(task.cadence, now)
-                  return `- ${task.name} (${task.cadence})${due ? " — DUE NOW" : ""} | next: ${
-                    upcoming === undefined ? "never" : upcoming.toISOString()
-                  } | ${task.prompt.slice(0, 80)}`
+                  return `- ${task.name ?? task.id} [${task.id}] | ${task.status} | next: ${task.nextDueAt ? DateTime.formatIso(task.nextDueAt) : "none"} | runs: ${task.runCount} | outcome: ${task.lastOutcome ?? "none"}`
                 })
                 return text(lines.join("\n"))
               }
             }
-          }),
+          }).pipe(Effect.mapError((cause) => cause instanceof Tool.Error ? cause : new Tool.Error({ message: `Schedule operation failed: ${cause}` }))),
       })
 
       // ---- council ----------------------------------------------------------
@@ -674,11 +735,11 @@ export const Plugin = define({
             if ("error" in resolved) return yield* new Tool.Error({ message: resolved.error! })
             let members = resolved.members ?? []
             if (members.length === 0) {
-              const seeded = yield* seedCouncil(context.sessionID).pipe(
+              const seeded = resolved.path ? { path: resolved.path, seeded: false } : yield* seedCouncil(context.sessionID).pipe(
                 Effect.mapError((cause) => new Tool.Error({ message: `Cannot seed council.json: ${cause}` })),
               )
               return text(
-                `No council configured — seeded a template at:\n${seeded}\n` +
+                `No active council members — ${seeded.seeded ? "seeded a template" : "preserved existing configuration"} at:\n${seeded.path}\n` +
                   'Add two or more "provider/model" entries, then retry. Available models can be listed via the models command.',
               )
             }
@@ -706,14 +767,21 @@ export const Plugin = define({
               }).pipe(
                 Effect.map((answer) => ({ member, answer }) as MemberAnswer),
                 Effect.catch((cause) =>
-                  Effect.succeed({ member, answer: `[${refToString(member.model)} failed: ${cause}]` } as MemberAnswer),
+                  Effect.succeed({ member, answer: `[${refToString(member.model)} failed: ${cause}]`, failed: true } as MemberAnswer),
                 ),
               )
 
-            const chair = (prompt: string) =>
-              sessions
-                .generate({ sessionID: context.sessionID, prompt: `${CHAIR_SYSTEM}\n\n${prompt}` })
-                .pipe(Effect.mapError((cause) => new Tool.Error({ message: `Chairman generation failed: ${cause}` })))
+            const chairJson = <T>(prompt: string, schema: string, validate: (raw: string) => Checked<T>) => Effect.gen(function* () {
+              let feedback = ""
+              for (let attempt = 0; attempt < 2; attempt++) {
+                const raw = yield* askSession(context.sessionID, `${CHAIR_SYSTEM}\n\n${prompt}\n\nReturn ONLY valid JSON: ${schema}.${feedback}`)
+                const checked = validate(raw)
+                if (checked.ok) return checked.value
+                feedback = `\nYour previous structured result was rejected: ${checked.error} Correct it. Do not repeat the invalid format.`
+              }
+              return yield* new Tool.Error({ message: `Leader JSON invalid after one corrective retry.${feedback}` })
+            })
+            const chair = (prompt: string) => chairJson(prompt, '{"answer":"final answer text"}', validateAnswer)
 
             const banner = (answers: readonly MemberAnswer[]) =>
               answers
@@ -735,11 +803,11 @@ export const Plugin = define({
                 const roster = members
                   .map((member, index) => `${index + 1}. ${member.name}: ${refToString(member.model)}`)
                   .join("\n")
-                const verdict = yield* chair(
-                  `Pick the single council member best suited to answer the question. Reply with the member's number only.\n\nMembers:\n${roster}\n\nQuestion:\n${question}`,
+                const index = yield* chairJson(
+                  `Pick the single council member best suited to answer the question.\n\nMembers:\n${roster}\n\nQuestion:\n${question}`,
+                  '{"member":N}', (raw) => validateRoute(raw, members.length),
                 )
-                const index = Number((verdict.match(/\d+/) ?? ["1"])[0]) - 1
-                const chosen = members[Math.min(Math.max(index, 0), members.length - 1)]!
+                const chosen = members[index]!
                 const answer = yield* ask(chosen, question)
                 return text(
                   `${header}Routed to ${chosen.name} (${refToString(chosen.model)}).\n\n${answer.answer}`,
@@ -780,29 +848,25 @@ export const Plugin = define({
                 const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
                   concurrency: members.length,
                 })
-                const scores = new Map<string, number>()
-                for (const judge of members) {
-                  const ballot = yield* ask(
-                    judge,
-                    `Score EACH candidate answer 1-10 for correctness and quality. Reply ONLY with lines like ` +
-                      `"<member>: <score>".\n\n${banner(answers)}\n\nQuestion:\n${question}`,
-                  )
-                  for (const entry of answers) {
-                    const match = ballot.answer.match(new RegExp(`${entry.member.name}\\s*[:=]\\s*(\\d+(?:\\.\\d+)?)`, "i"))
-                    if (!match) continue
-                    scores.set(entry.member.name, (scores.get(entry.member.name) ?? 0) + Number(match[1]))
+                if (answers.some((answer) => answer.failed)) return yield* new Tool.Error({ message: "Consensus cannot score failed candidate answers." })
+                const candidates = answers.map((entry, index) => `Candidate ${index + 1}: ${entry.member.name}\n${entry.answer}`).join("\n\n")
+                let feedback = ""
+                for (let round = 0; round < 2; round++) {
+                  const ballots = yield* Effect.forEach(members, (judge) => ask(judge,
+                    `Score EACH numbered candidate 1-10. Return ONLY valid JSON: {"scores":[{"member":1,"score":8},...]}. Include every candidate exactly once; no extra fields.\n\n${candidates}\n\nQuestion:\n${question}${feedback}`),
+                    { concurrency: members.length })
+                  if (ballots.some((ballot) => ballot.failed)) return yield* new Tool.Error({ message: "Consensus ballot generation failed; no further voting round." })
+                  const checked = ballots.map((ballot) => validateBallot(ballot.answer, members.length))
+                  const errors = checked.flatMap((ballot, index) => ballot.ok ? [] : [`Judge ${index + 1}: ${ballot.error}`])
+                  const scores = members.map((_, index) => checked.reduce((sum, ballot) => sum + (ballot.ok ? ballot.value.get(index + 1)! : 0), 0))
+                  const ranked = answers.map((answer, index) => ({ ...answer, score: scores[index]! })).sort((a, b) => b.score - a.score)
+                  if (errors.length === 0 && ranked[0]!.score !== ranked[1]!.score) {
+                    const winner = ranked[0]!
+                    return text(`${header}Winner: ${winner.member.name} (${refToString(winner.member.model)})\n\nScoreboard:\n${ranked.map((entry) => `- ${entry.member.name}: ${entry.score}`).join("\n")}\n\n${winner.answer}`)
                   }
+                  feedback = `\nThe entire peer voting round was rejected: ${errors.length ? errors.join(" ") : "Top scores are tied; no unique winner."} Every judge must return a corrected complete JSON ballot. Previous scores are discarded.`
                 }
-                const ranked = [...answers].sort(
-                  (a, b) => (scores.get(b.member.name) ?? 0) - (scores.get(a.member.name) ?? 0),
-                )
-                const winner = ranked[0]!
-                const scoreboard = ranked
-                  .map((entry) => `- ${entry.member.name}: ${scores.get(entry.member.name) ?? 0}`)
-                  .join("\n")
-                return text(
-                  `${header}Winner: ${winner.member.name} (${refToString(winner.member.model)})\n\nScoreboard:\n${scoreboard}\n\n${winner.answer}`,
-                )
+                return yield* new Tool.Error({ message: `No valid consensus after one corrective round.${feedback}` })
               }
               case "council":
               default: {
@@ -815,7 +879,7 @@ export const Plugin = define({
                 return text(header + synthesis)
               }
             }
-          }),
+          }).pipe(Effect.mapError((cause) => cause instanceof Tool.Error ? cause : new Tool.Error({ message: `Council operation failed: ${cause}` }))),
       })
     })
 
@@ -835,7 +899,7 @@ export const Plugin = define({
             }),
         })
       relay(PROMPT_DISTILL, "Distill this session into a reusable learned skill (RSI).", "distill")
-      relay(PROMPT_SCHEDULE, "Manage deterministic qm-style background schedules.", "schedule")
+      relay(PROMPT_SCHEDULE, "Manage executable session schedules.", "schedule")
       relay(PROMPT_COUNCIL, "Convene a multi-model council on a question.", "council")
     })
   }),

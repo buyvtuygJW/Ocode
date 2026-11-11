@@ -1,6 +1,8 @@
 import { Context, Effect, Scope } from "effect"
 import { Plugin } from "../plugin/personalize"
 import { ModelResolver } from "../model-resolver.js"
+import { Instance } from "../instance/service.js"
+import { Database } from "../database/database.js"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 
 export function decorate(stock: typeof import("../plugin/internal")) {
@@ -19,5 +21,5 @@ export function decorate(stock: typeof import("../plugin/internal")) {
       }],
     }
   })
-  return { list, requirements: LayerNode.group([stock.requirements, ModelResolver.node]) }
+  return { list, requirements: LayerNode.group([stock.requirements, ModelResolver.node, Instance.node, Database.node]) }
 }
