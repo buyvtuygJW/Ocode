@@ -73,7 +73,7 @@ export function permissionInfo(request: MiniPermissionRequest, directory?: strin
 }
 
 export function permissionLabel(option: PermissionOption): string {
-  if (option === "session_read") return "Read subtree/session"
+  if (option === "session_read") return "only read recursive"
   if (option === "policy") return "Session CRUD…"
   return permissionOptionLabel(option)
 }

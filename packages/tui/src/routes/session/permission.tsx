@@ -267,7 +267,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                 once: permissionOptionLabel("once"),
                 ...((props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length
                   ? { policy: "Session CRUD policy…", ...(props.request.operations.every((operation) => operation === "read")
-                    ? { session_read: "Read subtree · session + descendants" } : {}) } : {}),
+                    ? { session_read: "only read recursive" } : {}) } : {}),
                 ...(props.request.save?.length ? { always: permissionOptionLabel("always") } : {}),
                 reject: permissionOptionLabel("reject"),
               }}

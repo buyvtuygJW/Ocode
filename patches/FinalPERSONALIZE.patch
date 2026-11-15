@@ -3707,7 +3707,7 @@ index 3a9726624067620cbd97fae948f20eccfce40726..11da37389c0797c7206fade9df506758
    return {
      state: { status: "idle", attempt: state.attempt },
 diff --git a/packages/app/src/session/requests/session-permission-dock.tsx b/packages/app/src/session/requests/session-permission-dock.tsx
-index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..c263a3aafa6491c813c4f6c3fbac6277a3a4bba3 100644
+index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..268a8c633e58e714de9a50efe14fd4dbeae34417 100644
 --- a/packages/app/src/session/requests/session-permission-dock.tsx
 +++ b/packages/app/src/session/requests/session-permission-dock.tsx
 @@ -1,6 +1,8 @@
@@ -3720,7 +3720,7 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..c263a3aafa6491c813c4f6c3fbac6277
  import { Button } from "@opencode/ui/button"
  import { DockPrompt } from "@opencode/session-ui/dock-prompt"
  import { Icon } from "@opencode/ui/icon"
-@@ -11,11 +13,25 @@ const decodeToolInput = Schema.decodeUnknownOption(Schema.Record(Schema.String,
+@@ -11,11 +13,30 @@ const decodeToolInput = Schema.decodeUnknownOption(Schema.Record(Schema.String,
  const isString = Schema.is(Schema.String)
  
  export function SessionPermissionDock(props: {
@@ -3731,13 +3731,18 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..c263a3aafa6491c813c4f6c3fbac6277
 +  onDecide: (response: Permission.Reply) => void
  }) {
    const language = useLanguage()
-+  const [policy, setPolicy] = createStore({ text: "", error: "" })
++  const [policy, setPolicy] = createStore({ text: "", error: "", show: false })
++  const unknown = () => props.request.message?.startsWith("Unknown effects:") === true
 +  const applyPolicy = () => {
 +    try {
-+      const parsed = parsePermissionShorthand(policy.text)
-+      if (parsed.mcp !== undefined) {
-+        setPolicy("error", language.t("permission.policy.mcpSeparate"))
-+        return
++      if (unknown()) {
++        if (!/^unknown=(?:1|s)$/i.test(policy.text.trim())) throw new Error("Use Unknown=1 or Unknown=S; no wildcard.")
++      } else {
++        const parsed = parsePermissionShorthand(policy.text)
++        if (parsed.mcp !== undefined) {
++          setPolicy("error", language.t("permission.policy.mcpSeparate"))
++          return
++        }
 +      }
 +      setPolicy("error", "")
 +      props.onDecide({ scope: "session", policy: policy.text })
@@ -3748,11 +3753,48 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..c263a3aafa6491c813c4f6c3fbac6277
  
    const toolDescription = () => {
      const key = `settings.permissions.tool.${props.request.action}.description`
-@@ -74,6 +90,26 @@ export function SessionPermissionDock(props: {
+@@ -49,20 +70,25 @@ export function SessionPermissionDock(props: {
+         <>
+           <div />
+           <div data-slot="permission-footer-actions">
++            <Show when={unknown()} fallback={
++              <>
++                <Button variant="ghost" size="normal" onClick={() => props.onDecide("reject")} disabled={props.responding}>
++                  {language.t("ui.permission.deny")}
++                </Button>
++                <Button variant="neutral" size="normal" onClick={() => props.onDecide("always")} disabled={props.responding}>
++                  {language.t("ui.permission.allowAlways")}
++                </Button>
++                <Button variant="submit" size="normal" onClick={() => props.onDecide("once")} disabled={props.responding}>
++                  {language.t("ui.permission.allowOnce")}
++                </Button>
++              </>
++            }>
++            <Button variant="submit" size="normal" onClick={() => props.onDecide("once")} disabled={props.responding}>Allow one</Button>
++            <Button variant="neutral" size="normal" onClick={() => setPolicy("show", !policy.show)} disabled={props.responding}>CRUD policy</Button>
+             <Button variant="ghost" size="normal" onClick={() => props.onDecide("reject")} disabled={props.responding}>
+               {language.t("ui.permission.deny")}
+             </Button>
+-            <Button
+-              variant="neutral"
+-              size="normal"
+-              onClick={() => props.onDecide("always")}
+-              disabled={props.responding}
+-            >
+-              {language.t("ui.permission.allowAlways")}
+-            </Button>
+-            <Button variant="submit" size="normal" onClick={() => props.onDecide("once")} disabled={props.responding}>
+-              {language.t("ui.permission.allowOnce")}
+-            </Button>
++            </Show>
+           </div>
+         </>
+       }
+@@ -74,6 +100,26 @@ export function SessionPermissionDock(props: {
          </Show>
        </div>
  
-+      <Show when={(props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length}>
++      <Show when={(unknown() && policy.show) || (!unknown() && (props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length)}>
 +        <label data-slot="permission-policy">
 +          <span>{language.t("permission.policy.label")}</span>
 +          <For each={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}>
@@ -3760,12 +3802,12 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..c263a3aafa6491c813c4f6c3fbac6277
 +          </For>
 +          <input
 +            value={policy.text}
-+            placeholder={language.t("permission.policy.placeholder")}
++            placeholder={unknown() ? "Unknown=1 or Unknown=S" : language.t("permission.policy.placeholder")}
 +            disabled={props.responding}
 +            onInput={(event) => setPolicy("text", event.currentTarget.value)}
 +            onKeyDown={(event) => { if (event.key === "Enter") applyPolicy() }}
 +          />
-+          <span>{language.t("permission.policy.scope")}</span>
++          <span>{unknown() ? "May bypass filesystem denies; no wildcard." : language.t("permission.policy.scope")}</span>
 +          <Show when={policy.error}><span role="alert">{policy.error}</span></Show>
 +        </label>
 +        <Button variant="neutral" disabled={props.responding} onClick={applyPolicy}>
@@ -4153,10 +4195,10 @@ index 2afb8d3b85df2f3652feaed1de4c7a4ce3268c44..3e241040c56e1b5533813e57ade29f45
          save: ["*"],
          metadata: preview ? { files: [preview] } : undefined,
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
-index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673a3f1d8b8 100644
+index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcffc422e68 100644
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
-@@ -10,13 +10,22 @@ import { Agent } from "./agent.js"
+@@ -10,13 +10,34 @@ import { Agent } from "./agent.js"
  import { SessionErrors } from "./session/error.js"
  import { SessionSchema } from "./session/schema.js"
  import { SessionStore } from "./session/store.js"
@@ -4169,8 +4211,20 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
 +import { Database } from "./database/database.js"
 +import { EventSequenceTable } from "./event/sql.js"
 +import { SessionEvent } from "@opencode/schema/session-event"
++import { createHash } from "node:crypto"
 +
 +class PermissionSnapshotChanged extends Error {}
++const UNKNOWN_ACTION = "__opencode_shell_unknown_v1"
++function unknownKey(input: Pick<Request, "action" | "sessionID" | "metadata">, grants: readonly SessionGrant.Grant[]) {
++  const metadata = input.metadata
++  if (input.action !== "shell" || metadata?.filesystemEffects !== "unknown" ||
++    typeof metadata.unknownCommand !== "string" || typeof metadata.unknownCwd !== "string" ||
++    typeof metadata.unknownShell !== "string") return
++  return createHash("sha256").update(JSON.stringify([
++    input.sessionID, metadata.unknownCommand, metadata.unknownCwd, metadata.unknownShell,
++    grants.filter((grant) => grant.effect === "deny").map((grant) => JSON.stringify(grant)).sort(),
++  ])).digest("hex")
++}
  
  const PermissionEffect = Permission.Effect
  export { PermissionEffect as Effect }
@@ -4180,7 +4234,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
  const missingAgentPermissions: Permission.Ruleset = [{ action: "*", resource: "*", effect: "deny" }]
  
  export const ID = Permission.ID
-@@ -115,7 +124,7 @@ export interface Interface {
+@@ -115,7 +136,7 @@ export interface Interface {
    readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
    /** True only when the rules already allow the request; never asks the user. */
    readonly allows: (input: AssertInput) => Effect.Effect<boolean, SessionErrors.NotFoundError>
@@ -4189,7 +4243,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
    readonly get: (id: ID) => Effect.Effect<Request | undefined>
    readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
    readonly list: () => Effect.Effect<ReadonlyArray<Request>>
-@@ -136,9 +145,11 @@ const layer = Layer.effect(
+@@ -136,9 +157,11 @@ const layer = Layer.effect(
      const location = yield* Location.Service
      const agents = yield* Agent.Service
      const sessions = yield* SessionStore.Service
@@ -4201,7 +4255,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
      let closed = false
  
      const close = Effect.gen(function* () {
-@@ -153,6 +164,7 @@ const layer = Layer.effect(
+@@ -153,6 +176,7 @@ const layer = Layer.effect(
            .pipe(Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError()))),
        )
        pending.clear()
@@ -4209,7 +4263,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
      }).pipe(Effect.uninterruptible)
      yield* Effect.addFinalizer(() => close)
  
-@@ -170,7 +182,74 @@ const layer = Layer.effect(
+@@ -170,7 +194,100 @@ const layer = Layer.effect(
        const session = yield* sessions.get(sessionID)
        if (!session) return yield* new SessionErrors.NotFoundError({ sessionID })
        const agent = yield* agents.resolve(agentID ?? session.agent)
@@ -4282,10 +4336,36 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
 +        )
 +        if (committed) return
 +      }
++    })
++
++    const persistUnknown = Effect.fnUntraced(function* (root: SessionSchema.ID, key: string) {
++      while (true) {
++        const snapshot = yield* db.transaction(
++          (tx) => Effect.gen(function* () {
++            const session = yield* sessions.get(root)
++            const sequence = yield* tx.select({ seq: EventSequenceTable.seq })
++              .from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, root)).get()
++            return { session, seq: sequence?.seq ?? -1 }
++          }), { behavior: "immediate" },
++        ).pipe(Effect.orDie)
++        if (!snapshot.session) return yield* new SessionErrors.NotFoundError({ sessionID: root })
++        const previous = snapshot.session.permissions ?? []
++        if (previous.some((rule) => rule.action === UNKNOWN_ACTION && rule.resource === key && rule.effect === "allow")) return
++        const committed = yield* bus.publish(SessionEvent.Permissions, {
++          sessionID: root, permissions: [...previous, { action: UNKNOWN_ACTION, resource: key, effect: "allow" as const }],
++        }, {
++          commit: (seq) => seq === snapshot.seq + 1 ? Effect.void : Effect.die(new PermissionSnapshotChanged()),
++        }).pipe(
++          Effect.as(true),
++          Effect.catchDefect((defect) => defect instanceof PermissionSnapshotChanged
++            ? Effect.succeed(false) : Effect.die(defect)),
++        )
++        if (committed) return
++      }
      })
  
      function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
-@@ -181,12 +260,24 @@ const layer = Layer.effect(
+@@ -181,12 +298,33 @@ const layer = Layer.effect(
        return rules.filter((rule) => Wildcard.match(input.action, rule.action))
      }
  
@@ -4295,8 +4375,17 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
        if (denied(input, rules)) return { effect: "deny" as const, rules }
 +      const grants = yield* sessionGrants(input.sessionID)
 +      if (!grants) return { effect: "deny" as const, rules, message: "Invalid stored conversation filesystem policy; revoke it in session permissions." }
-+      if (SessionGrant.unknownEffectsDenied(grants, input))
-+        return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
++      if (SessionGrant.unknownEffectsDenied(grants, input)) {
++        const key = unknownKey(input, grants)
++        if (!key) return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
++        const root = yield* family(input.sessionID)
++        const session = yield* sessions.get(root)
++        if (session?.permissions?.some((rule) => rule.action === UNKNOWN_ACTION && rule.resource === key && rule.effect === "allow"))
++          return { effect: "allow" as const, rules }
++        if ((yield* Unattended) !== undefined)
++          return { effect: "deny" as const, rules, message: "Unknown filesystem effects require an interactive approval." }
++        return { effect: "ask" as const, rules, message: "Unknown effects: this command may bypass filesystem denies." }
++      }
 +      const decision = SessionGrant.decision(grants, input)
 +      if (decision === "deny") return {
 +        effect: "deny" as const, rules,
@@ -4312,7 +4401,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
        const event = yield* hooks.trigger("permission", "evaluate", {
          sessionID: input.sessionID,
          agent: input.agent,
-@@ -197,6 +288,11 @@ const layer = Layer.effect(
+@@ -197,6 +335,11 @@ const layer = Layer.effect(
          effect,
        })
        const unattended = yield* Unattended
@@ -4324,7 +4413,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
        if (event.effect !== "ask" || unattended === undefined)
          return { effect: event.effect, message: event.message, rules: all }
        const settled = [...all, ...unattended]
-@@ -215,6 +311,10 @@ const layer = Layer.effect(
+@@ -215,6 +358,10 @@ const layer = Layer.effect(
          sessionID: input.sessionID,
          action: input.action,
          resources: input.resources,
@@ -4335,7 +4424,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
          save: input.save,
          // Tools copy optional inputs straight into metadata; undefined values are not JSON and would
          // fail the HttpApi response encoder when clients list pending requests.
-@@ -241,13 +341,32 @@ const layer = Layer.effect(
+@@ -241,13 +388,32 @@ const layer = Layer.effect(
            yield* bus
              .publish(Permission.Event.Asked, request)
              .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
@@ -4370,7 +4459,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
        const value = request(input, result.message)
        if (result.effect === "ask") yield* create(value, input.agent)
        return { id: value.id, effect: result.effect }
-@@ -256,7 +375,7 @@ const layer = Layer.effect(
+@@ -256,7 +422,7 @@ const layer = Layer.effect(
      const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
        Effect.gen(function* () {
          if (closed) return yield* Effect.die(new DeclinedError())
@@ -4379,10 +4468,27 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
          return yield* Effect.uninterruptibleMask((restore) =>
            Effect.gen(function* () {
              if (result.effect === "deny") {
-@@ -308,6 +427,54 @@ const layer = Layer.effect(
+@@ -308,6 +474,71 @@ const layer = Layer.effect(
          Effect.gen(function* () {
            const existing = pending.get(input.requestID)
            if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
++          const currentGrants = (yield* sessionGrants(existing.request.sessionID)) ?? []
++          const key = SessionGrant.unknownEffectsDenied(currentGrants, existing.request)
++            ? unknownKey(existing.request, currentGrants) : undefined
++          if (key) {
++            const policy = typeof input.reply === "object" && "policy" in input.reply ? input.reply.policy.trim() : undefined
++            if (input.reply === "always" || (policy !== undefined && !/^unknown=(?:1|s)$/i.test(policy)))
++              return yield* new Permission.InvalidPolicyError({ message: "Use Unknown=1 or Unknown=S; wildcards are not supported." })
++            if (policy !== undefined) {
++              if (/^unknown=s$/i.test(policy)) yield* persistUnknown(yield* family(existing.request.sessionID), key)
++              yield* bus.publish(Permission.Event.Replied, {
++                sessionID: existing.request.sessionID, requestID: existing.request.id, reply: input.reply,
++              })
++              pending.delete(input.requestID)
++              yield* Deferred.succeed(existing.deferred, undefined)
++              return
++            }
++          }
 +          const selections = yield* Effect.try({
 +            try: () => SessionGrant.selections(input.reply),
 +            catch: (error) => new Permission.InvalidPolicyError({ message: error instanceof Error ? error.message : String(error) }),
@@ -4434,7 +4540,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
            yield* bus.publish(Permission.Event.Replied, {
              sessionID: existing.request.sessionID,
              requestID: existing.request.id,
-@@ -352,11 +519,11 @@ const layer = Layer.effect(
+@@ -352,11 +583,11 @@ const layer = Layer.effect(
              const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
                Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
              )
@@ -4448,7 +4554,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673
              })
              yield* Deferred.succeed(item.deferred, undefined)
              pending.delete(id)
-@@ -384,5 +551,5 @@ const layer = Layer.effect(
+@@ -384,5 +615,5 @@ const layer = Layer.effect(
  export const node = makeLocationNode({
    service: Service,
    layer,
@@ -4741,26 +4847,72 @@ index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c519250
                  metadata: {
                    filepath: targets.map((target) => target.resource).join(", "),
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..51f6ba497f22d74a7469d5d9ac5b9a00266fc15f 100644
+index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92ac2eb20de 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
-@@ -292,10 +292,15 @@ export const Plugin = {
+@@ -7,6 +7,7 @@ import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
+ import type { Shell as ShellSchema } from "@opencode/schema/shell"
+ import type { Tool } from "@opencode/schema/tool"
+ import { Clock, Deferred, Effect, Fiber, Option, Schema, Struct } from "effect"
++import path from "node:path"
+ import { Environment } from "../../environment/index.js"
+ import { Job } from "../../job.js"
+ import { FileAccess } from "../../file-access.js"
+@@ -23,6 +24,21 @@ import { toolFailure } from "../runtime.js"
+ 
+ export const name = "shell"
+ export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
++
++// Only a literal Write-Output in system Windows PowerShell without profiles is
++// known not to touch the filesystem. Parseable does not mean effect-free.
++export function hasNoFilesystemEffects(
++  command: string,
++  shell: string,
++  platform: string = process.platform,
++  systemRoot = process.env.SystemRoot,
++): boolean {
++  if (platform !== "win32" || !systemRoot || !path.win32.isAbsolute(systemRoot)) return false
++  const expected = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
++  if (path.win32.normalize(shell).toLowerCase() !== expected.toLowerCase()) return false
++  if (/[\r\n]/.test(command)) return false
++  return /^[ \t]*Write-Output[ \t]+'[A-Za-z0-9 ._,:!?-]*'[ \t]*$/i.test(command)
++}
+ // How long a call the user interrupted waits for its stopped command to exit before settling with the output so far.
+ const INTERRUPT_WAIT = "500 millis"
+ 
+@@ -286,17 +302,30 @@ export const Plugin = {
+       invocation.cwd = target.absolute
+       const timeout = invocation.timeout
+       const parsed = yield* ShellParse.scan(invocation.command, invocation.shell, target.absolute)
++      const effects = hasNoFilesystemEffects(invocation.command, invocation.shell)
++        ? undefined
++        : { filesystemEffects: "unknown" as const }
+       const directories = yield* Effect.forEach(parsed.directories, (directory) =>
+         access.resolve({
+           path: FileAccess.resolvePath(target.absolute, directory),
            kind: "directory",
          }),
        )
--      yield* access.authorizeExternal([target, ...directories], context)
 +      yield* permission.assertNotDenied({
-+        action: name, resources: [invocation.command], metadata: { filesystemEffects: "unknown" },
++        action: name, resources: [invocation.command],
 +        ...Permission.invocation(context),
 +      })
-+      yield* access.authorizeExternal([target, ...directories], context, { filesystemEffects: "unknown" })
-       if (parsed.commands.length > 0)
+       yield* access.authorizeExternal([target, ...directories], context)
+-      if (parsed.commands.length > 0)
++      if (parsed.commands.length > 0 || effects)
          yield* permission.assert({
            action: name,
-+          metadata: { filesystemEffects: "unknown" },
-           resources: parsed.commands.map((command) => command.resource),
+-          resources: parsed.commands.map((command) => command.resource),
++          metadata: effects ? {
++            ...effects,
++            unknownCommand: invocation.command,
++            unknownCwd: target.absolute,
++            unknownShell: invocation.shell,
++          } : undefined,
++          resources: parsed.commands.length ? parsed.commands.map((command) => command.resource) : [invocation.command],
            save: parsed.commands.map((command) => command.save),
            ...Permission.invocation(context),
+         })
 diff --git a/packages/core/test/config/mcp-selection.node.test.mjs b/packages/core/test/config/mcp-selection.node.test.mjs
 new file mode 100644
 index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd08eab6b5
@@ -4866,13 +5018,81 @@ index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd
 +  assert.deepEqual(result.editor.get("other").command, ["plugin-owned"])
 +})
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
-index 8d42e5b54a9c214989d808c883f87439ec6a87ff..06f4dbd006a0a114275374ae425dee3d918292a8 100644
+index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b885c5d4c5d 100644
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -98,6 +98,71 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+@@ -16,10 +16,32 @@ import { Session } from "@opencode/core/session"
+ import { SessionTable } from "@opencode/core/session/sql"
+ import { SessionStore } from "@opencode/core/session/store"
+ import { ShellParse } from "@opencode/core/shell/parse"
++import { hasNoFilesystemEffects } from "../src/tool/plugin/shell"
+ import { eq } from "drizzle-orm"
+ import { location } from "./fixture/location"
+ import { testEffect } from "./lib/effect"
+ 
++test("only literal output on the system PowerShell is classified as effect-free", () => {
++  const system = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
++  const check = (command: string, shell = system, platform = "win32", root = "C:\\Windows") =>
++    hasNoFilesystemEffects(command, shell, platform, root)
++  expect(check("Write-Output 'shell permission test'")).toBe(true)
++  for (const command of [
++    "Write-Output 'hi'; Remove-Item file",
++    "Write-Output 'hi' > file",
++    "Write-Output 'hi' | Remove-Item",
++    "Write-Output 'hi'\nRemove-Item file",
++    'Write-Output "$(Remove-Item file)"',
++    "Write-Output $env:PATH",
++    "npm run dev",
++    "Remove-Item file",
++    "echo 'hi'",
++  ]) expect(check(command)).toBe(false)
++  expect(check("Write-Output 'hi'", "C:\\temp\\powershell.exe")).toBe(false)
++  expect(check("Write-Output 'hi'", system, "linux")).toBe(false)
++  expect(check("Write-Output 'hi'", system, "win32", "relative")).toBe(false)
++})
++
+ const current = Layer.succeed(
+   Location.Service,
+   Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
+@@ -98,6 +120,106 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
  }
  
  describe("Permission", () => {
++  it.effect("unknown shell approvals are explicit, command-scoped, durable and never wildcarded", () =>
++    Effect.gen(function* () {
++      yield* setup()
++      const initial = yield* waitForRequest({
++        action: "external_directory", operations: ["read"], paths: ["D:/Data/Project"],
++        resources: ["D:/Data/Project/*"], directories: ["D:/Data/Project"],
++      })
++      yield* initial.service.reply({ requestID: initial.request.id, reply: { scope: "session", policy: "R=S* D=D" } })
++      yield* Fiber.join(initial.fiber)
++      const unknown = {
++        action: "shell",
++        resources: ["npm run dev"],
++        metadata: {
++          filesystemEffects: "unknown", unknownCommand: "npm run dev",
++          unknownCwd: "D:/Data/Project", unknownShell: "powershell.exe",
++        },
++      }
++      const first = yield* waitForRequest(unknown)
++      const invalid = yield* first.service.reply({
++        requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S*" },
++      }).pipe(Effect.flip)
++      expect(invalid._tag).toBe("Permission.InvalidPolicyError")
++      yield* first.service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=1" } })
++      yield* Fiber.join(first.fiber)
++      const second = yield* waitForRequest({ ...unknown, id: Permission.ID.create("per_unknown2") })
++      yield* second.service.reply({ requestID: second.request.id, reply: { scope: "session", policy: "Unknown=S" } })
++      yield* Fiber.join(second.fiber)
++      expect((yield* second.service.ask(assertion(unknown))).effect).toBe("allow")
++      expect((yield* second.service.ask(assertion({
++        ...unknown, metadata: { ...unknown.metadata, unknownCommand: "npm run build" },
++      }))).effect).toBe("ask")
++      yield* setRules([{ action: "shell", resource: "*", effect: "deny" }])
++      expect((yield* second.service.ask(assertion(unknown))).effect).toBe("deny")
++    }),
++  )
 +  it.effect("session CRUD settles concurrent family reads and denies C/D without project-global persistence or widening", () =>
 +    Effect.gen(function* () {
 +      const parent = Session.ID.make("ses_test")
@@ -5139,10 +5359,10 @@ index 0000000000000000000000000000000000000000..7731b0e0819b221409c742c3e84f5fbf
 +}
 diff --git a/packages/core/test/permission/service.node.test.mjs b/packages/core/test/permission/service.node.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..030baed2206ca236fe2d69285b499c34140bb791
+index 0000000000000000000000000000000000000000..b3fb96fbc4f180cc2b7e86208ee635d9bb6b59b1
 --- /dev/null
 +++ b/packages/core/test/permission/service.node.test.mjs
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,332 @@
 +import { test } from "node:test"
 +import assert from "node:assert/strict"
 +import { registerHooks, createRequire } from "node:module"
@@ -5428,6 +5648,51 @@ index 0000000000000000000000000000000000000000..030baed2206ca236fe2d69285b499c34
 +    assert.equal((yield* service.ask(input("ses_unrelated"))).effect, "allow")
 +    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Project-other/file"])), false)
 +    assert.equal(yield* service.allows(input("ses_child", "update")), false)
++  }))
++})
++
++test("unknown shell session approval is exact, revocable, and invalidated by changed denies", async () => {
++  state.add("ses_unknown_root")
++  state.add("ses_unknown_child", "ses_unknown_root")
++  const shell = (sessionID = "ses_unknown_root", command = "npm run dev", cwd = "D:/work") => ({
++    sessionID, agent: "build", action: "shell", resources: [command],
++    metadata: { filesystemEffects: "unknown", unknownCommand: command, unknownCwd: cwd, unknownShell: "powershell.exe" },
++  })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const permission = yield* pending(service, {
++      ...input("ses_unknown_root"), action: "external_directory", directories: ["D:/Data/Project"],
++      paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++    })
++    yield* service.reply({ requestID: permission.request.id, reply: { scope: "session", policy: "R=S* D=D" } })
++    yield* Fiber.join(permission.fiber)
++    const first = yield* pending(service, shell())
++    const bad = yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S*" } }).pipe(Effect.flip)
++    assert.equal(bad._tag, "Permission.InvalidPolicyError")
++    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S" } })
++    yield* Fiber.join(first.fiber)
++    assert.equal((yield* service.ask(shell())).effect, "allow")
++    assert.equal((yield* service.ask(shell("ses_unknown_child"))).effect, "ask")
++    assert.equal((yield* service.ask(shell("ses_unknown_root", "npm run build"))).effect, "ask")
++    assert.equal((yield* service.ask(shell("ses_unknown_root", "npm run dev", "D:/other"))).effect, "ask")
++  }))
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(shell())).effect, "allow", "session approval survives service recreation")
++    const root = state.records.get("ses_unknown_root")
++    const extraDeny = {
++      action: "__opencode_filesystem_session_v1", effect: "deny",
++      resource: JSON.stringify({ directory: "D:/Other", operation: "delete", effect: "deny", lifetime: "session", recursive: false, scope: "selected" }),
++    }
++    yield* state.publishDurable(SessionEvent.Permissions, {
++      sessionID: "ses_unknown_root", permissions: [...root.permissions, extraDeny],
++    })
++    assert.equal((yield* service.ask(shell())).effect, "ask", "a new deny requires new approval")
++    yield* state.publishDurable(SessionEvent.Permissions, {
++      sessionID: "ses_unknown_root",
++      permissions: root.permissions.filter((rule) => rule.action !== "__opencode_shell_unknown_v1"),
++    })
++    assert.equal((yield* service.ask(shell())).effect, "ask", "removing approval revokes it")
 +  }))
 +})
 diff --git a/packages/core/test/permission/session-grant.test.mjs b/packages/core/test/permission/session-grant.test.mjs
@@ -5842,7 +6107,7 @@ index 68d0543a4c158270200ae200ddede57bd07ba894..8ea42f6d0e5d27f1ec2a31d06b5f3846
          }),
        )
 diff --git a/packages/tui/src/mini/footer.permission.tsx b/packages/tui/src/mini/footer.permission.tsx
-index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c695d30684 100644
+index 235aa5a0b4a459889e96125caed86c3aad306f81..4e98c9393e16a48f51542b664fd9925fe82ef1b7 100644
 --- a/packages/tui/src/mini/footer.permission.tsx
 +++ b/packages/tui/src/mini/footer.permission.tsx
 @@ -23,6 +23,7 @@ import {
@@ -5853,12 +6118,38 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
    permissionReject,
    permissionRun,
    permissionShift,
-@@ -165,7 +166,13 @@ export function RunPermissionBody(props: {
+@@ -42,13 +43,14 @@ function buttons(
+   onHover: (option: PermissionOption) => void,
+   onSelect: (option: PermissionOption) => void,
+   mono: boolean,
++  unknown: boolean,
+ ) {
+   return (
+     <box width="100%" flexDirection="row" flexWrap="wrap" columnGap={1} flexShrink={0}>
+       <For each={list}>
+         {(option) => (
+           <box
+-            width={stringWidth(permissionLabel(option)) + 2}
++            width={stringWidth(permissionLabel(option, unknown)) + 2}
+             height={1}
+             flexShrink={0}
+             paddingLeft={1}
+@@ -66,7 +68,7 @@ function buttons(
+               fg={option === selected ? theme.actionFocusedText : theme.actionSecondaryText}
+               attributes={option === selected && mono ? TextAttributes.INVERSE : undefined}
+             >
+-              {permissionLabel(option)}
++              {permissionLabel(option, unknown)}
+             </text>
+           </box>
+         )}
+@@ -165,16 +167,24 @@ export function RunPermissionBody(props: {
      },
    }))
    const opts = createMemo(() =>
 -    permissionOptions(stage()).filter((option) => option !== "always" || (props.request.save?.length ?? 0) > 0),
 +    permissionOptions(stage()).filter((option) => {
++      if (props.request.message?.startsWith("Unknown effects:")) return ["once", "policy", "reject"].includes(option)
 +      if (option === "always") return (props.request.save?.length ?? 0) > 0
 +      if (option === "policy" || option === "session_read") return (!!props.request.directories?.length || props.request.action === "external_directory") &&
 +        !!props.request.operations?.length &&
@@ -5867,8 +6158,11 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
 +    }),
    )
    const busy = createMemo(() => state().submitting)
-   const controlsWidth = () => opts().reduce((total, option) => total + stringWidth(permissionLabel(option)) + 3, -1)
-@@ -175,6 +182,7 @@ export function RunPermissionBody(props: {
+-  const controlsWidth = () => opts().reduce((total, option) => total + stringWidth(permissionLabel(option)) + 3, -1)
++  const controlsWidth = () => opts().reduce((total, option) => total + stringWidth(permissionLabel(option, props.request.message?.startsWith("Unknown effects:"))) + 3, -1)
+   const hint = () =>
+     compact() && width() < 56
+       ? "pgup/pgdn scroll"
        : `${props.mono ? "left/right" : "⇆"} select  enter confirm  esc ${stage() === "always" ? "cancel" : "reject"}`
    const inlineControls = () => controlsWidth() + stringWidth(hint()) + 1 <= width() - (compact() ? 0 : 5)
    const title = createMemo(() => {
@@ -5876,12 +6170,12 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
      if (stage() === "always") {
        return "Always allow"
      }
-@@ -206,6 +214,13 @@ export function RunPermissionBody(props: {
+@@ -206,6 +216,13 @@ export function RunPermissionBody(props: {
    })
  
    const submit = async (next: PermissionReply) => {
 +    if (typeof next.decision === "object" && "policy" in next.decision) {
-+      const error = permissionPolicyError(next.decision.policy)
++      const error = permissionPolicyError(next.decision.policy, props.request.message?.startsWith("Unknown effects:"))
 +      if (error) {
 +        setState((prev) => ({ ...prev, error, submitting: false }))
 +        return
@@ -5890,7 +6184,7 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
      setState((prev) => ({
        ...prev,
        submitting: true,
-@@ -213,10 +228,12 @@ export function RunPermissionBody(props: {
+@@ -213,15 +230,21 @@ export function RunPermissionBody(props: {
  
      try {
        await props.onReply(next)
@@ -5904,7 +6198,16 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
        }))
      }
    }
-@@ -250,7 +267,7 @@ export function RunPermissionBody(props: {
+ 
+   const run = (option: PermissionOption) => {
++    if (option === "reject" && props.request.message?.startsWith("Unknown effects:")) {
++      void submit({ sessionID: props.request.sessionID, requestID: props.request.id, decision: "reject" })
++      return
++    }
+     const cur = state()
+     const next = permissionRun(cur, props.request.id, option)
+     if (next.state !== cur) {
+@@ -250,7 +273,7 @@ export function RunPermissionBody(props: {
  
    useKeyboard((event) => {
      const cur = state()
@@ -5913,7 +6216,7 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
        return
      }
  
-@@ -321,14 +338,23 @@ export function RunPermissionBody(props: {
+@@ -321,14 +344,28 @@ export function RunPermissionBody(props: {
          <text height={1} fg={props.theme.text} wrapMode="none" truncate>
            <span style={{ fg: props.theme.permission }}>{props.mono ? "! " : "△ "}</span>
            {title()}
@@ -5923,10 +6226,15 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
 -          <text fg={props.theme.muted}>Tell OpenCode what to do differently</text>
 +        <Show when={!compact() && (stage() === "reject" || stage() === "policy")}>
 +          <text fg={props.theme.muted}>{stage() === "policy"
-+            ? "RU=S* CD=D* · exact subtree + descendants · survives restart · =1 once · R=-S parent listing · omitted unchanged"
++            ? props.request.message?.startsWith("Unknown effects:")
++              ? "Unknown=1 once · Unknown=S session · no * · may bypass filesystem denies."
++              : "RU=S* CD=D* · exact subtree + descendants · survives restart · =1 once · R=-S parent listing · omitted unchanged"
 +            : "Tell OpenCode what to do differently"}</text>
 +        </Show>
 +        <Show when={state().error}><text fg={props.theme.permission}>{state().error}</text></Show>
++        <Show when={stage() === "permission" && props.request.message?.startsWith("Unknown effects:")}>
++          <text fg={props.theme.permission}>Unknown effects may bypass filesystem denies.</text>
++        </Show>
 +        <Show when={stage() === "policy" || stage() === "permission"}>
 +          <For each={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}>
 +            {(directory) => <text fg={props.theme.text}>{directory}</text>}
@@ -5940,8 +6248,16 @@ index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c6
          fallback={
            <box width="100%" flexGrow={1} minHeight={0} justifyContent="flex-end">
              <box
+@@ -529,6 +566,7 @@ export function RunPermissionBody(props: {
+               },
+               run,
+               props.mono ?? false,
++              props.request.message?.startsWith("Unknown effects:") === true,
+             )}
+           </box>
+           <Show
 diff --git a/packages/tui/src/mini/permission.shared.ts b/packages/tui/src/mini/permission.shared.ts
-index 38d2de31354ac64d9acceb0b3e5a6ba033549d1f..89d51e88289d1aefe24593abb1eb0714bbd72a1b 100644
+index 38d2de31354ac64d9acceb0b3e5a6ba033549d1f..a3dc07f0f4fcb782047b04860d85ba8879e85bff 100644
 --- a/packages/tui/src/mini/permission.shared.ts
 +++ b/packages/tui/src/mini/permission.shared.ts
 @@ -1,10 +1,11 @@
@@ -5975,17 +6291,23 @@ index 38d2de31354ac64d9acceb0b3e5a6ba033549d1f..89d51e88289d1aefe24593abb1eb0714
    }
  
    if (stage === "always") {
-@@ -71,9 +73,20 @@ export function permissionInfo(request: MiniPermissionRequest, directory?: strin
+@@ -70,10 +72,25 @@ export function permissionInfo(request: MiniPermissionRequest, directory?: strin
+   }
  }
  
- export function permissionLabel(option: PermissionOption): string {
-+  if (option === "session_read") return "Read subtree/session"
+-export function permissionLabel(option: PermissionOption): string {
++export function permissionLabel(option: PermissionOption, unknown = false): string {
++  if (unknown && option === "once") return "Allow one"
++  if (unknown && option === "policy") return "CRUD policy"
++  if (unknown && option === "reject") return "Deny"
++  if (option === "session_read") return "only read recursive"
 +  if (option === "policy") return "Session CRUD…"
    return permissionOptionLabel(option)
  }
  
-+export function permissionPolicyError(text: string): string | undefined {
++export function permissionPolicyError(text: string, unknown = false): string | undefined {
 +  try {
++    if (unknown) return /^unknown=(?:1|s)$/i.test(text.trim()) ? undefined : "Use Unknown=1 or Unknown=S; no wildcard."
 +    const parsed = parsePermissionShorthand(text)
 +    if (parsed.mcp !== undefined) return "MCP selection belongs to tool configuration, not a directory permission grant."
 +  } catch (error) {
@@ -5996,7 +6318,7 @@ index 38d2de31354ac64d9acceb0b3e5a6ba033549d1f..89d51e88289d1aefe24593abb1eb0714
  export { permissionAlwaysLines }
  
  function permissionReply(
-@@ -120,6 +133,10 @@ export function permissionRun(state: PermissionBodyState, requestID: string, opt
+@@ -120,6 +137,10 @@ export function permissionRun(state: PermissionBodyState, requestID: string, opt
    }
  
    if (state.stage === "permission") {
@@ -6007,7 +6329,7 @@ index 38d2de31354ac64d9acceb0b3e5a6ba033549d1f..89d51e88289d1aefe24593abb1eb0714
      if (option === "always") {
        return {
          state: {
-@@ -171,6 +188,9 @@ export function permissionReject(state: PermissionBodyState, requestID: string):
+@@ -171,6 +192,9 @@ export function permissionReject(state: PermissionBodyState, requestID: string):
      return undefined
    }
  
@@ -6050,7 +6372,7 @@ index 4519a2a91402bb80aa0b4c32ff63b264c22f2e5d..28e0c0a8f8797c208c2f003950fea3f0
  export type FormReply = {
    sessionID: string
 diff --git a/packages/tui/src/routes/session/permission.tsx b/packages/tui/src/routes/session/permission.tsx
-index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2839050fc 100644
+index 3618f19e0f852e3f649118485bb8ab460650ae05..a4ca30875d7c58fc7fa66519697098c06ed4143b 100644
 --- a/packages/tui/src/routes/session/permission.tsx
 +++ b/packages/tui/src/routes/session/permission.tsx
 @@ -3,7 +3,10 @@ import { createMemo, For, Match, Show, Switch } from "solid-js"
@@ -6082,14 +6404,18 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
    })
    const pathFormatter = usePathFormatter()
    const session = createMemo(() => data.session.get(props.request.sessionID))
-@@ -134,13 +138,38 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+@@ -134,13 +138,43 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
    const theme = useTheme()
  
    function reply(value: PermissionReply, message?: string) {
 +    if (typeof value === "object" && "policy" in value) {
 +      try {
-+        const parsed = parsePermissionShorthand(value.policy)
-+        if (parsed.mcp !== undefined) throw new Error("MCP selection belongs to tool configuration, not a directory permission grant.")
++        if (props.request.message?.startsWith("Unknown effects:")) {
++          if (!/^unknown=(?:1|s)$/i.test(value.policy.trim())) throw new Error("Use Unknown=1 or Unknown=S; no wildcard.")
++        } else {
++          const parsed = parsePermissionShorthand(value.policy)
++          if (parsed.mcp !== undefined) throw new Error("MCP selection belongs to tool configuration, not a directory permission grant.")
++        }
 +      } catch (error) {
 +        setStore("error", error instanceof Error ? error.message : String(error))
 +        return
@@ -6114,6 +6440,7 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
 +            action={props.request.action}
 +            instance={props.request.id}
 +            policy
++            unknown={props.request.message?.startsWith("Unknown effects:")}
 +            directories={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}
 +            error={store.error}
 +            onConfirm={(policy) => reply({ scope: "session", policy })}
@@ -6123,7 +6450,7 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
        <Match when={store.stage === "reject"}>
          <RejectPrompt
            action={props.request.action}
-@@ -201,7 +230,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+@@ -201,7 +235,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
              <box flexDirection="column" gap={0}>
                <box flexDirection="row" gap={1} flexShrink={0}>
                  <text fg={theme.text.feedback.warning.base}>{"△"}</text>
@@ -6132,18 +6459,21 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
                </box>
                <Show when={props.request.action !== "shell" && current.title}>
                  <box flexDirection="row" gap={1} paddingLeft={2} flexShrink={0}>
-@@ -221,6 +250,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+@@ -221,6 +255,13 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                instance={props.request.id}
                header={header()}
                body={(option) => (
 +                <box gap={1}>
++                <Show when={props.request.message?.startsWith("Unknown effects:")}>
++                  <text fg={theme.text.feedback.warning.base}>Unknown effects may bypass filesystem denies.</text>
++                </Show>
 +                <For each={props.request.directories}>
 +                  {(directory) => <text fg={theme.text.muted}>Policy directory: {directory}</text>}
 +                </For>
                  <Show when={option === "always"} fallback={presentationBody()}>
                    <box paddingLeft={1} gap={1}>
                      <For each={permissionAlwaysLines(props.request)}>
-@@ -228,19 +261,27 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+@@ -228,24 +269,37 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                      </For>
                    </box>
                  </Show>
@@ -6159,12 +6489,13 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
 -                  : { once: permissionOptionLabel("once"), reject: permissionOptionLabel("reject") }
 -              }
 +              options={{
-+                once: permissionOptionLabel("once"),
++                once: props.request.message?.startsWith("Unknown effects:") ? "Allow one" : permissionOptionLabel("once"),
++                ...(props.request.message?.startsWith("Unknown effects:") ? { policy: "CRUD policy" } : {}),
 +                ...((props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length
 +                  ? { policy: "Session CRUD policy…", ...(props.request.operations.every((operation) => operation === "read")
-+                    ? { session_read: "Read subtree · session + descendants" } : {}) } : {}),
-+                ...(props.request.save?.length ? { always: permissionOptionLabel("always") } : {}),
-+                reject: permissionOptionLabel("reject"),
++                    ? { session_read: "only read recursive" } : {}) } : {}),
++                ...(!props.request.message?.startsWith("Unknown effects:") && props.request.save?.length ? { always: permissionOptionLabel("always") } : {}),
++                reject: props.request.message?.startsWith("Unknown effects:") ? "Deny" : permissionOptionLabel("reject"),
 +              }}
                escapeKey="reject"
                fullscreen
@@ -6180,17 +6511,27 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
                  if (option === "always") {
                    reply("always")
                    return
-@@ -274,6 +315,9 @@ function RejectPrompt(props: {
+                 }
+                 if (option === "reject") {
++                  if (props.request.message?.startsWith("Unknown effects:")) {
++                    reply("reject")
++                    return
++                  }
+                   if (session()?.parentID) {
+                     setStore("stage", "reject")
+                     return
+@@ -274,6 +328,10 @@ function RejectPrompt(props: {
    instance: string
    onConfirm: (message: string) => void
    onCancel: () => void
 +  policy?: boolean
++  unknown?: boolean
 +  error?: string
 +  directories?: readonly string[]
  }) {
    let input: TextareaRenderable
    const enabled = useInteractivity()
-@@ -322,11 +366,15 @@ function RejectPrompt(props: {
+@@ -322,11 +380,17 @@ function RejectPrompt(props: {
        <box gap={1} paddingLeft={1} paddingRight={3} paddingTop={1} paddingBottom={1}>
          <box flexDirection="row" gap={1} paddingLeft={1}>
            <text fg={theme.text.feedback.error.base}>{"△"}</text>
@@ -6199,7 +6540,9 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2
          </box>
          <box paddingLeft={1}>
 -          <text fg={theme.text.muted}>Tell OpenCode what to do differently</text>
-+          <text fg={theme.text.muted}>{props.policy
++          <text fg={theme.text.muted}>{props.unknown
++            ? "Unknown=1 once · Unknown=S session · no * · may bypass filesystem denies."
++            : props.policy
 +            ? "RU=S* CD=D* · selected subtree + descendants · survives restart · =1 once · =S session · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged."
 +            : "Tell OpenCode what to do differently"}</text>
          </box>
