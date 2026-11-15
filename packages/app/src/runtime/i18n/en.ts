@@ -1,6 +1,11 @@
 import { DESKTOP_NATIVE_ENGLISH } from "./desktop-native"
 
 export const dict = {
+  "permission.policy.label": "Conversation filesystem policy",
+  "permission.policy.placeholder": "RU=S* CD=D*",
+  "permission.policy.scope": "=1 one request · =S conversation and descendants across restarts · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged.",
+  "permission.policy.apply": "Apply filesystem policy",
+  "permission.policy.mcpSeparate": "MCP selection belongs to tool configuration, not a directory permission grant.",
   "experiment.voiceCalls": "Voice calls",
   "voice.call": "Call",
   "voice.mute": "Mute",

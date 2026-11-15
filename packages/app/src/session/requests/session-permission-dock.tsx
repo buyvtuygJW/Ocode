@@ -1,6 +1,8 @@
 import { Option, Schema } from "effect"
 import { For, Show } from "solid-js"
-import type { PermissionRequest } from "@opencode/client/promise"
+import { createStore } from "solid-js/store"
+import { parsePermissionShorthand } from "@opencode/schema/permission-shorthand"
+import type { Permission } from "@opencode/schema/permission"
 import { Button } from "@opencode/ui/button"
 import { DockPrompt } from "@opencode/session-ui/dock-prompt"
 import { Icon } from "@opencode/ui/icon"
@@ -11,11 +13,25 @@ const decodeToolInput = Schema.decodeUnknownOption(Schema.Record(Schema.String, 
 const isString = Schema.is(Schema.String)
 
 export function SessionPermissionDock(props: {
-  request: PermissionRequest
+  request: Permission.Request
   responding: boolean
-  onDecide: (response: "once" | "always" | "reject") => void
+  onDecide: (response: Permission.Reply) => void
 }) {
   const language = useLanguage()
+  const [policy, setPolicy] = createStore({ text: "", error: "" })
+  const applyPolicy = () => {
+    try {
+      const parsed = parsePermissionShorthand(policy.text)
+      if (parsed.mcp !== undefined) {
+        setPolicy("error", language.t("permission.policy.mcpSeparate"))
+        return
+      }
+      setPolicy("error", "")
+      props.onDecide({ scope: "session", policy: policy.text })
+    } catch (error) {
+      setPolicy("error", error instanceof Error ? error.message : String(error))
+    }
+  }
 
   const toolDescription = () => {
     const key = `settings.permissions.tool.${props.request.action}.description`
@@ -74,6 +90,26 @@ export function SessionPermissionDock(props: {
         </Show>
       </div>
 
+      <Show when={(props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length}>
+        <label data-slot="permission-policy">
+          <span>{language.t("permission.policy.label")}</span>
+          <For each={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}>
+            {(directory) => <code>{directory}</code>}
+          </For>
+          <input
+            value={policy.text}
+            placeholder={language.t("permission.policy.placeholder")}
+            disabled={props.responding}
+            onInput={(event) => setPolicy("text", event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === "Enter") applyPolicy() }}
+          />
+          <span>{language.t("permission.policy.scope")}</span>
+          <Show when={policy.error}><span role="alert">{policy.error}</span></Show>
+        </label>
+        <Button variant="neutral" disabled={props.responding} onClick={applyPolicy}>
+          {language.t("permission.policy.apply")}
+        </Button>
+      </Show>
       <Show when={props.request.message}>
         {(message) => (
           <div data-slot="permission-row">

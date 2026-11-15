@@ -122,10 +122,15 @@ export const Plugin = {
           kind: "directory",
         }),
       )
-      yield* access.authorizeExternal([target, ...directories], context)
+      yield* permission.assertNotDenied({
+        action: name, resources: [invocation.command], metadata: { filesystemEffects: "unknown" },
+        ...Permission.invocation(context),
+      })
+      yield* access.authorizeExternal([target, ...directories], context, { filesystemEffects: "unknown" })
       if (parsed.commands.length > 0)
         yield* permission.assert({
           action: name,
+          metadata: { filesystemEffects: "unknown" },
           resources: parsed.commands.map((command) => command.resource),
           save: parsed.commands.map((command) => command.save),
           ...Permission.invocation(context),

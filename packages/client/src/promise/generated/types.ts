@@ -290,6 +290,8 @@ export type ProjectTime = { created: number; updated: number; active: number; ar
 
 export type PermissionID = string
 
+export type PermissionOperation = "read" | "create" | "update" | "delete"
+
 export type PermissionSource = { type: "tool"; messageID: string; id: string }
 
 export type PermissionSavedID = string
@@ -298,7 +300,7 @@ export type CommandInfo = { name: string; description?: string }
 
 export type RpcOutput = { output?: any }
 
-export type PermissionReply = "once" | "always" | "reject"
+export type PermissionCompactPolicy = { scope: "session"; policy: string }
 
 export type PtyID = string
 
@@ -795,11 +797,32 @@ export type Project = {
   sandboxes: Array<string>
 }
 
+export type PermissionSessionPolicy = {
+  scope: "session"
+  read: "allow" | "ask" | "deny"
+  create: "allow" | "ask" | "deny"
+  update: "allow" | "ask" | "deny"
+  delete: "allow" | "ask" | "deny"
+  recursive?: Array<PermissionOperation>
+}
+
+export type PermissionSelection = {
+  operation: PermissionOperation
+  effect: "allow" | "deny" | "ask"
+  lifetime: "once" | "session"
+  recursive: boolean
+  scope: "selected" | "parent-list"
+}
+
 export type PermissionRequest = {
   id: PermissionID
   sessionID: SessionID
   action: string
   resources: Array<string>
+  operations?: Array<PermissionOperation>
+  paths?: Array<string>
+  directories?: Array<string>
+  access?: "content" | "listing"
   save?: Array<string>
   metadata?: { [x: string]: JsonValue }
   source?: PermissionSource
@@ -1809,20 +1832,15 @@ export type PermissionAsked = {
     sessionID: SessionID
     action: string
     resources: Array<string>
+    operations?: Array<PermissionOperation>
+    paths?: Array<string>
+    directories?: Array<string>
+    access?: "content" | "listing"
     save?: Array<string>
     metadata?: { [x: string]: any }
     source?: PermissionSource
     message?: string
   }
-}
-
-export type PermissionReplied = {
-  id: EventID
-  created: number
-  metadata?: { [x: string]: any }
-  type: "permission.replied"
-  location?: LocationRef
-  data: { sessionID: SessionID; requestID: PermissionID; reply: PermissionReply }
 }
 
 export type PluginUpdated = {
@@ -2167,6 +2185,8 @@ export type VoiceSessionResponse = { data: { transport: VoiceTransport } }
 export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal
 
 export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
+
+export type PermissionStructuredPolicy = { scope: "session"; rules: Array<PermissionSelection> }
 
 export type PtyCreated = {
   id: EventID
@@ -2544,6 +2564,7 @@ export type ConfigEntry =
           }
         }
         experimental?: {
+          mcp_selection?: string
           portable_shell_scanner?: boolean
           all_flags?: boolean
           todo?: boolean
@@ -2642,6 +2663,19 @@ export type CredentialEntry = {
   value: CredentialValue
 }
 
+export type PermissionReply =
+  | "once"
+  | "always"
+  | "reject"
+  | "session_read"
+  | "session_create"
+  | "session_update"
+  | "session_delete"
+  | "session_crud"
+  | PermissionSessionPolicy
+  | PermissionCompactPolicy
+  | PermissionStructuredPolicy
+
 export type FormFields1 = [FormField1, ...Array<FormField1>]
 
 export type ScheduleInfo = {
@@ -2736,6 +2770,15 @@ export type SessionMessageAssistantContentEncoded =
   | SessionMessageAssistantTool1
 
 export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
+
+export type PermissionReplied = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "permission.replied"
+  location?: LocationRef
+  data: { sessionID: SessionID; requestID: PermissionID; reply: PermissionReply }
+}
 
 export type FormInfo1 = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields1 }
 
@@ -4245,6 +4288,10 @@ export type PermissionCreateInput = {
   readonly id?: string | null | undefined
   readonly action: string
   readonly resources: ReadonlyArray<string>
+  readonly operations?: ReadonlyArray<"read" | "create" | "update" | "delete"> | undefined
+  readonly paths?: ReadonlyArray<string> | undefined
+  readonly directories?: ReadonlyArray<string> | undefined
+  readonly access?: "content" | "listing" | undefined
   readonly save?: ReadonlyArray<string> | undefined
   readonly metadata?: { readonly [x: string]: JsonValue } | undefined
   readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | undefined
@@ -4264,8 +4311,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
 export type PermissionReplyInput = {
   readonly sessionID: string
   readonly requestID: string
-  readonly decision: "once" | "always" | "reject"
-  readonly message?: string | undefined
+  readonly decision:
+    | "once"
+    | "always"
+    | "reject"
+    | "session_read"
+    | "session_create"
+    | "session_update"
+    | "session_delete"
+    | "session_crud"
+    | {
+        readonly scope: "session"
+        readonly read: "allow" | "ask" | "deny"
+        readonly create: "allow" | "ask" | "deny"
+        readonly update: "allow" | "ask" | "deny"
+        readonly delete: "allow" | "ask" | "deny"
+        readonly recursive?: ReadonlyArray<"read" | "create" | "update" | "delete">
+      }
+    | { readonly scope: "session"; readonly policy: string }
+    | {
+        readonly scope: "session"
+        readonly rules: ReadonlyArray<{
+          readonly operation: "read" | "create" | "update" | "delete"
+          readonly effect: "allow" | "deny" | "ask"
+          readonly lifetime: "once" | "session"
+          readonly recursive: boolean
+          readonly scope: "selected" | "parent-list"
+        }>
+      }
+  readonly message?: string | null | undefined
 }
 
 export type PermissionReplyOutput = void

@@ -98,6 +98,71 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
 }
 
 describe("Permission", () => {
+  it.effect("session CRUD settles concurrent family reads and denies C/D without project-global persistence or widening", () =>
+    Effect.gen(function* () {
+      const parent = Session.ID.make("ses_test")
+      const child = Session.ID.make("ses_crud_child")
+      const unrelated = Session.ID.make("ses_crud_unrelated")
+      yield* setup([], parent)
+      yield* setup([], child)
+      yield* setup([], unrelated)
+      const { db } = yield* Database.Service
+      yield* db.update(SessionTable).set({ parent_id: parent }).where(eq(SessionTable.id, child)).run().pipe(Effect.orDie)
+      const first = yield* waitForRequest({
+        action: "external_directory", operations: ["read"],
+        paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"], save: ["D:/Data/*"],
+      })
+      const second = yield* waitForRequest({
+        id: Permission.ID.create(), sessionID: child, action: "read", operations: ["read"],
+        paths: ["d:\\data\\project\\deep\\file"], resources: ["d:/data/project/deep/file"],
+      })
+      const other = yield* waitForRequest({
+        id: Permission.ID.create(), sessionID: unrelated, action: "read", operations: ["read"],
+        paths: ["D:/Data/Project/file"], resources: ["D:/Data/Project/file"],
+      })
+      yield* first.service.reply({
+        requestID: first.request.id, reply: { scope: "session", policy: "RU=S* CD=D*" },
+      })
+      yield* Fiber.join(first.fiber)
+      yield* Fiber.join(second.fiber)
+      expect((yield* first.service.list()).map((request) => request.id)).toEqual([other.request.id])
+      for (const operation of ["read", "update", "create", "delete"] as const) {
+        const result = yield* first.service.ask(assertion({
+          id: Permission.ID.create(), sessionID: child, action: operation === "read" ? "read" : "edit",
+          operations: [operation], paths: ["D:/Data/Project/deep/file"],
+          resources: ["D:/Data/Project/deep/file"],
+        }))
+        expect(result.effect).toBe(operation === "read" || operation === "update" ? "allow" : "deny")
+      }
+      expect(yield* first.service.allows(assertion({
+        operations: ["read"], paths: ["D:/Data/Project-other/file"], resources: ["D:/Data/Project-other/file"],
+      }))).toBe(false)
+      expect(yield* first.service.allows(assertion({
+        action: "shell", operations: ["read"], paths: ["D:/Data/Project/file"], resources: ["cat file"],
+      }))).toBe(false)
+      const saved = yield* PermissionSaved.Service
+      expect(yield* saved.list({ projectID: Project.ID.global })).toEqual([])
+      yield* first.service.reply({ requestID: other.request.id, reply: "once" })
+      yield* Fiber.join(other.fiber)
+    }),
+  )
+
+  it.effect("session read approvals never override later explicit agent denies", () =>
+    Effect.gen(function* () {
+      yield* setup([])
+      const first = yield* waitForRequest({
+        action: "external_directory", operations: ["read"],
+        paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
+      })
+      yield* first.service.reply({ requestID: first.request.id, reply: "session_read" })
+      yield* Fiber.join(first.fiber)
+      yield* setRules([{ action: "read", resource: "*", effect: "deny" }])
+      expect(yield* first.service.ask(assertion({
+        operations: ["read"], paths: ["D:/Data/Project/file"], resources: ["D:/Data/Project/file"],
+      }))).toMatchObject({ effect: "deny" })
+    }),
+  )
+
   it.effect("returns the evaluated effect and only queues prompts", () =>
     Effect.gen(function* () {
       yield* setup([{ action: "read", resource: "*", effect: "allow" }])

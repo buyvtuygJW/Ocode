@@ -6,6 +6,7 @@ import { ToolFailure } from "@opencode/ai/effect"
 import { FileDiff } from "@opencode/schema/file-diff"
 import { Effect, Result, Schema } from "effect"
 import { Bom } from "@opencode/util/bom"
+import path from "node:path"
 import { toolFailure } from "../runtime.js"
 import { Environment } from "../../environment/index.js"
 import { Formatter } from "../../formatter.js"
@@ -110,18 +111,28 @@ export const Plugin = {
               }
               const prepared: Prepared[] = []
               const updates = new Map<string, string | null>()
-              const resolveTarget = Effect.fnUntraced(function* (value: string) {
+              const needs: { target: FileAccess.Target; operation: Permission.Operation }[] = []
+              const resolveTarget = Effect.fnUntraced(function* (value: string, operation?: Permission.Operation) {
                 const target = yield* access.resolve({ path: value, kind: "file" })
+                const exists = updates.has(target.absolute) ? updates.get(target.absolute) !== null
+                  : yield* environment.files.stat(target.absolute).pipe(
+                    Effect.map(() => true),
+                    Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(false)),
+                  )
+                const actual = operation ?? (exists ? "update" : "create")
+                needs.push({ target, operation: actual })
                 if (!target.externalDirectory) return target
                 yield* access.authorizeExternal([target], context, {
                   filepath: target.absolute,
                   parentDir: target.externalDirectory.directory,
-                })
+                }, [actual])
                 return target
               })
               for (const hunk of hunks) {
                 yield* Effect.gen(function* () {
-                  const target = yield* resolveTarget(hunk.path)
+                  const target = yield* resolveTarget(hunk.path, hunk.type === "delete" ? "delete"
+                    : hunk.type === "update" ? (hunk.movePath && hunk.movePath !== hunk.path ? "delete" : "update")
+                    : undefined)
                   if (hunk.type === "add") {
                     const content =
                       hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`
@@ -208,9 +219,12 @@ export const Plugin = {
                 change.target,
                 ...(change.type === "update" && change.moveTarget ? [change.moveTarget] : []),
               ])
-              yield* permission.assert({
+              for (const need of needs) yield* permission.assert({
                 action: "edit",
-                resources: [...new Set(targets.map((target) => target.resource))],
+                resources: [need.target.resource],
+                operations: [need.operation],
+                paths: [need.target.absolute],
+                directories: [path.dirname(need.target.absolute)],
                 save: ["*"],
                 metadata: {
                   filepath: targets.map((target) => target.resource).join(", "),

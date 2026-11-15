@@ -1390,10 +1390,10 @@ index 0000000000000000000000000000000000000000..1a2df6d26176e114612993bcf26851f4
 +}
 diff --git a/packages/core/src/personalize/hooks.ts b/packages/core/src/personalize/hooks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9e0025b65220b87f18a016f4c1c144b294ad4898
+index 0000000000000000000000000000000000000000..1bb81e69e83dbabd99fadec58ba29d32ad3423ed
 --- /dev/null
 +++ b/packages/core/src/personalize/hooks.ts
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,27 @@
 +import { Context, Effect, Layer } from "effect"
 +import { canonicalMessages, copyWith } from "./content"
 +import { personalizeSystem } from "./model-request"
@@ -1402,7 +1402,8 @@ index 0000000000000000000000000000000000000000..9e0025b65220b87f18a016f4c1c144b2
 +  return { node: stock.node.mapLayer((layer) => Layer.effectContext(Effect.map(Layer.build(layer), (context) => {
 +    const original = Context.get(context, stock.Service)
 +    const trigger: typeof original.trigger = (domain, name, event) => Effect.suspend(() => {
-+      if (domain !== "session" || !["context", "compaction", "generate", "title"].includes(String(name))) {
++      // Do not alter upstream session naming without the user's explicit approval.
++      if (domain !== "session" || !["context", "compaction", "generate"].includes(String(name))) {
 +        return original.trigger(domain, name, event)
 +      }
 +      const before = event as unknown as { system?: unknown; messages?: unknown }
@@ -1414,12 +1415,6 @@ index 0000000000000000000000000000000000000000..9e0025b65220b87f18a016f4c1c144b2
 +          system: personalizeSystem(Array.isArray(value.system) ? value.system : system),
 +          messages: canonicalMessages(Array.isArray(value.messages) ? value.messages : messages),
 +        })
-+        if (name === "title" && typeof shaped.result !== "string") {
-+          const first = canonicalMessages(shaped.messages).find((message) => message.role === "user")
-+          const text = first?.content.filter((part) => part.type === "text").map((part) => part.text).join(" ") || "New session"
-+          const title = text.replace(/\s+/g, " ").trim()
-+          shaped.result = title.length > 50 ? title.slice(0, 50) + "…" : title
-+        }
 +        return shaped as typeof result
 +      }))
 +    })
@@ -3618,3 +3613,2598 @@ index 0000000000000000000000000000000000000000..dda10857d45708eee4773946ee25f828
 +}
 +
 +module.exports = { repairText, repairFile, runWithRepair, relative };
+diff --git a/packages/app/src/runtime/i18n/en.ts b/packages/app/src/runtime/i18n/en.ts
+index 43304addcb3b3b1e71b8a7b7210c8bb1e4e0b5af..2124e61ba52e64acc6fcf82f3c549b3e355b0067 100644
+--- a/packages/app/src/runtime/i18n/en.ts
++++ b/packages/app/src/runtime/i18n/en.ts
+@@ -1,6 +1,11 @@
+ import { DESKTOP_NATIVE_ENGLISH } from "./desktop-native"
+ 
+ export const dict = {
++  "permission.policy.label": "Conversation filesystem policy",
++  "permission.policy.placeholder": "RU=S* CD=D*",
++  "permission.policy.scope": "=1 one request · =S conversation and descendants across restarts · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged.",
++  "permission.policy.apply": "Apply filesystem policy",
++  "permission.policy.mcpSeparate": "MCP selection belongs to tool configuration, not a directory permission grant.",
+   "experiment.voiceCalls": "Voice calls",
+   "voice.call": "Call",
+   "voice.mute": "Mute",
+diff --git a/packages/app/src/session/requests/permission-machine.node.test.mjs b/packages/app/src/session/requests/permission-machine.node.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1a907103d28d3c39c566c9783b004a771ea5bf4
+--- /dev/null
++++ b/packages/app/src/session/requests/permission-machine.node.test.mjs
+@@ -0,0 +1,29 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import {
++  INITIAL_PERMISSION_REPLY_STATE,
++  transitionPermissionReply,
++  isPermissionReplied,
++  isPermissionResponding,
++} from "./permission-machine.ts"
++
++test("a valid parent-list/partial policy does not hide the still-actionable content request", () => {
++  const started = transitionPermissionReply(INITIAL_PERMISSION_REPLY_STATE, {
++    type: "decide", sessionID: "ses_test", decision: { scope: "session", policy: "R=-S" },
++  }).state
++  const applied = transitionPermissionReply(started, { type: "reply.succeeded", attempt: started.attempt }).state
++  assert.equal(isPermissionReplied(applied), false)
++  assert.equal(isPermissionResponding(applied), false)
++  const resolved = transitionPermissionReply(applied, { type: "resolved" }).state
++  assert.equal(isPermissionReplied(resolved), true)
++})
++
++test("invalid policy errors return the prompt to actionable state without losing the exact error", () => {
++  const started = transitionPermissionReply(INITIAL_PERMISSION_REPLY_STATE, {
++    type: "decide", sessionID: "ses_test", decision: { scope: "session", policy: "R=S* R=D*" },
++  }).state
++  const error = new Error("Duplicate filesystem operation R")
++  const failed = transitionPermissionReply(started, { type: "reply.failed", attempt: started.attempt, error })
++  assert.equal(isPermissionResponding(failed.state), false)
++  assert.equal(failed.effects.find((effect) => effect.type === "toast-failed").error, error)
++})
+diff --git a/packages/app/src/session/requests/permission-machine.ts b/packages/app/src/session/requests/permission-machine.ts
+index 3a9726624067620cbd97fae948f20eccfce40726..11da37389c0797c7206fade9df506758c74639a1 100644
+--- a/packages/app/src/session/requests/permission-machine.ts
++++ b/packages/app/src/session/requests/permission-machine.ts
+@@ -1,8 +1,10 @@
++import type { Permission } from "@opencode/schema/permission"
++
+ export const PERMISSION_REPLY_TIMEOUT_MS = 15_000
+ 
+ export const PERMISSION_REPLIED_LIMIT = 256
+ 
+-export type PermissionDecision = "once" | "always" | "reject"
++export type PermissionDecision = Permission.Reply
+ 
+ // One permission request's manual reply from the dock. `attempt` advances on each try, so a late failure or timeout
+ // from an earlier click cannot move a newer one. `replied` is terminal: an answered request never re-enables or
+@@ -71,15 +73,22 @@ export function transitionPermissionReply(
+     }
+   }
+ 
+-  if (state.status !== "responding") return unchanged(state)
+-
+   if (event.type === "resolved") return { state: { status: "replied" }, effects: ABORT }
+ 
++  if (state.status !== "responding") return unchanged(state)
++
+   if (event.type === "disposed") return { state: { status: "idle", attempt: state.attempt }, effects: ABORT }
+ 
+   if (event.attempt !== state.attempt) return unchanged(state)
+ 
+-  if (event.type === "reply.succeeded") return { state: { status: "replied" }, effects: ABORT }
++  if (event.type === "reply.succeeded") {
++    // A valid parent-list/partial policy can leave the original content request pending.
++    // Only the actual permission.replied event may close that request.
++    if (typeof state.decision === "object") return {
++      state: { status: "idle", attempt: state.attempt }, effects: ABORT,
++    }
++    return { state: { status: "replied" }, effects: ABORT }
++  }
+ 
+   return {
+     state: { status: "idle", attempt: state.attempt },
+diff --git a/packages/app/src/session/requests/session-permission-dock.tsx b/packages/app/src/session/requests/session-permission-dock.tsx
+index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..c263a3aafa6491c813c4f6c3fbac6277a3a4bba3 100644
+--- a/packages/app/src/session/requests/session-permission-dock.tsx
++++ b/packages/app/src/session/requests/session-permission-dock.tsx
+@@ -1,6 +1,8 @@
+ import { Option, Schema } from "effect"
+ import { For, Show } from "solid-js"
+-import type { PermissionRequest } from "@opencode/client/promise"
++import { createStore } from "solid-js/store"
++import { parsePermissionShorthand } from "@opencode/schema/permission-shorthand"
++import type { Permission } from "@opencode/schema/permission"
+ import { Button } from "@opencode/ui/button"
+ import { DockPrompt } from "@opencode/session-ui/dock-prompt"
+ import { Icon } from "@opencode/ui/icon"
+@@ -11,11 +13,25 @@ const decodeToolInput = Schema.decodeUnknownOption(Schema.Record(Schema.String,
+ const isString = Schema.is(Schema.String)
+ 
+ export function SessionPermissionDock(props: {
+-  request: PermissionRequest
++  request: Permission.Request
+   responding: boolean
+-  onDecide: (response: "once" | "always" | "reject") => void
++  onDecide: (response: Permission.Reply) => void
+ }) {
+   const language = useLanguage()
++  const [policy, setPolicy] = createStore({ text: "", error: "" })
++  const applyPolicy = () => {
++    try {
++      const parsed = parsePermissionShorthand(policy.text)
++      if (parsed.mcp !== undefined) {
++        setPolicy("error", language.t("permission.policy.mcpSeparate"))
++        return
++      }
++      setPolicy("error", "")
++      props.onDecide({ scope: "session", policy: policy.text })
++    } catch (error) {
++      setPolicy("error", error instanceof Error ? error.message : String(error))
++    }
++  }
+ 
+   const toolDescription = () => {
+     const key = `settings.permissions.tool.${props.request.action}.description`
+@@ -74,6 +90,26 @@ export function SessionPermissionDock(props: {
+         </Show>
+       </div>
+ 
++      <Show when={(props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length}>
++        <label data-slot="permission-policy">
++          <span>{language.t("permission.policy.label")}</span>
++          <For each={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}>
++            {(directory) => <code>{directory}</code>}
++          </For>
++          <input
++            value={policy.text}
++            placeholder={language.t("permission.policy.placeholder")}
++            disabled={props.responding}
++            onInput={(event) => setPolicy("text", event.currentTarget.value)}
++            onKeyDown={(event) => { if (event.key === "Enter") applyPolicy() }}
++          />
++          <span>{language.t("permission.policy.scope")}</span>
++          <Show when={policy.error}><span role="alert">{policy.error}</span></Show>
++        </label>
++        <Button variant="neutral" disabled={props.responding} onClick={applyPolicy}>
++          {language.t("permission.policy.apply")}
++        </Button>
++      </Show>
+       <Show when={props.request.message}>
+         {(message) => (
+           <div data-slot="permission-row">
+diff --git a/packages/client/src/effect/api/api.ts b/packages/client/src/effect/api/api.ts
+index f65ec052c2b3ac664cde9e5a7d3e65f9797de8a0..88a3e43f0f9869534c2e4450254abd02f78203e0 100644
+--- a/packages/client/src/effect/api/api.ts
++++ b/packages/client/src/effect/api/api.ts
+@@ -1944,6 +1944,10 @@ export type PermissionCreateInput = {
+   readonly id?: Permission.ID | undefined
+   readonly action: string
+   readonly resources: ReadonlyArray<string>
++  readonly operations?: ReadonlyArray<Permission.Operation> | undefined
++  readonly paths?: ReadonlyArray<string> | undefined
++  readonly directories?: ReadonlyArray<string> | undefined
++  readonly access?: "content" | "listing" | undefined
+   readonly save?: ReadonlyArray<string> | undefined
+   readonly metadata?: { readonly [x: string]: unknown } | undefined
+   readonly source?: Permission.Source | undefined
+diff --git a/packages/client/src/effect/generated/client.ts b/packages/client/src/effect/generated/client.ts
+index 2631efc70d2b0d98ecefbdd7fb22beb7c5e99958..c85fb80fdfcceab0361611cbb622e6d567a49af8 100644
+--- a/packages/client/src/effect/generated/client.ts
++++ b/packages/client/src/effect/generated/client.ts
+@@ -1307,6 +1307,10 @@ const EndpointPermissionCreate = (raw: RawClient["server.permission"]) => (input
+         id: input["id"],
+         action: input["action"],
+         resources: input["resources"],
++        operations: input["operations"],
++        paths: input["paths"],
++        directories: input["directories"],
++        access: input["access"],
+         save: input["save"],
+         metadata: input["metadata"],
+         source: input["source"],
+diff --git a/packages/client/src/promise/generated/client.ts b/packages/client/src/promise/generated/client.ts
+index cb1725def15f94dfd6e99681dfa4a49d7be1536c..0c206747bd91d63a0c97afb875bf3b5a27b6b25b 100644
+--- a/packages/client/src/promise/generated/client.ts
++++ b/packages/client/src/promise/generated/client.ts
+@@ -2150,6 +2150,10 @@ export function make(options: ClientOptions) {
+               id: input["id"],
+               action: input["action"],
+               resources: input["resources"],
++              operations: input["operations"],
++              paths: input["paths"],
++              directories: input["directories"],
++              access: input["access"],
+               save: input["save"],
+               metadata: input["metadata"],
+               source: input["source"],
+diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
+index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11b1345098 100644
+--- a/packages/client/src/promise/generated/types.ts
++++ b/packages/client/src/promise/generated/types.ts
+@@ -290,6 +290,8 @@ export type ProjectTime = { created: number; updated: number; active: number; ar
+ 
+ export type PermissionID = string
+ 
++export type PermissionOperation = "read" | "create" | "update" | "delete"
++
+ export type PermissionSource = { type: "tool"; messageID: string; id: string }
+ 
+ export type PermissionSavedID = string
+@@ -298,7 +300,7 @@ export type CommandInfo = { name: string; description?: string }
+ 
+ export type RpcOutput = { output?: any }
+ 
+-export type PermissionReply = "once" | "always" | "reject"
++export type PermissionCompactPolicy = { scope: "session"; policy: string }
+ 
+ export type PtyID = string
+ 
+@@ -805,11 +807,32 @@ export type Project = {
+   sandboxes: Array<string>
+ }
+ 
++export type PermissionSessionPolicy = {
++  scope: "session"
++  read: "allow" | "ask" | "deny"
++  create: "allow" | "ask" | "deny"
++  update: "allow" | "ask" | "deny"
++  delete: "allow" | "ask" | "deny"
++  recursive?: Array<PermissionOperation>
++}
++
++export type PermissionSelection = {
++  operation: PermissionOperation
++  effect: "allow" | "deny" | "ask"
++  lifetime: "once" | "session"
++  recursive: boolean
++  scope: "selected" | "parent-list"
++}
++
+ export type PermissionRequest = {
+   id: PermissionID
+   sessionID: SessionID
+   action: string
+   resources: Array<string>
++  operations?: Array<PermissionOperation>
++  paths?: Array<string>
++  directories?: Array<string>
++  access?: "content" | "listing"
+   save?: Array<string>
+   metadata?: { [x: string]: JsonValue }
+   source?: PermissionSource
+@@ -1832,6 +1855,10 @@ export type PermissionAsked = {
+     sessionID: SessionID
+     action: string
+     resources: Array<string>
++    operations?: Array<PermissionOperation>
++    paths?: Array<string>
++    directories?: Array<string>
++    access?: "content" | "listing"
+     save?: Array<string>
+     metadata?: { [x: string]: any }
+     source?: PermissionSource
+@@ -1839,15 +1866,6 @@ export type PermissionAsked = {
+   }
+ }
+ 
+-export type PermissionReplied = {
+-  id: EventID
+-  created: number
+-  metadata?: { [x: string]: any }
+-  type: "permission.replied"
+-  location?: LocationRef
+-  data: { sessionID: SessionID; requestID: PermissionID; reply: PermissionReply }
+-}
+-
+ export type PluginUpdated = {
+   id: EventID
+   created: number
+@@ -2209,6 +2227,8 @@ export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExtern
+ 
+ export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
+ 
++export type PermissionStructuredPolicy = { scope: "session"; rules: Array<PermissionSelection> }
++
+ export type PtyCreated = {
+   id: EventID
+   created: number
+@@ -2585,6 +2605,7 @@ export type ConfigEntry =
+           }
+         }
+         experimental?: {
++          mcp_selection?: string
+           portable_shell_scanner?: boolean
+           codemode_vm?: boolean
+           all_flags?: boolean
+@@ -2685,6 +2706,19 @@ export type CredentialEntry = {
+   value: CredentialValue
+ }
+ 
++export type PermissionReply =
++  | "once"
++  | "always"
++  | "reject"
++  | "session_read"
++  | "session_create"
++  | "session_update"
++  | "session_delete"
++  | "session_crud"
++  | PermissionSessionPolicy
++  | PermissionCompactPolicy
++  | PermissionStructuredPolicy
++
+ export type FormFields1 = [FormField1, ...Array<FormField1>]
+ 
+ export type ScheduleInfo = {
+@@ -2780,6 +2814,15 @@ export type SessionMessageAssistantContentEncoded =
+ 
+ export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
+ 
++export type PermissionReplied = {
++  id: EventID
++  created: number
++  metadata?: { [x: string]: any }
++  type: "permission.replied"
++  location?: LocationRef
++  data: { sessionID: SessionID; requestID: PermissionID; reply: PermissionReply }
++}
++
+ export type FormInfo1 = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields1 }
+ 
+ export type SessionMessageInfo =
+@@ -4296,6 +4339,10 @@ export type PermissionCreateInput = {
+   readonly id?: string | null | undefined
+   readonly action: string
+   readonly resources: ReadonlyArray<string>
++  readonly operations?: ReadonlyArray<"read" | "create" | "update" | "delete"> | undefined
++  readonly paths?: ReadonlyArray<string> | undefined
++  readonly directories?: ReadonlyArray<string> | undefined
++  readonly access?: "content" | "listing" | undefined
+   readonly save?: ReadonlyArray<string> | undefined
+   readonly metadata?: { readonly [x: string]: JsonValue } | undefined
+   readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | undefined
+@@ -4315,8 +4362,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
+ export type PermissionReplyInput = {
+   readonly sessionID: string
+   readonly requestID: string
+-  readonly decision: "once" | "always" | "reject"
+-  readonly message?: string | undefined
++  readonly decision:
++    | "once"
++    | "always"
++    | "reject"
++    | "session_read"
++    | "session_create"
++    | "session_update"
++    | "session_delete"
++    | "session_crud"
++    | {
++        readonly scope: "session"
++        readonly read: "allow" | "ask" | "deny"
++        readonly create: "allow" | "ask" | "deny"
++        readonly update: "allow" | "ask" | "deny"
++        readonly delete: "allow" | "ask" | "deny"
++        readonly recursive?: ReadonlyArray<"read" | "create" | "update" | "delete">
++      }
++    | { readonly scope: "session"; readonly policy: string }
++    | {
++        readonly scope: "session"
++        readonly rules: ReadonlyArray<{
++          readonly operation: "read" | "create" | "update" | "delete"
++          readonly effect: "allow" | "deny" | "ask"
++          readonly lifetime: "once" | "session"
++          readonly recursive: boolean
++          readonly scope: "selected" | "parent-list"
++        }>
++      }
++  readonly message?: string | null | undefined
+ }
+ 
+ export type PermissionReplyOutput = void
+diff --git a/packages/core/src/config/plugin/mcp.ts b/packages/core/src/config/plugin/mcp.ts
+index 8806276f3527ba23970938caffea4586a6e3266b..69b8b3caa7e401871ad4b3fd04a1b10089ff67e4 100644
+--- a/packages/core/src/config/plugin/mcp.ts
++++ b/packages/core/src/config/plugin/mcp.ts
+@@ -3,6 +3,7 @@ export * as ConfigMcpPlugin from "./mcp.js"
+ import { define } from "@opencode/plugin/effect/plugin"
+ import { Document, type Entry } from "@opencode/schema/config"
+ import type { ServerConfig } from "@opencode/schema/mcp"
++import { compilePermissionShorthand, PermissionShorthandError } from "@opencode/schema/permission-shorthand"
+ import { Effect, Stream } from "effect"
+ import { Config } from "../../config.js"
+ import { Mcp } from "../../mcp/index.js"
+@@ -49,8 +50,19 @@ export const register = Effect.fn("ConfigMCPPlugin.register")(function* (
+         servers.set(name, server)
+       }
+     }
+-    for (const [name, server] of servers) {
+-      if (editor.get(name)) continue
++    const selection = documents.findLast((document) => document.info.experimental?.mcp_selection !== undefined)
++      ?.info.experimental?.mcp_selection
++    const compiled = selection === undefined ? undefined : compilePermissionShorthand(selection, Object.fromEntries(servers))
++    if (compiled && (compiled.decisions.filesystem.length || compiled.decisions.mcp === undefined))
++      throw new PermissionShorthandError("MCP selection accepts only MCP:=names; filesystem rules require a session permission reply", selection!)
++    // Validate the entire selection before mutating the editor. Existing plugin
++    // definitions retain their settings, with only configured availability changed.
++    for (const [name, server] of Object.entries(compiled?.mcpSettings ?? Object.fromEntries(servers))) {
++      const current = editor.get(name)
++      if (current) {
++        if (compiled) editor.set(name, { ...current, disabled: server.disabled })
++        continue
++      }
+       editor.set(name, { ...server, timeout: { ...timeout, ...server.timeout } })
+     }
+   })
+diff --git a/packages/core/src/file-access.ts b/packages/core/src/file-access.ts
+index 50c1cc729bf701ffc89b54aaccaa9dc759835a6f..283cf3ba03ec07dbac7b5b73f717918f432b39c4 100644
+--- a/packages/core/src/file-access.ts
++++ b/packages/core/src/file-access.ts
+@@ -53,6 +53,8 @@ export interface Interface {
+     targets: readonly Target[],
+     context: Invocation,
+     metadata?: Permission.AssertInput["metadata"],
++    operations?: readonly Permission.Operation[],
++    access?: "content" | "listing",
+   ) => Effect.Effect<void, Permission.Error | SessionErrors.NotFoundError>
+   /** Resolve a read target and obtain external-directory approval before read approval. */
+   readonly authorizeRead: (
+@@ -121,6 +123,8 @@ const layer = Layer.effect(
+       targets: readonly Target[],
+       context: Invocation,
+       metadata?: Permission.AssertInput["metadata"],
++      operations?: readonly Permission.Operation[],
++      access?: "content" | "listing",
+     ) {
+       const external = Array.dedupeWith(
+         targets.flatMap((target) => (target.externalDirectory ? [target.externalDirectory] : [])),
+@@ -130,6 +134,10 @@ const layer = Layer.effect(
+       yield* permission.assert({
+         action: "external_directory",
+         resources: external.map((item) => item.resource),
++        operations,
++        access,
++        paths: targets.filter((target) => target.externalDirectory).map((target) => target.absolute),
++        directories: external.map((item) => item.directory),
+         save: external.map((item) => item.save),
+         ...(metadata === undefined ? {} : { metadata }),
+         ...Permission.invocation(context),
+@@ -142,12 +150,20 @@ const layer = Layer.effect(
+       options?: ReadOptions,
+     ) {
+       const target = yield* resolve({ path: file, kind: options ? "file" : undefined })
++      const stat = yield* files.stat(target.absolute).pipe(
++        Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(undefined)),
++      )
++      const access = stat?.type === "directory" ? "listing" : "content"
+       const sibling = options && path.dirname(target.absolute) === path.dirname(options.siblingOf.absolute)
+ 
+       // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
+-      if (!sibling) yield* authorizeExternal([target], context)
++      if (!sibling) yield* authorizeExternal([target], context, undefined, ["read"], access)
+       yield* permission.assert({
+         action: "read",
++        operations: ["read"],
++        access,
++        paths: [target.absolute],
++        directories: [access === "listing" ? target.absolute : path.dirname(target.absolute)],
+         resources: [target.resource],
+         save: ["*"],
+         ...Permission.invocation(context),
+diff --git a/packages/core/src/file-write.ts b/packages/core/src/file-write.ts
+index 2afb8d3b85df2f3652feaed1de4c7a4ce3268c44..3e241040c56e1b5533813e57ade29f456ee7baaa 100644
+--- a/packages/core/src/file-write.ts
++++ b/packages/core/src/file-write.ts
+@@ -3,6 +3,7 @@ export * as FileWrite from "./file-write.js"
+ import { makeLocationNode } from "@opencode/util/effect/app-node"
+ import type { FileDiff } from "@opencode/schema/file-diff"
+ import { Bom } from "@opencode/util/bom"
++import path from "node:path"
+ import { Context, Effect, Layer } from "effect"
+ import { Environment } from "./environment/index.js"
+ import { FileAccess } from "./file-access.js"
+@@ -33,7 +34,7 @@ export interface Interface {
+     target: FileAccess.Target,
+     context: FileAccess.Invocation,
+     preview?: FileDiff.Info,
+-  ) => Effect.Effect<void, Permission.Error | SessionErrors.NotFoundError>
++  ) => Effect.Effect<void, Environment.Failed | Permission.Error | SessionErrors.NotFoundError>
+   /** Write approved text, keeping an existing UTF-8 BOM, then format the file. */
+   readonly commit: (
+     target: FileAccess.Target,
+@@ -58,11 +59,17 @@ const layer = Layer.effect(
+     const environment = yield* Environment.Service
+     const fileMutation = yield* FileMutation.Service
+     const formatter = yield* Formatter.Service
++    const externalApproved = new WeakMap<FileAccess.Target, Permission.Operation>()
+     const permission = yield* Permission.Service
+ 
+     const target = Effect.fn("FileWrite.target")(function* (file: string, context: FileAccess.Invocation) {
+       const target = yield* access.resolve({ path: file, kind: "file" })
+-      yield* access.authorizeExternal([target], context)
++      const exists = yield* environment.files.stat(target.absolute).pipe(
++        Effect.map(() => true),
++        Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(false)),
++      )
++      yield* access.authorizeExternal([target], context, undefined, [exists ? "update" : "create"])
++      externalApproved.set(target, exists ? "update" : "create")
+       return target
+     })
+ 
+@@ -71,8 +78,18 @@ const layer = Layer.effect(
+       context: FileAccess.Invocation,
+       preview?: FileDiff.Info,
+     ) {
++      const exists = yield* environment.files.stat(target.absolute).pipe(
++        Effect.map(() => true),
++        Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(false)),
++      )
++      const operations: readonly Permission.Operation[] = [exists ? "update" : "create"]
++      if (externalApproved.get(target) !== operations[0])
++        yield* access.authorizeExternal([target], context, undefined, operations)
+       yield* permission.assert({
+         action: "edit",
++        operations,
++        paths: [target.absolute],
++        directories: [target.externalDirectory?.directory ?? path.dirname(target.absolute)],
+         resources: [target.resource],
+         save: ["*"],
+         metadata: preview ? { files: [preview] } : undefined,
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+index b78a674d27777f5cc71f53cf0213af679dee3bd8..5fe66603c5e65f211bc5adf54190e673a3f1d8b8 100644
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -10,13 +10,22 @@ import { Agent } from "./agent.js"
+ import { SessionErrors } from "./session/error.js"
+ import { SessionSchema } from "./session/schema.js"
+ import { SessionStore } from "./session/store.js"
++import { SessionProjector } from "./session/projector.js"
+ import { Wildcard } from "./util/wildcard.js"
+ import { PermissionSaved } from "./permission/saved.js"
+ import { PluginHooks } from "./plugin/hooks.js"
++import { SessionGrant } from "./permission/session-grant.js"
++import { eq } from "drizzle-orm"
++import { Database } from "./database/database.js"
++import { EventSequenceTable } from "./event/sql.js"
++import { SessionEvent } from "@opencode/schema/session-event"
++
++class PermissionSnapshotChanged extends Error {}
+ 
+ const PermissionEffect = Permission.Effect
+ export { PermissionEffect as Effect }
+-export { Rule, Ruleset } from "@opencode/schema/permission"
++export { Rule, Ruleset, Operation, SessionPolicy, CompactPolicy } from "@opencode/schema/permission"
++export { InvalidPolicyError } from "@opencode/schema/permission"
+ const missingAgentPermissions: Permission.Ruleset = [{ action: "*", resource: "*", effect: "deny" }]
+ 
+ export const ID = Permission.ID
+@@ -115,7 +124,7 @@ export interface Interface {
+   readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
+   /** True only when the rules already allow the request; never asks the user. */
+   readonly allows: (input: AssertInput) => Effect.Effect<boolean, SessionErrors.NotFoundError>
+-  readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
++  readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError | SessionErrors.NotFoundError | Permission.InvalidPolicyError>
+   readonly get: (id: ID) => Effect.Effect<Request | undefined>
+   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
+   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
+@@ -136,9 +145,11 @@ const layer = Layer.effect(
+     const location = yield* Location.Service
+     const agents = yield* Agent.Service
+     const sessions = yield* SessionStore.Service
++    const { db } = yield* Database.Service
+     const saved = yield* PermissionSaved.Service
+     const hooks = yield* PluginHooks.Service
+     const pending = new Map<ID, Pending>()
++    const onceListings: { sessionID: SessionSchema.ID; grant: SessionGrant.Grant }[] = []
+     let closed = false
+ 
+     const close = Effect.gen(function* () {
+@@ -153,6 +164,7 @@ const layer = Layer.effect(
+           .pipe(Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError()))),
+       )
+       pending.clear()
++      onceListings.length = 0
+     }).pipe(Effect.uninterruptible)
+     yield* Effect.addFinalizer(() => close)
+ 
+@@ -170,7 +182,74 @@ const layer = Layer.effect(
+       const session = yield* sessions.get(sessionID)
+       if (!session) return yield* new SessionErrors.NotFoundError({ sessionID })
+       const agent = yield* agents.resolve(agentID ?? session.agent)
+-      return merge(agent?.permissions ?? missingAgentPermissions, session.permissions ?? [])
++      return merge(agent?.permissions ?? missingAgentPermissions,
++        (session.permissions ?? []).filter((rule) => rule.action !== SessionGrant.action))
++    })
++
++    const family = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
++      let id = sessionID
++      const seen = new Set<SessionSchema.ID>()
++      while (!seen.has(id)) {
++        seen.add(id)
++        const session = yield* sessions.get(id)
++        if (!session) return yield* new SessionErrors.NotFoundError({ sessionID: id })
++        if (!session.parentID) return id
++        id = session.parentID
++      }
++      return yield* new SessionErrors.NotFoundError({ sessionID })
++    })
++
++    const sessionGrants = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
++      const root = yield* family(sessionID)
++      const session = yield* sessions.get(root)
++      return yield* Effect.sync(() => {
++        try { return SessionGrant.decode(session?.permissions ?? []) }
++        catch { return undefined }
++      })
++    })
++
++    const persist = Effect.fnUntraced(function* (root: SessionSchema.ID, additions: readonly SessionGrant.Grant[]) {
++      if (!additions.length) return
++      while (true) {
++        // Read the projection and its aggregate sequence in the same database snapshot.
++        // Release that transaction before publishing: Bus takes its aggregate lock before
++        // its own immediate transaction, so publishing inside this transaction could deadlock.
++        const snapshot = yield* db.transaction(
++          (tx) => Effect.gen(function* () {
++            const session = yield* sessions.get(root)
++            const sequence = yield* tx.select({ seq: EventSequenceTable.seq })
++              .from(EventSequenceTable)
++              .where(eq(EventSequenceTable.aggregate_id, root))
++              .get()
++            return { session, seq: sequence?.seq ?? -1 }
++          }),
++          { behavior: "immediate" },
++        ).pipe(Effect.orDie)
++        const session = snapshot.session
++        if (!session) return yield* new SessionErrors.NotFoundError({ sessionID: root })
++        const previous = session.permissions
++        const permissions = [...(previous ?? []).filter((rule) => {
++          if (rule.action !== SessionGrant.action) return true
++          const old = SessionGrant.decode([rule])[0]
++          if (!old) return true
++          return !additions.some((grant) => SessionGrant.contains(grant.directory, old.directory) &&
++            SessionGrant.contains(old.directory, grant.directory) &&
++            grant.operation === old.operation && grant.scope === old.scope)
++        }), ...additions.map(SessionGrant.encode)]
++        // The same durable event as Session.setPermissions. Bus runs commit after the
++        // projector and before recording/dispatching the event, all in one transaction.
++        // A concurrent event invalidates this snapshot; throwing rolls the projector
++        // back too, then retries the merge without overwriting any intervening fields.
++        const committed = yield* bus.publish(SessionEvent.Permissions, { sessionID: root, permissions }, {
++          commit: (seq) => seq === snapshot.seq + 1 ? Effect.void : Effect.die(new PermissionSnapshotChanged()),
++        }).pipe(
++          Effect.as(true),
++          Effect.catchDefect((defect) => defect instanceof PermissionSnapshotChanged
++            ? Effect.succeed(false)
++            : Effect.die(defect)),
++        )
++        if (committed) return
++      }
+     })
+ 
+     function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
+@@ -181,12 +260,24 @@ const layer = Layer.effect(
+       return rules.filter((rule) => Wildcard.match(input.action, rule.action))
+     }
+ 
+-    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
++    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, consume = false) {
+       const rules = yield* configured(input.sessionID, input.agent)
+       if (denied(input, rules)) return { effect: "deny" as const, rules }
++      const grants = yield* sessionGrants(input.sessionID)
++      if (!grants) return { effect: "deny" as const, rules, message: "Invalid stored conversation filesystem policy; revoke it in session permissions." }
++      if (SessionGrant.unknownEffectsDenied(grants, input))
++        return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
++      const decision = SessionGrant.decision(grants, input)
++      if (decision === "deny") return {
++        effect: "deny" as const, rules,
++        message: `Conversation filesystem policy denies ${input.operations?.join("/")} at ${input.paths?.join(", ")}.`,
++      }
++      const listing = onceListings.findIndex((item) => item.sessionID === input.sessionID &&
++        SessionGrant.decision([item.grant], input) === "allow")
++      const entitlement = onceListings[listing]
+       const all = [...rules, ...(yield* savedRules())]
+       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+-      const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
++      const effect: Permission.Effect = decision === "ask" ? "ask" : decision === "allow" || listing !== -1 ? "allow" : effects.includes("ask") ? "ask" : "allow"
+       const event = yield* hooks.trigger("permission", "evaluate", {
+         sessionID: input.sessionID,
+         agent: input.agent,
+@@ -197,6 +288,11 @@ const layer = Layer.effect(
+         effect,
+       })
+       const unattended = yield* Unattended
++      if (consume && event.effect === "allow" && decision !== "allow" && entitlement && input.action !== "external_directory") {
++        const index = onceListings.indexOf(entitlement)
++        if (index === -1) return { effect: "ask" as const, rules: all }
++        onceListings.splice(index, 1)
++      }
+       if (event.effect !== "ask" || unattended === undefined)
+         return { effect: event.effect, message: event.message, rules: all }
+       const settled = [...all, ...unattended]
+@@ -215,6 +311,10 @@ const layer = Layer.effect(
+         sessionID: input.sessionID,
+         action: input.action,
+         resources: input.resources,
++        operations: input.operations,
++        paths: input.paths,
++        directories: input.directories,
++        access: input.access,
+         save: input.save,
+         // Tools copy optional inputs straight into metadata; undefined values are not JSON and would
+         // fail the HttpApi response encoder when clients list pending requests.
+@@ -241,13 +341,32 @@ const layer = Layer.effect(
+           yield* bus
+             .publish(Permission.Event.Asked, request)
+             .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
++          // Register first, then recheck: a reply racing the initial evaluation either sees this
++          // pending request in its sweep, or this check sees its new policy.
++          const result = yield* evaluateInput({ ...request, agent }, true)
++          if (result.effect !== "ask") {
++            pending.delete(request.id)
++            yield* bus.publish(Permission.Event.Replied, {
++              sessionID: request.sessionID,
++              requestID: request.id,
++              reply: result.effect === "allow" ? "once" : "reject",
++            })
++            if (result.effect === "allow") yield* Deferred.succeed(deferred, undefined)
++            else yield* Deferred.fail(deferred, new DeclinedError())
++          }
+           return item
+-        }),
++        }).pipe(
++          Effect.onError(() =>
++            Effect.sync(() => {
++              if (pending.get(request.id)?.request === request) pending.delete(request.id)
++            }),
++          ),
++        ),
+       )
+ 
+     const ask = Effect.fn("Permission.ask")(function* (input: AssertInput) {
+       if (closed) return { id: input.id ?? ID.create(), effect: "deny" as const }
+-      const result = yield* evaluateInput(input)
++      const result = yield* evaluateInput(input, true)
+       const value = request(input, result.message)
+       if (result.effect === "ask") yield* create(value, input.agent)
+       return { id: value.id, effect: result.effect }
+@@ -256,7 +375,7 @@ const layer = Layer.effect(
+     const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
+       Effect.gen(function* () {
+         if (closed) return yield* Effect.die(new DeclinedError())
+-        const result = yield* evaluateInput(input)
++        const result = yield* evaluateInput(input, true)
+         return yield* Effect.uninterruptibleMask((restore) =>
+           Effect.gen(function* () {
+             if (result.effect === "deny") {
+@@ -308,6 +427,54 @@ const layer = Layer.effect(
+         Effect.gen(function* () {
+           const existing = pending.get(input.requestID)
+           if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
++          const selections = yield* Effect.try({
++            try: () => SessionGrant.selections(input.reply),
++            catch: (error) => new Permission.InvalidPolicyError({ message: error instanceof Error ? error.message : String(error) }),
++          })
++          let policyRoot: SessionSchema.ID | undefined
++          if (selections) {
++            const directories = SessionGrant.directories(existing.request)
++            if (!directories) return yield* new Permission.InvalidPolicyError({
++              message: "Filesystem selections require an explicitly classified directory request; no save pattern can widen the selected scope.",
++            })
++            const additions = directories.flatMap((directory) => selections.map((selection) => ({ ...selection, directory })))
++            policyRoot = yield* family(existing.request.sessionID)
++            // Validate everything before changing storage, pending requests, or one-shot entitlements.
++            const stored = yield* sessionGrants(existing.request.sessionID)
++            if (!stored) return yield* new Permission.InvalidPolicyError({ message: "Invalid stored conversation filesystem policy; revoke it before applying another selection." })
++            yield* persist(policyRoot, additions.filter((grant) => grant.lifetime === "session"))
++            for (const grant of additions.filter((grant) => grant.lifetime === "once" && grant.scope === "parent-list"))
++              onceListings.push({ sessionID: existing.request.sessionID, grant })
++            const result = yield* evaluateInput({ ...existing.request, agent: existing.agent })
++            const once = SessionGrant.decision([
++              ...((yield* sessionGrants(existing.request.sessionID)) ?? []),
++              ...additions.filter((grant) => grant.lifetime === "once" && grant.scope === "selected"),
++            ], existing.request)
++            // An omitted operation or a parent-list-only selection cannot approve unrelated file contents.
++            if (result.effect !== "ask" || once === "allow" || once === "deny") {
++              const denied = result.effect === "deny" || once === "deny"
++              pending.delete(input.requestID)
++              yield* bus.publish(Permission.Event.Replied, {
++                sessionID: existing.request.sessionID, requestID: existing.request.id,
++                reply: denied ? "reject" : input.reply,
++              })
++              if (denied) yield* Deferred.fail(existing.deferred, new DeclinedError())
++              else yield* Deferred.succeed(existing.deferred, undefined)
++            }
++            for (const [id, item] of pending) {
++              if ((yield* family(item.request.sessionID)) !== policyRoot) continue
++              const decision = yield* evaluateInput({ ...item.request, agent: item.agent }, true)
++              if (decision.effect === "ask") continue
++              pending.delete(id)
++              yield* bus.publish(Permission.Event.Replied, {
++                sessionID: item.request.sessionID, requestID: item.request.id,
++                reply: decision.effect === "deny" ? "reject" : input.reply,
++              })
++              if (decision.effect === "deny") yield* Deferred.fail(item.deferred, new DeclinedError())
++              else yield* Deferred.succeed(item.deferred, undefined)
++            }
++            return
++          }
+           yield* bus.publish(Permission.Event.Replied, {
+             sessionID: existing.request.sessionID,
+             requestID: existing.request.id,
+@@ -352,11 +519,11 @@ const layer = Layer.effect(
+             const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
+               Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
+             )
+-            if (result?.effect !== "allow") continue
++            if (!result || result.effect !== "allow") continue
+             yield* bus.publish(Permission.Event.Replied, {
+               sessionID: item.request.sessionID,
+               requestID: item.request.id,
+-              reply: "always",
++              reply: input.reply,
+             })
+             yield* Deferred.succeed(item.deferred, undefined)
+             pending.delete(id)
+@@ -384,5 +551,5 @@ const layer = Layer.effect(
+ export const node = makeLocationNode({
+   service: Service,
+   layer,
+-  deps: [Bus.node, Location.node, Agent.node, SessionStore.node, PermissionSaved.node, PluginHooks.node],
++  deps: [Bus.node, Location.node, Agent.node, SessionStore.node, SessionProjector.node, PermissionSaved.node, PluginHooks.node, Database.node],
+ })
+diff --git a/packages/core/src/permission/session-grant.ts b/packages/core/src/permission/session-grant.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ced01618e50cb234b198d56f37d34a196c8a7287
+--- /dev/null
++++ b/packages/core/src/permission/session-grant.ts
+@@ -0,0 +1,131 @@
++export * as SessionGrant from "./session-grant.js"
++
++import path from "node:path"
++import type { Permission } from "@opencode/schema/permission"
++import { parsePermissionShorthand } from "@opencode/schema/permission-shorthand"
++
++/** Stored only in the root Session.permissions. Ordinary action matching must ignore this action. */
++export const action = "__opencode_filesystem_session_v1"
++export interface Grant extends Permission.Selection {
++  readonly directory: string
++}
++type Input = Pick<Permission.Request, "action" | "operations" | "paths" | "access" | "metadata">
++
++export function selections(reply: Permission.Reply): readonly Permission.Selection[] | undefined {
++  if (typeof reply === "object") {
++    if ("rules" in reply) return validate(reply.rules)
++    if ("policy" in reply) {
++      const parsed = parsePermissionShorthand(reply.policy)
++      if (parsed.mcp !== undefined) throw new Error("MCP selection belongs to tool configuration, not a directory permission grant.")
++      return validate(parsed.filesystem)
++    }
++    return validate((["read", "create", "update", "delete"] as const).flatMap((operation) =>
++      reply[operation] === "ask" ? [] : [{
++        operation, effect: reply[operation], lifetime: "session" as const,
++        recursive: reply.recursive?.includes(operation) ?? true, scope: "selected" as const,
++      }]))
++  }
++  const operations: readonly Permission.Operation[] | undefined = reply === "session_read" ? ["read"]
++    : reply === "session_create" ? ["create"] : reply === "session_update" ? ["update"]
++    : reply === "session_delete" ? ["delete"] : reply === "session_crud" ? ["read", "create", "update", "delete"] : undefined
++  return operations?.map((operation) => ({
++    operation, effect: "allow", lifetime: "session", recursive: true, scope: "selected",
++  }))
++}
++
++export function validate(rules: readonly Permission.Selection[]) {
++  if (!rules.length) throw new Error("Select at least one filesystem operation.")
++  const seen = new Set<Permission.Operation>()
++  for (const rule of rules) {
++    if (seen.has(rule.operation)) throw new Error(`Duplicate or contradictory policy for ${rule.operation}.`)
++    seen.add(rule.operation)
++    if (rule.scope === "parent-list" && (rule.operation !== "read" || rule.recursive || rule.effect !== "allow"))
++      throw new Error("Parent-list scope is valid only for nonrecursive read allows.")
++  }
++  return rules
++}
++
++function normalize(value: string) {
++  const windows = /^[a-z]:[\\/]/i.test(value) || value.startsWith("\\\\") || value.startsWith("//")
++  const normalized = (windows ? path.win32.normalize(value) : path.posix.normalize(value)).replaceAll("\\", "/")
++  return (windows ? normalized.toLowerCase() : normalized).replace(/\/+$/, "")
++}
++export function contains(directory: string, target: string) {
++  const root = normalize(directory)
++  const file = normalize(target)
++  return file === root || file.startsWith(`${root}/`)
++}
++export function parent(directory: string) {
++  return (/^[a-z]:[\\/]/i.test(directory) || directory.startsWith("\\\\")
++    ? path.win32.dirname(directory) : path.posix.dirname(directory)).replaceAll("\\", "/")
++}
++export function needs(input: Input) {
++  if (!["external_directory", "read", "edit", "glob", "grep", "list"].includes(input.action)) return false
++  if (!input.operations?.length || !input.paths?.length) return false
++  return input.action === "external_directory" || input.action === "edit" ||
++    input.operations.every((operation) => operation === "read")
++}
++function matches(grant: Grant, input: Input, target: string) {
++  if (grant.scope === "parent-list")
++    return input.access === "listing" && normalize(target) === normalize(parent(grant.directory))
++  // Search leaves inspect descendants, not just their root. Narrow allows cannot
++  // authorize that traversal, and nested denies/asks still constrain it.
++  if (input.metadata?.filesystemReadScope === "recursive") {
++    if (grant.effect === "allow") return grant.recursive && contains(grant.directory, target)
++    if (contains(target, grant.directory)) return true
++  }
++  return grant.recursive ? contains(grant.directory, target) : normalize(grant.directory) === normalize(target) ||
++    normalize(parent(target)) === normalize(grant.directory)
++}
++export function decision(grants: readonly Grant[], input: Input): Permission.Effect | undefined {
++  if (!needs(input)) return
++  const effects = input.operations!.flatMap((operation) => input.paths!.map((target) => {
++    const candidates = grants.filter((grant) => grant.operation === operation && matches(grant, input, target))
++    if (candidates.some((grant) => grant.effect === "deny")) return "deny"
++    if (candidates.some((grant) => grant.effect === "ask")) return "explicit-ask"
++    if (candidates.some((grant) => grant.effect === "allow")) return "allow"
++    return "ask"
++  }))
++  if (effects.includes("deny")) return "deny"
++  if (effects.includes("explicit-ask")) return "ask"
++  if (effects.every((effect) => effect === "allow")) return "allow"
++}
++export function unknownEffectsDenied(grants: readonly Grant[], input: Input) {
++  return input.metadata?.filesystemEffects === "unknown" && grants.some((grant) => grant.effect === "deny")
++}
++/** Selected resources are precisely the displayed directories, never save patterns. */
++export function directories(input: Permission.Request): string[] | undefined {
++  if (!needs(input)) return
++  if (!input.directories && (input.action !== "external_directory" || !input.resources.length ||
++    !input.resources.every((resource) => resource.endsWith("/*")))) return
++  const result = input.directories ? [...input.directories] : input.resources.map((resource) => resource.slice(0, -2))
++  if (!result.length || result.some((directory) => !path.posix.isAbsolute(directory) && !path.win32.isAbsolute(directory))) return
++  if (result.some((directory) => /[*?]/.test(directory))) return
++  if (!input.paths!.every((target) => result.some((directory) => contains(directory, target)))) return
++  return result
++}
++export function encode(grant: Grant): Permission.Rule {
++  return { action, resource: JSON.stringify(grant), effect: grant.effect }
++}
++/** Invalid reserved records fail closed rather than silently granting filesystem access. */
++export function decode(rules: Permission.Ruleset): Grant[] {
++  return rules.filter((rule) => rule.action === action).map((rule): Grant => {
++    const value: unknown = JSON.parse(rule.resource)
++    if (!value || typeof value !== "object" || !("directory" in value) || typeof value.directory !== "string" ||
++      !("operation" in value) || !["read", "create", "update", "delete"].includes(String(value.operation)) ||
++      !("effect" in value) || !["allow", "deny", "ask"].includes(String(value.effect)) ||
++      !("lifetime" in value) || value.lifetime !== "session" ||
++      !("recursive" in value) || typeof value.recursive !== "boolean" ||
++      !("scope" in value) || !["selected", "parent-list"].includes(String(value.scope)))
++      throw new Error("Invalid stored conversation filesystem policy. Revoke it using session permissions.")
++    // Decode each public field without an unchecked cast.
++    const operation = value.operation
++    const effect = value.effect
++    const scope = value.scope
++    if ((operation !== "read" && operation !== "create" && operation !== "update" && operation !== "delete") ||
++      (effect !== "allow" && effect !== "deny" && effect !== "ask") ||
++      (scope !== "selected" && scope !== "parent-list")) throw new Error("Invalid stored filesystem policy.")
++    if (effect !== rule.effect) throw new Error("Stored filesystem policy effect disagrees with its permission rule.")
++    return { operation, effect, scope, lifetime: "session", recursive: value.recursive, directory: value.directory }
++  })
++}
+diff --git a/packages/core/src/tool/mcp.ts b/packages/core/src/tool/mcp.ts
+index cd181b686e5fe2e46f51d91fe6ef83ac7b8ed009..b7d5a45f0f15f334814c5864cd5dad234fd18e16 100644
+--- a/packages/core/src/tool/mcp.ts
++++ b/packages/core/src/tool/mcp.ts
+@@ -64,7 +64,7 @@ export const layer = Layer.effect(
+                       action: name(tool.server, tool.name),
+                       resources: ["*"],
+                       save: ["*"],
+-                      metadata: { input: input ?? {} },
++                      metadata: { input: input ?? {}, filesystemEffects: "unknown" },
+                       ...Permission.invocation(context),
+                     })
+                     const result = yield* mcp
+diff --git a/packages/core/src/tool/plugin/glob.ts b/packages/core/src/tool/plugin/glob.ts
+index 1fd7ee41ff4e49a2b84f09c1ff71b3afa808104e..4aff12f222db00869ae18b1199aa1cb00929c463 100644
+--- a/packages/core/src/tool/plugin/glob.ts
++++ b/packages/core/src/tool/plugin/glob.ts
+@@ -65,12 +65,16 @@ export const Plugin = {
+             Effect.gen(function* () {
+               const searchPath = input.path === "undefined" || input.path === "null" ? undefined : input.path
+               const target = yield* access.resolve({ path: searchPath ?? ".", kind: "directory" })
+-              yield* access.authorizeExternal([target], context)
++              yield* access.authorizeExternal([target], context, { filesystemReadScope: "recursive" }, ["read"])
+               yield* permission.assert({
+                 action: name,
++                operations: ["read"],
++                paths: [target.absolute],
++                directories: [target.absolute],
+                 resources: [input.pattern],
+                 save: ["*"],
+                 metadata: {
++                  filesystemReadScope: "recursive",
+                   root: searchPath ?? ".",
+                   path: searchPath,
+                   hidden: input.hidden,
+diff --git a/packages/core/src/tool/plugin/grep.ts b/packages/core/src/tool/plugin/grep.ts
+index e14269876ed9816bc2edc89bfb46a06c998ca1e8..58ab262d0c7e89ee2ce3333b4e575b6dd210e579 100644
+--- a/packages/core/src/tool/plugin/grep.ts
++++ b/packages/core/src/tool/plugin/grep.ts
+@@ -83,12 +83,18 @@ export const Plugin = {
+           execute: (input, context) =>
+             Effect.gen(function* () {
+               const target = yield* access.resolve({ path: input.path ?? "." })
+-              yield* access.authorizeExternal([target], context)
++              const type = yield* ToolSearch.pathType(environment.files, target.absolute, input.path ?? ".")
++              const scope = type === "directory" ? { filesystemReadScope: "recursive" } : {}
++              yield* access.authorizeExternal([target], context, scope, ["read"])
+               yield* permission.assert({
+                 action: name,
++                operations: ["read"],
++                paths: [target.absolute],
++                directories: [type === "directory" ? target.absolute : path.dirname(target.absolute)],
+                 resources: [input.pattern],
+                 save: ["*"],
+                 metadata: {
++                  ...scope,
+                   root: ".",
+                   path: input.path,
+                   include: input.include,
+@@ -99,7 +105,6 @@ export const Plugin = {
+                 ...Permission.invocation(context),
+               })
+               const root = target.absolute
+-              const type = yield* ToolSearch.pathType(environment.files, root, input.path ?? ".")
+               const cwd = type === "directory" ? root : path.dirname(root)
+               const result = yield* ToolSearch.bounded(input.limit ?? FileSystem.DEFAULT_SEARCH_LIMIT, (limit) =>
+                 ripgrep.grep({
+diff --git a/packages/core/src/tool/plugin/mcp-resource.ts b/packages/core/src/tool/plugin/mcp-resource.ts
+index 9cf20e4a1f1201d33a816c8c7913e605d5f332be..3171e04014e6585abf5d2fb8653b8bd735aac771 100644
+--- a/packages/core/src/tool/plugin/mcp-resource.ts
++++ b/packages/core/src/tool/plugin/mcp-resource.ts
+@@ -38,7 +38,7 @@ export const Plugin = {
+                 action: "opencode_list_mcp_resources",
+                 resources: servers,
+                 save: servers,
+-                metadata: {},
++                metadata: { filesystemEffects: "unknown" },
+                 ...Permission.invocation(context),
+               })
+               if (input.server === undefined) return { output: yield* mcp.resourceCatalog() }
+@@ -65,7 +65,7 @@ export const Plugin = {
+                 action: "opencode_read_mcp_resource",
+                 resources: [`${input.server}:${input.uri}`],
+                 save: [`${input.server}:*`],
+-                metadata: { server: input.server, uri: input.uri },
++                metadata: { server: input.server, uri: input.uri, filesystemEffects: "unknown" },
+                 ...Permission.invocation(context),
+               })
+               const resource = yield* mcp.readResource(input)
+diff --git a/packages/core/src/tool/plugin/patch.ts b/packages/core/src/tool/plugin/patch.ts
+index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c51925073f2295d 100644
+--- a/packages/core/src/tool/plugin/patch.ts
++++ b/packages/core/src/tool/plugin/patch.ts
+@@ -6,6 +6,7 @@ import { ToolFailure } from "@opencode/ai/effect"
+ import { FileDiff } from "@opencode/schema/file-diff"
+ import { Effect, Result, Schema } from "effect"
+ import { Bom } from "@opencode/util/bom"
++import path from "node:path"
+ import { toolFailure } from "../runtime.js"
+ import { Environment } from "../../environment/index.js"
+ import { Formatter } from "../../formatter.js"
+@@ -93,18 +94,28 @@ export const Plugin = {
+               }
+               const prepared: Prepared[] = []
+               const updates = new Map<string, string | null>()
+-              const resolveTarget = Effect.fnUntraced(function* (value: string) {
++              const needs: { target: FileAccess.Target; operation: Permission.Operation }[] = []
++              const resolveTarget = Effect.fnUntraced(function* (value: string, operation?: Permission.Operation) {
+                 const target = yield* access.resolve({ path: value, kind: "file" })
++                const exists = updates.has(target.absolute) ? updates.get(target.absolute) !== null
++                  : yield* environment.files.stat(target.absolute).pipe(
++                    Effect.map(() => true),
++                    Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(false)),
++                  )
++                const actual = operation ?? (exists ? "update" : "create")
++                needs.push({ target, operation: actual })
+                 if (!target.externalDirectory) return target
+                 yield* access.authorizeExternal([target], context, {
+                   filepath: target.absolute,
+                   parentDir: target.externalDirectory.directory,
+-                })
++                }, [actual])
+                 return target
+               })
+               for (const hunk of hunks) {
+                 yield* Effect.gen(function* () {
+-                  const target = yield* resolveTarget(hunk.path)
++                  const target = yield* resolveTarget(hunk.path, hunk.type === "delete" ? "delete"
++                    : hunk.type === "update" ? (hunk.movePath && hunk.movePath !== hunk.path ? "delete" : "update")
++                    : undefined)
+                   if (hunk.type === "add") {
+                     const content =
+                       hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`
+@@ -189,9 +200,12 @@ export const Plugin = {
+                 change.target,
+                 ...(change.type === "update" && change.moveTarget ? [change.moveTarget] : []),
+               ])
+-              yield* permission.assert({
++              for (const need of needs) yield* permission.assert({
+                 action: "edit",
+-                resources: [...new Set(targets.map((target) => target.resource))],
++                resources: [need.target.resource],
++                operations: [need.operation],
++                paths: [need.target.absolute],
++                directories: [path.dirname(need.target.absolute)],
+                 save: ["*"],
+                 metadata: {
+                   filepath: targets.map((target) => target.resource).join(", "),
+diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
+index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..51f6ba497f22d74a7469d5d9ac5b9a00266fc15f 100644
+--- a/packages/core/src/tool/plugin/shell.ts
++++ b/packages/core/src/tool/plugin/shell.ts
+@@ -292,10 +292,15 @@ export const Plugin = {
+           kind: "directory",
+         }),
+       )
+-      yield* access.authorizeExternal([target, ...directories], context)
++      yield* permission.assertNotDenied({
++        action: name, resources: [invocation.command], metadata: { filesystemEffects: "unknown" },
++        ...Permission.invocation(context),
++      })
++      yield* access.authorizeExternal([target, ...directories], context, { filesystemEffects: "unknown" })
+       if (parsed.commands.length > 0)
+         yield* permission.assert({
+           action: name,
++          metadata: { filesystemEffects: "unknown" },
+           resources: parsed.commands.map((command) => command.resource),
+           save: parsed.commands.map((command) => command.save),
+           ...Permission.invocation(context),
+diff --git a/packages/core/test/config/mcp-selection.node.test.mjs b/packages/core/test/config/mcp-selection.node.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd08eab6b5
+--- /dev/null
++++ b/packages/core/test/config/mcp-selection.node.test.mjs
+@@ -0,0 +1,98 @@
++import assert from "node:assert/strict"
++import test from "node:test"
++import fs from "node:fs"
++import { createRequire, registerHooks, stripTypeScriptTypes } from "node:module"
++import { fileURLToPath, pathToFileURL } from "node:url"
++
++const local = createRequire(import.meta.url)
++const effectURL = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(local.resolve("effect")).href
++const { Effect, Stream } = await import(effectURL)
++const source = new URL("../../src/config/plugin/mcp.ts", import.meta.url)
++registerHooks({
++  resolve(specifier, context, next) {
++    if (specifier === "effect") return { url: effectURL, shortCircuit: true }
++    if (specifier === "@opencode/schema/permission-shorthand")
++      return { url: new URL("../../../schema/src/permission-shorthand.ts", import.meta.url).href, shortCircuit: true }
++    if (context.parentURL === source.href) {
++      if (specifier === "@opencode/plugin/effect/plugin") return { url: "fixture:plugin", shortCircuit: true }
++      if (specifier === "@opencode/schema/config") return { url: "fixture:document", shortCircuit: true }
++      if (specifier === "../../config.js") return { url: "fixture:config", shortCircuit: true }
++      if (specifier === "../../mcp/index.js") return { url: "fixture:mcp", shortCircuit: true }
++      if (specifier === "./mcp.js") return { url: source.href, shortCircuit: true }
++    }
++    return next(specifier, context)
++  },
++  load(url, context, next) {
++    const modules = {
++      "fixture:plugin": "export const define = value => value",
++      "fixture:document": "export class Document {}",
++      "fixture:config": 'import {Context} from "effect"; export const Config = {Service:Context.Service("fixture/config")}',
++      "fixture:mcp": 'import {Context} from "effect"; export const Mcp = {Service:Context.Service("fixture/mcp")}',
++    }
++    if (modules[url]) return { format: "module", source: modules[url], shortCircuit: true }
++    if (url === source.href || url.endsWith("/permission-shorthand.ts"))
++      return { format: "module", source: stripTypeScriptTypes(fs.readFileSync(fileURLToPath(url), "utf8")), shortCircuit: true }
++    return next(url, context)
++  },
++})
++const { register } = await import(source.href)
++const { Config } = await import("fixture:config")
++const { Mcp } = await import("fixture:mcp")
++const servers = {
++  playwright: { type: "local", command: ["browser"], disabled: true },
++  other: { type: "remote", url: "https://example.invalid/mcp", disabled: false },
++}
++async function run(selection, options = {}) {
++  const permissions = [{ action: "shell", resource: "*", effect: "deny" }]
++  const entries = [{
++    type: "document",
++    info: { permissions, mcp: { servers }, ...(selection === undefined ? {} : { experimental: { mcp_selection: selection } }) },
++  }, ...(options.entries ?? [])]
++  const saved = structuredClone(entries)
++  const editor = new Map(options.initial ?? [])
++  const writes = []
++  const exit = await Effect.runPromiseExit(register(Stream.never).pipe(
++    Effect.provideService(Config.Service, { entries: () => Effect.succeed(entries) }),
++    Effect.provideService(Mcp.Service, {
++      reload: () => Effect.void,
++      transform: transform => Effect.sync(() => transform({
++        get: name => editor.get(name),
++        set: (name, value) => { writes.push(name); editor.set(name, value) },
++      })),
++    }),
++    Effect.scoped,
++  ))
++  assert.deepEqual(entries, saved, "config and native permissions must remain unmodified")
++  return { exit, editor, writes }
++}
++test("MCP shorthand drives actual config registration and leaves native permissions unchanged", async () => {
++  const result = await run("MCP:=playwright")
++  assert.equal(result.exit._tag, "Success")
++  assert.equal(result.editor.get("playwright").disabled, false)
++  assert.equal(result.editor.get("other").disabled, true)
++  assert.deepEqual(result.editor.get("playwright").command, ["browser"])
++})
++test("omission retains existing server availability; highest-priority selection wins", async () => {
++  const unchanged = await run(undefined)
++  assert.equal(unchanged.editor.get("playwright").disabled, true)
++  assert.equal(unchanged.editor.get("other").disabled, false)
++  const selected = await run("MCP:=playwright", { entries: [
++    { type: "document", info: { experimental: { mcp_selection: "MCP:=other" } } },
++  ] })
++  assert.equal(selected.editor.get("playwright").disabled, true)
++  assert.equal(selected.editor.get("other").disabled, false)
++})
++test("invalid, unknown, and filesystem policies mutate no server settings", async () => {
++  for (const value of ["MCP:=missing", "MCP:=playwright RU=S*", "RU=S*", "ALL:CRUD=D"]) {
++    const result = await run(value)
++    assert.equal(result.exit._tag, "Failure", value)
++    assert.deepEqual(result.writes, [], value)
++  }
++})
++test("configured selection changes availability without replacing plugin server settings", async () => {
++  const result = await run("MCP:=playwright", {
++    initial: [["other", { type: "local", command: ["plugin-owned"], disabled: false }]],
++  })
++  assert.equal(result.editor.get("other").disabled, true)
++  assert.deepEqual(result.editor.get("other").command, ["plugin-owned"])
++})
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+index 8d42e5b54a9c214989d808c883f87439ec6a87ff..06f4dbd006a0a114275374ae425dee3d918292a8 100644
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -98,6 +98,71 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+ }
+ 
+ describe("Permission", () => {
++  it.effect("session CRUD settles concurrent family reads and denies C/D without project-global persistence or widening", () =>
++    Effect.gen(function* () {
++      const parent = Session.ID.make("ses_test")
++      const child = Session.ID.make("ses_crud_child")
++      const unrelated = Session.ID.make("ses_crud_unrelated")
++      yield* setup([], parent)
++      yield* setup([], child)
++      yield* setup([], unrelated)
++      const { db } = yield* Database.Service
++      yield* db.update(SessionTable).set({ parent_id: parent }).where(eq(SessionTable.id, child)).run().pipe(Effect.orDie)
++      const first = yield* waitForRequest({
++        action: "external_directory", operations: ["read"],
++        paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"], save: ["D:/Data/*"],
++      })
++      const second = yield* waitForRequest({
++        id: Permission.ID.create(), sessionID: child, action: "read", operations: ["read"],
++        paths: ["d:\\data\\project\\deep\\file"], resources: ["d:/data/project/deep/file"],
++      })
++      const other = yield* waitForRequest({
++        id: Permission.ID.create(), sessionID: unrelated, action: "read", operations: ["read"],
++        paths: ["D:/Data/Project/file"], resources: ["D:/Data/Project/file"],
++      })
++      yield* first.service.reply({
++        requestID: first.request.id, reply: { scope: "session", policy: "RU=S* CD=D*" },
++      })
++      yield* Fiber.join(first.fiber)
++      yield* Fiber.join(second.fiber)
++      expect((yield* first.service.list()).map((request) => request.id)).toEqual([other.request.id])
++      for (const operation of ["read", "update", "create", "delete"] as const) {
++        const result = yield* first.service.ask(assertion({
++          id: Permission.ID.create(), sessionID: child, action: operation === "read" ? "read" : "edit",
++          operations: [operation], paths: ["D:/Data/Project/deep/file"],
++          resources: ["D:/Data/Project/deep/file"],
++        }))
++        expect(result.effect).toBe(operation === "read" || operation === "update" ? "allow" : "deny")
++      }
++      expect(yield* first.service.allows(assertion({
++        operations: ["read"], paths: ["D:/Data/Project-other/file"], resources: ["D:/Data/Project-other/file"],
++      }))).toBe(false)
++      expect(yield* first.service.allows(assertion({
++        action: "shell", operations: ["read"], paths: ["D:/Data/Project/file"], resources: ["cat file"],
++      }))).toBe(false)
++      const saved = yield* PermissionSaved.Service
++      expect(yield* saved.list({ projectID: Project.ID.global })).toEqual([])
++      yield* first.service.reply({ requestID: other.request.id, reply: "once" })
++      yield* Fiber.join(other.fiber)
++    }),
++  )
++
++  it.effect("session read approvals never override later explicit agent denies", () =>
++    Effect.gen(function* () {
++      yield* setup([])
++      const first = yield* waitForRequest({
++        action: "external_directory", operations: ["read"],
++        paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++      })
++      yield* first.service.reply({ requestID: first.request.id, reply: "session_read" })
++      yield* Fiber.join(first.fiber)
++      yield* setRules([{ action: "read", resource: "*", effect: "deny" }])
++      expect(yield* first.service.ask(assertion({
++        operations: ["read"], paths: ["D:/Data/Project/file"], resources: ["D:/Data/Project/file"],
++      }))).toMatchObject({ effect: "deny" })
++    }),
++  )
++
+   it.effect("returns the evaluated effect and only queues prompts", () =>
+     Effect.gen(function* () {
+       yield* setup([{ action: "read", resource: "*", effect: "allow" }])
+diff --git a/packages/core/test/permission/service-fixture.mjs b/packages/core/test/permission/service-fixture.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7731b0e0819b221409c742c3e84f5fbf54782f1a
+--- /dev/null
++++ b/packages/core/test/permission/service-fixture.mjs
+@@ -0,0 +1,190 @@
++import assert from "node:assert/strict"
++import { Context, Effect, Schema, Semaphore } from "effect"
++
++const service = (name) => Context.Service(`permission-node-test/${name}`)
++export const Agent = { Service: service("Agent"), node: {}, ID: Schema.String }
++export const Bus = { Service: service("Bus"), node: {} }
++export const Location = { Service: service("Location"), node: {} }
++export const SessionStore = { Service: service("SessionStore"), node: {} }
++export const SessionProjector = { node: {} }
++export const PermissionSaved = { Service: service("PermissionSaved"), node: {} }
++export const PluginHooks = { Service: service("PluginHooks"), node: {} }
++export const Database = { Service: service("Database"), node: {} }
++export const Project = { ID: { global: "prj_global" } }
++export const SessionSchema = { ID: Schema.String }
++export const makeLocationNode = (input) => input
++export const eq = (field, value) => ({ field, value })
++export const SessionErrors = {
++  NotFoundError: class extends Schema.TaggedError()("Session.NotFoundError", { sessionID: Schema.String }) {},
++}
++
++// These builders evaluate the *actual* SQL declarations, retaining their actual keys.
++// They are not a SQL driver; no handwritten SessionTable shape can hide a misspelled column.
++function column(name) {
++  const chain = {
++    name: typeof name === "string" ? name : undefined,
++    $type: () => chain, primaryKey: () => chain, notNull: () => chain,
++    references: () => chain, default: () => chain, $default: () => chain,
++  }
++  return chain
++}
++export const blob = column
++export const text = column
++export const integer = column
++export const real = column
++export const pathColumn = column
++export const directoryColumn = column
++export const Timestamps = {}
++export const ProjectTable = { id: column() }
++export const sql = () => ({})
++export const index = () => ({ on: () => ({ where: () => ({}) }) })
++export const uniqueIndex = index
++export const primaryKey = () => ({})
++export function sqliteTable(name, columns) {
++  for (const [key, value] of Object.entries(columns)) Object.assign(value, { name: value.name ?? key, table: name })
++  return columns
++}
++
++const clone = (value) => JSON.parse(JSON.stringify(value))
++
++// Explicit synthetic-storage boundary: production Permission logic and SQL declarations,
++// but a serialized in-memory transaction/event/projector adapter rather than native SQLite/Bus.
++export function fixture(SessionTable, EventSequenceTable) {
++  assert.ok(SessionTable.permission, "actual session/sql.ts must expose permission")
++  assert.equal(SessionTable.permission.name, "permission")
++  assert.equal(SessionTable.permissions, undefined, "plural permissions is not a projected SQL column")
++  const records = new Map() // SessionStore domain records, not SQL column definitions.
++  const sequences = new Map()
++  const durable = []
++  const trace = []
++  const agentRules = []
++  const saved = []
++  const events = []
++  const databaseLock = Semaphore.makeUnsafe(1)
++  const aggregateLock = Semaphore.makeUnsafe(1)
++  let onPublish
++  let afterSnapshot
++  let readSnapshot = false
++  let transactionDepth = 0
++
++  const project = (type, payload) => {
++    const session = records.get(payload.sessionID)
++    assert.ok(session)
++    if (type === "session.permissions") {
++      // Match SessionEvent.Permissions' real projector mapping: SQL permission -> domain permissions.
++      const row = { [SessionTable.permission.name]: clone(payload.permissions) }
++      records.set(payload.sessionID, { ...session, permissions: row.permission })
++      trace.push("project:permission")
++    } else if (type === "session.metadata.updated") {
++      records.set(payload.sessionID, { ...session, metadata: clone(payload.metadata) })
++    } else {
++      throw new Error(`Unexpected durable event ${type}`)
++    }
++  }
++  const db = {
++    transaction(body, config) {
++      assert.equal(config?.behavior, "immediate")
++      const transaction = databaseLock.withPermit(Effect.gen(function* () {
++        const previous = clone([...records])
++        const previousSequences = [...sequences]
++        const previousDurable = clone(durable)
++        trace.push("begin")
++        transactionDepth++
++        readSnapshot = false
++        let wasRead = false
++        const result = yield* body(db).pipe(
++          Effect.tap(() => Effect.sync(() => { wasRead = readSnapshot })),
++          Effect.onError(() => Effect.sync(() => {
++            records.clear()
++            for (const [id, value] of previous) records.set(id, value)
++            sequences.clear()
++            for (const [id, value] of previousSequences) sequences.set(id, value)
++            durable.splice(0, durable.length, ...previousDurable)
++            trace.push("rollback")
++          })),
++          Effect.ensuring(Effect.sync(() => { transactionDepth-- })),
++        )
++        trace.push("commit")
++        return { result, wasRead }
++      }))
++      return transaction.pipe(Effect.flatMap(({ result, wasRead }) => Effect.gen(function* () {
++        if (wasRead && afterSnapshot) {
++          const hook = afterSnapshot
++          afterSnapshot = undefined
++          yield* hook()
++        }
++        return result
++      })))
++    },
++    select(fields) {
++      assert.equal(fields.seq, EventSequenceTable.seq)
++      return {
++        from(table) {
++          assert.equal(table, EventSequenceTable)
++          return {
++            where(condition) {
++              assert.equal(condition.field, EventSequenceTable.aggregate_id)
++              return { get: () => Effect.sync(() => {
++                assert.equal(transactionDepth, 1, "sequence read must share the session snapshot transaction")
++                readSnapshot = true
++                trace.push("read:aggregate-sequence")
++                const seq = sequences.get(condition.value)
++                return seq === undefined ? undefined : { seq }
++              }) }
++            },
++          }
++        },
++      }
++    },
++    // Deliberately no update(): Permission must not mutate the projection directly.
++  }
++  const publish = (event, payload, options) => Effect.gen(function* () {
++    if (event.durable) {
++      assert.equal(transactionDepth, 0, "never acquire the Bus aggregate lock inside a database transaction")
++      yield* aggregateLock.withPermit(db.transaction(() => Effect.gen(function* () {
++        const seq = (sequences.get(payload.sessionID) ?? -1) + 1
++        project(event.type, payload)
++        if (options?.commit) {
++          trace.push("durable:commit-check")
++          yield* options.commit(seq)
++        }
++        sequences.set(payload.sessionID, seq)
++        durable.push(clone({ type: event.type, seq, data: payload }))
++        trace.push("durable:append")
++      }), { behavior: "immediate" }))
++    }
++    events.push({ event, payload })
++    trace.push(`notify:${event.type}`)
++    if (onPublish) yield* onPublish(payload)
++  })
++  return {
++    records, saved, events, agentRules, durable, sequences, trace,
++    add(id, parentID) { records.set(id, { id, parentID, permissions: [] }) },
++    publish(callback) { onPublish = callback },
++    afterSnapshot(callback) { afterSnapshot = callback },
++    publishDurable: publish,
++    replay() {
++      const log = clone(durable)
++      for (const [id, session] of records) records.set(id, { ...session, permissions: [] })
++      for (const event of log) project(event.type, event.data)
++    },
++    services: [
++      [Agent.Service, { resolve: () => Effect.sync(() => ({ permissions: [...agentRules] })) }],
++      [Bus.Service, { publish }],
++      [Location.Service, { project: { id: "prj_test" }, directory: "D:/work" }],
++      [SessionStore.Service, { get: (id) => Effect.sync(() => {
++        if (transactionDepth) trace.push("read:session")
++        const record = records.get(id)
++        return record && clone(record)
++      }) }],
++      [PermissionSaved.Service, {
++        list: ({ projectID }) => Effect.sync(() => saved.filter((rule) => rule.projectID === projectID)),
++        add: ({ projectID, action, resources }) => Effect.sync(() => {
++          saved.push(...resources.map((resource) => ({ projectID, action, resource })))
++        }),
++      }],
++      [PluginHooks.Service, { trigger: (_namespace, _event, input) => Effect.succeed(input) }],
++      [Database.Service, { db }],
++    ],
++  }
++}
+diff --git a/packages/core/test/permission/service.node.test.mjs b/packages/core/test/permission/service.node.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..030baed2206ca236fe2d69285b499c34140bb791
+--- /dev/null
++++ b/packages/core/test/permission/service.node.test.mjs
+@@ -0,0 +1,287 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { registerHooks, createRequire } from "node:module"
++import { pathToFileURL, fileURLToPath } from "node:url"
++import { existsSync } from "node:fs"
++
++// No build, install, Bun, live sessions or production database. Only host I/O/services are replaced;
++// Permission.layer, canonical SessionEvent, SQL declarations, pending handling and CRUD matching
++// are production. SQLite, Bus transaction/dispatch and projector execution remain synthetic adapters.
++const local = createRequire(import.meta.url)
++const effectURL = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(local.resolve("effect")).href
++const fixtureURL = new URL("./service-fixture.mjs", import.meta.url).href
++const root = new URL("../../../", import.meta.url)
++const stubs = new Set([
++  "agent.js", "bus.js", "location/index.js", "session/store.js", "session/projector.js", "session/errors.js",
++  "permission/saved.js", "plugin/hooks.js", "database/database.js", "session/sql.js",
++  "layer/location-node.js", "project/schema.js", "location.js", "session/error.js", "session/schema.js",
++])
++registerHooks({
++  resolve(specifier, context, next) {
++    if (specifier === "effect") return { url: effectURL, shortCircuit: true }
++    if (specifier === "@opencode/util/effect/app-node") return { url: fixtureURL, shortCircuit: true }
++    if (specifier === "drizzle-orm") return { url: fixtureURL, shortCircuit: true }
++    if (specifier === "drizzle-orm/sqlite-core") return { url: fixtureURL, shortCircuit: true }
++    if (context.parentURL?.endsWith("/core/src/session/sql.ts") &&
++      ["../database/path.js", "../database/schema.sql.js", "../project/sql.js"].includes(specifier))
++      return { url: fixtureURL, shortCircuit: true }
++    if (context.parentURL?.endsWith("/core/src/permission.ts") && stubs.has(specifier.replace(/^\.\//, "")))
++      return { url: fixtureURL, shortCircuit: true }
++    if (specifier.startsWith("@opencode/schema/"))
++      return { url: new URL(`schema/src/${specifier.slice("@opencode/schema/".length)}.ts`, root).href, shortCircuit: true }
++    if (specifier.startsWith("@opencode/util/"))
++      return { url: new URL(`util/src/${specifier.slice("@opencode/util/".length)}.ts`, root).href, shortCircuit: true }
++    if (specifier.startsWith(".") && context.parentURL?.startsWith("file:")) {
++      const url = new URL(specifier, context.parentURL)
++      if (url.pathname.endsWith(".js")) url.pathname = url.pathname.slice(0, -3) + ".ts"
++      if (!/\.[a-z]+$/i.test(url.pathname)) url.pathname += ".ts"
++      if (existsSync(fileURLToPath(url))) return { url: url.href, shortCircuit: true }
++    }
++    return next(specifier, context)
++  },
++  load(url, context, next) {
++    if (/\/schema\/src\/(agent|session)\.ts$/.test(url)) {
++      const name = url.endsWith("/agent.ts") ? "Agent" : "Session"
++      return { format: "module", shortCircuit: true, source:
++        `import {Schema} from "effect"; export const ID=Schema.String; export const ${name}={ID};` }
++    }
++    return next(url, context)
++  },
++})
++const { Effect, Layer, Fiber, Exit } = await import("effect")
++const { fixture } = await import("./service-fixture.mjs")
++const { SessionTable } = await import("../../src/session/sql.ts")
++const { EventSequenceTable } = await import("../../src/event/sql.ts")
++const Permission = await import("../../src/permission.ts")
++const { SessionEvent } = await import("@opencode/schema/session-event")
++const state = fixture(SessionTable, EventSequenceTable)
++const dependencies = () => Layer.mergeAll(...state.services.map(([key, value]) => Layer.succeed(key, value)))
++const run = (body) => Effect.runPromise(Effect.scoped(body.pipe(
++  Effect.provide(Layer.provide(Permission.node.layer, dependencies())),
++)).pipe(Effect.timeout("10 seconds")))
++const input = (sessionID = "ses_child", operation = "read", paths = ["D:/Data/Project/deep/file"]) => ({
++  sessionID, agent: "build", action: operation === "read" ? "read" : "edit",
++  operations: [operation], paths, resources: paths, access: "content",
++})
++const pending = (service, request) => Effect.gen(function* () {
++  const fiber = yield* service.assert(request).pipe(Effect.forkChild)
++  while (true) {
++    const match = (yield* service.list()).find((item) => item.sessionID === request.sessionID && item.action === request.action)
++    if (match) return { fiber, request: match }
++    const status = fiber.pollUnsafe()
++    if (status !== undefined) {
++      if (Exit.isFailure(status)) return yield* status
++      throw new Error("Expected a pending permission request, but assertion completed")
++    }
++    yield* Effect.yieldNow
++  }
++})
++
++test("real Permission service: durable family CRUD, atomic invalid input, denies, unrelated roots, restart and revocation", async () => {
++  state.add("ses_root")
++  const unrelatedRule = { action: "unrelated_tool", resource: "*", effect: "ask" }
++  state.records.set("ses_root", {
++    ...state.records.get("ses_root"), permissions: [unrelatedRule], metadata: { retained: "root annotation" },
++  })
++  state.add("ses_child", "ses_root")
++  state.add("ses_grandchild", "ses_child")
++  state.add("ses_unrelated")
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const first = yield* pending(service, {
++      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project"],
++      resources: ["D:/Data/Project/*"], save: ["D:/Data/*"],
++    })
++    const second = yield* pending(service, input())
++    const unrelated = yield* pending(service, input("ses_unrelated"))
++    const before = JSON.stringify([...state.records])
++    const invalid = yield* service.reply({
++      requestID: first.request.id, reply: { scope: "session", policy: "R=S* R=D*" },
++    }).pipe(Effect.flip)
++    assert.equal(invalid._tag, "Permission.InvalidPolicyError")
++    assert.equal(JSON.stringify([...state.records]), before)
++    assert.equal((yield* service.list()).length, 3)
++    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "RU=S* CD=D*" } })
++    yield* Fiber.join(first.fiber)
++    yield* Fiber.join(second.fiber)
++    state.add("ses_future", "ses_child")
++    assert.equal((yield* service.ask(input("ses_future"))).effect, "allow")
++    assert.deepEqual((yield* service.list()).map((item) => item.id), [unrelated.request.id])
++    for (const op of ["read", "update", "create", "delete"])
++      assert.equal((yield* service.ask(input("ses_grandchild", op))).effect,
++        op === "read" || op === "update" ? "allow" : "deny")
++    assert.equal((yield* service.ask(input("ses_child", "read", ["D:/Data/Project-other/file"]))).effect, "ask")
++    state.agentRules.push({ action: "shell", resource: "*", effect: "allow" })
++    const opaque = yield* service.assert({
++      ...input(), action: "shell", metadata: { filesystemEffects: "unknown" },
++    }).pipe(Effect.flip)
++    assert.equal(opaque._tag, "Permission.BlockedError")
++    assert.match(opaque.reason, /unknown local filesystem effects/)
++    state.agentRules.push({ action: "read", resource: "*", effect: "deny" })
++    assert.equal((yield* service.ask(input())).effect, "deny")
++    state.agentRules.push({ action: "edit", resource: "*", effect: "deny" })
++    assert.equal((yield* service.ask(input("ses_child", "update"))).effect, "deny")
++    state.agentRules.length = 0
++    assert.equal(state.saved.length, 0)
++    assert.equal(state.durable.length, 1)
++    assert.equal(state.durable[0].type, "session.permissions")
++    assert.equal(state.durable[0].seq, 0)
++    assert.deepEqual(state.durable[0].data.permissions, state.records.get("ses_root").permissions)
++    assert.deepEqual(state.records.get("ses_root").permissions[0], unrelatedRule)
++    assert.deepEqual(state.records.get("ses_root").metadata, { retained: "root annotation" })
++    yield* service.reply({ requestID: unrelated.request.id, reply: "once" })
++    yield* Fiber.join(unrelated.fiber)
++  }))
++  const beforeReplay = JSON.stringify(state.records.get("ses_root"))
++  state.replay()
++  assert.equal(JSON.stringify(state.records.get("ses_root")), beforeReplay)
++  // A fresh scoped Permission.layer must read the replayed projection, not an in-memory policy map.
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(input())).effect, "allow")
++    assert.equal((yield* service.ask(input("ses_child", "create"))).effect, "deny")
++    // Same event used by the existing session permissions PATCH / Session.setPermissions.
++    yield* state.publishDurable(SessionEvent.Permissions, { sessionID: "ses_root", permissions: [unrelatedRule] })
++    assert.equal((yield* service.ask(input())).effect, "ask")
++    assert.deepEqual(state.records.get("ses_root").permissions, [unrelatedRule])
++    state.replay()
++    assert.equal(yield* service.allows(input()), false, "replay must not resurrect revoked grants")
++  }))
++})
++
++test("actual SQL metadata is singular and canonical session permissions events are durable", () => {
++  assert.equal(SessionTable.permission.name, "permission")
++  assert.equal(SessionTable.permissions, undefined)
++  assert.equal(SessionEvent.Permissions.type, "session.permissions")
++  assert.equal(SessionEvent.Permissions.durable.aggregate, "sessionID")
++})
++
++test("stale durable snapshot rolls back, retries and preserves a concurrent approval and unrelated session fields", async () => {
++  const original = { action: "baseline_tool", resource: "*", effect: "deny" }
++  const concurrent = { action: "concurrent_tool", resource: "*", effect: "ask" }
++  state.records.set("ses_root", {
++    ...state.records.get("ses_root"), permissions: [original], metadata: { keep: "not a policy field" },
++  })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const first = yield* pending(service, {
++      ...input("ses_root", "read", ["D:/Data/First/file"]),
++      action: "external_directory", resources: ["D:/Data/First/*"],
++    })
++    const second = yield* pending(service, {
++      ...input("ses_child", "read", ["D:/Data/Second/file"]),
++      action: "external_directory", resources: ["D:/Data/Second/*"],
++    })
++    const logStart = state.durable.length
++    const traceStart = state.trace.length
++    const seq = state.sequences.get("ses_root")
++    state.afterSnapshot(() => Effect.gen(function* () {
++      // Interleave an ordinary Session.setPermissions-style update and a second user approval
++      // after the first snapshot, but before its durable publication acquires the Bus lock.
++      yield* state.publishDurable(SessionEvent.Permissions, {
++        sessionID: "ses_root", permissions: [...state.records.get("ses_root").permissions, concurrent],
++      })
++      yield* service.reply({ requestID: second.request.id, reply: { scope: "session", policy: "R=S*" } })
++    }))
++    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
++    yield* Fiber.join(first.fiber)
++    yield* Fiber.join(second.fiber)
++    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/First/file"])), true)
++    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Second/file"])), true)
++    const root = state.records.get("ses_root")
++    assert.deepEqual(root.permissions.filter((rule) => !rule.action.startsWith("__opencode_")), [original, concurrent])
++    assert.deepEqual(root.metadata, { keep: "not a policy field" })
++    const committed = state.durable.slice(logStart)
++    assert.equal(committed.length, 3, "the stale publication must not append a durable event")
++    assert.deepEqual(committed.map((event) => event.seq), [seq + 1, seq + 2, seq + 3])
++    const trace = state.trace.slice(traceStart)
++    assert.equal(trace.filter((step) => step === "rollback").length, 1)
++    assert.equal(trace.filter((step) => step === "notify:session.permissions").length, 3)
++    assert.equal((yield* service.list()).length, 0)
++    const expected = JSON.stringify(root)
++    state.replay()
++    assert.equal(JSON.stringify(state.records.get("ses_root")), expected)
++  }))
++})
++
++test("real service rechecks a request registered concurrently with a grant", async () => {
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const first = yield* pending(service, {
++      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++    })
++    state.publish((payload) => {
++      if (payload.id && payload.id !== first.request.id) {
++        state.publish(undefined)
++        return service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
++      }
++      return Effect.void
++    })
++    yield* service.assert(input())
++    yield* Fiber.join(first.fiber)
++    assert.equal((yield* service.list()).length, 0)
++  }))
++})
++
++test("real service keeps parent-list-only content pending and consumes R=-1 exactly once", async () => {
++  state.records.set("ses_root", { ...state.records.get("ses_root"), permissions: [] })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const content = yield* pending(service, {
++      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project/file"],
++      resources: ["D:/Data/Project/*"],
++    })
++    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-1" } })
++    assert.equal((yield* service.list()).length, 1)
++    const listing = { ...input("ses_root", "read", ["D:/Data"]), access: "listing" }
++    assert.equal(yield* service.allows({ ...listing, access: "content" }), false)
++    yield* service.assert(listing)
++    assert.equal(yield* service.allows(listing), false)
++    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-S" } })
++    assert.equal((yield* service.list()).length, 1)
++    assert.equal((yield* service.ask({ ...listing, sessionID: "ses_grandchild" })).effect, "allow")
++    assert.equal((yield* service.ask(input("ses_grandchild", "read", ["D:/Data/sibling/file"]))).effect, "ask")
++    yield* service.reply({ requestID: content.request.id, reply: "once" })
++    yield* Fiber.join(content.fiber)
++  }))
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask({ ...input("ses_child", "read", ["D:/Data"]), access: "listing" })).effect, "allow")
++    assert.equal((yield* service.ask(input("ses_child", "read", ["D:/Data/parent-file"]))).effect, "ask")
++  }))
++})
++
++test("real service =1 settles only the selected request, unlike durable session policy", async () => {
++  state.records.set("ses_root", { ...state.records.get("ses_root"), permissions: [] })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const selected = yield* pending(service, {
++      ...input("ses_root"), directories: ["D:/Data/Project"], // Ordinary read prompts also offer exact directories.
++    })
++    const other = yield* pending(service, input("ses_child"))
++    yield* service.reply({ requestID: selected.request.id, reply: { scope: "session", policy: "R=1*" } })
++    yield* Fiber.join(selected.fiber)
++    assert.deepEqual((yield* service.list()).map((item) => item.id), [other.request.id])
++    assert.equal((yield* service.ask(input())).effect, "ask")
++    assert.deepEqual(state.records.get("ses_root").permissions, [])
++    yield* service.reply({ requestID: other.request.id, reply: "once" })
++    yield* Fiber.join(other.fiber)
++  }))
++})
++
++test("existing persistent always remains project-scoped and survives service recreation", async () => {
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const selected = yield* pending(service, { ...input(), save: ["D:/Data/Project/*"] })
++    yield* service.reply({ requestID: selected.request.id, reply: "always" })
++    yield* Fiber.join(selected.fiber)
++    assert.equal(state.saved.length, 1)
++    assert.deepEqual(state.records.get("ses_root").permissions, [])
++  }))
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(input("ses_unrelated"))).effect, "allow")
++    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Project-other/file"])), false)
++    assert.equal(yield* service.allows(input("ses_child", "update")), false)
++  }))
++})
+diff --git a/packages/core/test/permission/session-grant.test.mjs b/packages/core/test/permission/session-grant.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..14b996141327e7a46773fd88b4da82c7d08258d0
+--- /dev/null
++++ b/packages/core/test/permission/session-grant.test.mjs
+@@ -0,0 +1,90 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { registerHooks } from "node:module"
++
++registerHooks({
++  resolve(specifier, context, next) {
++    if (specifier === "@opencode/schema/permission-shorthand")
++      return { url: new URL("../../../schema/src/permission-shorthand.ts", import.meta.url).href, shortCircuit: true }
++    if (specifier === "./session-grant.js")
++      return { url: new URL("../../src/permission/session-grant.ts", import.meta.url).href, shortCircuit: true }
++    return next(specifier, context)
++  },
++})
++const { contains, decision, directories, selections, encode, decode, unknownEffectsDenied } =
++  await import("../../src/permission/session-grant.ts")
++const request = (operations = ["read"], paths = ["D:/Data/Project/nested/file"], action = "read", access = "content") => ({
++  id: "per_test", sessionID: "ses_child", action, operations, paths, resources: paths, access,
++})
++const grants = (text = "R=S*", directory = "D:/Data/Project") =>
++  selections({ scope: "session", policy: text }).map((rule) => ({ ...rule, directory }))
++
++test("Windows subtree boundaries normalize slashes/case and reject traversal and sibling prefixes", () => {
++  assert.equal(contains("D:\\Data\\Project", "d:/DATA/project/child/deeper/file"), true)
++  for (const target of ["D:/Data/Project-other/file", "D:/Data/Project/../outside/file", "E:/Data/Project/file"])
++    assert.equal(contains("D:/Data/Project", target), false)
++})
++test("approved RU=S* CD=D* matrix enforces reads/updates versus creates/deletes and moves", () => {
++  const matrix = grants("RU=S* CD=D*")
++  for (const operation of ["read", "update", "create", "delete"])
++    assert.equal(decision(matrix, request([operation], undefined, operation === "read" ? "read" : "edit")),
++      operation === "read" || operation === "update" ? "allow" : "deny")
++  assert.equal(decision(matrix, request(["delete", "create"], undefined, "edit")), "deny")
++  assert.equal(decision(matrix, request(["delete", "update"], undefined, "edit")), "deny")
++  assert.equal(decision(matrix, request(["read"], ["D:/Data/Project-other/file"])), undefined)
++})
++test("parent-list reads never cover parent files, sibling contents, grep or recursive glob", () => {
++  const parent = grants("R=-S")
++  assert.equal(decision(parent, request(["read"], ["D:/Data"], "read", "listing")), "allow")
++  for (const input of [
++    request(["read"], ["D:/Data/file"]), request(["read"], ["D:/Data/sibling/file"]),
++    request(["read"], ["D:/Data/sibling"], "read", "listing"),
++    request(["read"], ["D:/Data"], "glob"), request(["read"], ["D:/Data"], "grep"),
++  ]) assert.equal(decision(parent, input), undefined)
++  assert.equal(grants("R=-1")[0].lifetime, "once")
++})
++test("compact contradictions and MCP tokens reject before producing any policy", () => {
++  for (const text of ["R=S* R=D*", "R=-S*", "U=-S", "", "RU=S* CD=D* MCP=1 council"])
++    assert.throws(() => grants(text))
++  assert.throws(() => selections({ scope: "session", rules: [
++    { operation: "read", effect: "allow", lifetime: "session", recursive: true, scope: "parent-list" },
++  ] }))
++})
++test("recursive searches require subtree coverage and honor nested denials", () => {
++  const search = { ...request(["read"], ["D:/Data/Project"], "grep"), metadata: { filesystemReadScope: "recursive" } }
++  assert.equal(decision(grants("R=S"), search), undefined)
++  assert.equal(decision(grants("R=S*"), search), "allow")
++  assert.equal(decision([
++    ...grants("R=S*"), ...grants("R=D", "D:/Data/Project/private"),
++  ], search), "deny")
++  assert.equal(decision(grants("R=S"), request(["read"], ["D:/Data/Project/file.txt"])), "allow")
++})
++test("structured selections and compact input enforce identical policies", () => {
++  const rules = selections({ scope: "session", policy: "RU=S* CD=D*" })
++  assert.deepEqual(selections({ scope: "session", rules }), rules)
++  assert.equal(selections("once"), undefined)
++  assert.equal(selections("always"), undefined)
++  assert.equal(grants("R=1")[0].lifetime, "once")
++  for (const operation of ["create", "update", "delete"])
++    assert.equal(decision(grants("R=S*"), request([operation], undefined, "edit")), undefined)
++  assert.equal(decision(grants("R=S*"), { ...request(), operations: undefined }), undefined)
++})
++test("durable rules survive serialization/recreation, without using project save patterns", () => {
++  const before = grants("RU=S* CD=D*")
++  const after = decode(JSON.parse(JSON.stringify(before.map(encode))))
++  assert.deepEqual(after, before)
++  assert.equal(decision(after, request(["update"], undefined, "edit")), "allow")
++  const input = { ...request(), action: "external_directory", resources: ["D:/Data/Project/nested/*"], save: ["D:/Data/*"] }
++  assert.deepEqual(directories(input), ["D:/Data/Project/nested"])
++  assert.equal(directories({ ...input, resources: ["D:/Other/*"] }), undefined)
++})
++test("shell/MCP unknown local effects fail closed under explicit conversation denies", () => {
++  const matrix = grants("RU=S* CD=D*")
++  for (const action of ["shell", "mcp.fs.delete"]) {
++    const input = { ...request(["read"], undefined, action), metadata: { filesystemEffects: "unknown" } }
++    assert.equal(decision(matrix, input), undefined)
++    assert.equal(unknownEffectsDenied(matrix, input), true)
++    assert.equal(unknownEffectsDenied(grants("R=S*"), input), false)
++    assert.equal(unknownEffectsDenied([], input), false)
++  }
++})
+diff --git a/packages/protocol/src/groups/permission.ts b/packages/protocol/src/groups/permission.ts
+index 8951244c5bc0c513717e91476f6080e1c015817f..a0f1bf2d5d45908297408dd300a4142fd5affa5a 100644
+--- a/packages/protocol/src/groups/permission.ts
++++ b/packages/protocol/src/groups/permission.ts
+@@ -8,6 +8,7 @@ import { Context, Schema } from "effect"
+ import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/http-api"
+ import {
+   ConflictError,
++  InvalidRequestError,
+   LocationNotFoundError,
+   PermissionNotFoundError,
+   PermissionSavedNotFoundError,
+@@ -91,6 +92,10 @@ export const makePermissionGroup = <
+           id: Permission.ID.pipe(Schema.optional),
+           action: Permission.Request.fields.action,
+           resources: Permission.Request.fields.resources,
++          operations: Permission.Request.fields.operations,
++          paths: Permission.Request.fields.paths,
++          directories: Permission.Request.fields.directories,
++          access: Permission.Request.fields.access,
+           save: Permission.Request.fields.save,
+           metadata: Permission.Request.fields.metadata,
+           source: Permission.Request.fields.source,
+@@ -146,7 +151,7 @@ export const makePermissionGroup = <
+           message: Schema.String.pipe(Schema.optional),
+         }),
+         success: HttpApiSchema.NoContent,
+-        error: [SessionNotFoundError, PermissionNotFoundError],
++        error: [SessionNotFoundError, PermissionNotFoundError, InvalidRequestError],
+       })
+         .middleware(sessionLocationMiddleware)
+         .annotateMerge(
+diff --git a/packages/schema/src/config/experimental.ts b/packages/schema/src/config/experimental.ts
+index d46710bcdcc7898d79577a25a60b573919c032b5..bb65adaddced3424ed94d7d74bf12be9d4dbeea9 100644
+--- a/packages/schema/src/config/experimental.ts
++++ b/packages/schema/src/config/experimental.ts
+@@ -7,6 +7,10 @@ import { ConfigModel } from "./model.js"
+ import { ConfigPolicy } from "./policy.js"
+ 
+ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
++  mcp_selection: Schema.String.pipe(optional).annotate({
++    description:
++      'Experimental: exact selection of configured MCP servers, e.g. "MCP:=playwright". Compiles to existing per-server disabled settings; native-tool permissions are unchanged. Filesystem shorthand belongs in session permission replies.',
++  }),
+   portable_shell_scanner: Schema.Boolean.pipe(optional).annotate({
+     description: "Deprecated: the built-in shell permission scanner is now always enabled.",
+   }),
+diff --git a/packages/schema/src/permission-shorthand.ts b/packages/schema/src/permission-shorthand.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6afef860f75298f62c1229b4d35096916598e23b
+--- /dev/null
++++ b/packages/schema/src/permission-shorthand.ts
+@@ -0,0 +1,146 @@
++/** Local filesystem intent. Path resolution and durable/one-shot grants belong to the caller. */
++export interface FilesystemDecision {
++  readonly operation: "read" | "create" | "update" | "delete"
++  readonly effect: "allow" | "deny" | "ask"
++  readonly lifetime: "once" | "session"
++  readonly recursive: boolean
++  readonly scope: "selected" | "parent-list"
++}
++
++/** Plain JSON, shared by config, core and browser UI; omitted decisions remain omitted. */
++export interface PermissionShorthand {
++  readonly filesystem: readonly FilesystemDecision[]
++  readonly mcp?: readonly string[]
++}
++
++/** Selection can change disabled, but retains the rest of the server's config. */
++export type CompiledMcpSetting<T> = {
++  [Key in keyof T]: Key extends "disabled" ? boolean | undefined : T[Key]
++} & { readonly disabled?: boolean }
++
++export class PermissionShorthandError extends Error {
++  readonly token: string
++
++  constructor(message: string, token: string) {
++    super(`${message}: ${token}`)
++    this.name = "PermissionShorthandError"
++    this.token = token
++  }
++}
++
++const operations = {
++  R: "read",
++  C: "create",
++  U: "update",
++  D: "delete",
++} as const
++
++/**
++ * Parse everything before returning anything. No settings or grants are mutated.
++ * =1 is one request; =S is a durable conversation-family decision; =D is a
++ * session denial. Negative R scope permits parent listing, never parent file reads.
++ */
++export function parsePermissionShorthand(text: string): PermissionShorthand {
++  const filesystem: FilesystemDecision[] = []
++  const seen = new Set<FilesystemDecision["operation"]>()
++  let mcp: string[] | undefined
++  for (const token of text.trim().split(/\s+/u).filter(Boolean)) {
++    if (/^ALL:/iu.test(token))
++      throw new PermissionShorthandError("All-resource enforcement is unsupported", token)
++    if (/^MCP:=/iu.test(token)) {
++      if (mcp !== undefined) throw new PermissionShorthandError("Duplicate MCP selection", token)
++      const names = token.slice(5).split(",")
++      if (names.some((name) => name === "" || /[*:=]/u.test(name)))
++        throw new PermissionShorthandError("Expected exact configured MCP server names separated by commas", token)
++      if (new Set(names).size !== names.length)
++        throw new PermissionShorthandError("Duplicate MCP server name", token)
++      mcp = names
++      continue
++    }
++    const match = /^([RCUD]+)=(-?[1SD])(\*)?$/iu.exec(token)
++    if (!match) throw new PermissionShorthandError("Unknown permission shorthand token", token)
++    const letters = match[1].toUpperCase()
++    const value = match[2].toUpperCase()
++    const parent = value.startsWith("-")
++    const recursive = match[3] !== undefined
++    if (parent && (letters !== "R" || value === "-D" || recursive))
++      throw new PermissionShorthandError("Negative scope requires R=-1 or R=-S without recursion", token)
++    for (const letter of letters) {
++      const operation =
++        letter === "R" ? operations.R : letter === "C" ? operations.C : letter === "U" ? operations.U : operations.D
++      if (seen.has(operation))
++        throw new PermissionShorthandError(`Duplicate or contradictory ${operation} decision`, token)
++      seen.add(operation)
++      filesystem.push({
++        operation,
++        effect: value === "D" ? "deny" : "allow",
++        lifetime: value === "1" || value === "-1" ? "once" : "session",
++        recursive,
++        scope: parent ? "parent-list" : "selected",
++      })
++    }
++  }
++  return { filesystem, ...(mcp === undefined ? {} : { mcp }) }
++}
++
++/** Canonical text. There is no approved spelling for ask; never invent one. */
++export function formatPermissionShorthand(value: PermissionShorthand): string {
++  const groups = new Map<string, string>()
++  for (const decision of value.filesystem) {
++    const entry = Object.entries(operations).find(([, operation]) => operation === decision.operation)
++    if (
++      entry === undefined ||
++      decision.effect === "ask" ||
++      (decision.effect === "deny" && decision.lifetime !== "session") ||
++      (decision.scope === "parent-list" && (decision.operation !== "read" || decision.effect !== "allow" || decision.recursive))
++    )
++      throw new PermissionShorthandError("Decision has no approved shorthand spelling", JSON.stringify(decision))
++    const suffix =
++      `${decision.scope === "parent-list" ? "-" : ""}` +
++      `${decision.effect === "deny" ? "D" : decision.lifetime === "once" ? "1" : "S"}` +
++      `${decision.recursive ? "*" : ""}`
++    groups.set(suffix, (groups.get(suffix) ?? "") + entry[0])
++  }
++  const text = [
++    ...Array.from(groups, ([suffix, letters]) => `${letters}=${suffix}`),
++    ...(value.mcp === undefined ? [] : [`MCP:=${value.mcp.join(",")}`]),
++  ].join(" ")
++  parsePermissionShorthand(text)
++  return text
++}
++
++/**
++ * Compile only the MCP availability axis into existing per-server disabled
++ * settings: selected configured servers are enabled, other configured servers
++ * are disabled. Tool-specific permission rules are not modified. This says
++ * nothing about a server's external side effects or separately attached clients.
++ */
++export function compileMcpSelection<T extends { readonly disabled?: boolean }>(
++  selection: readonly string[] | undefined,
++  servers: Readonly<Record<string, T>>,
++): Record<string, CompiledMcpSetting<T>> {
++  if (selection !== undefined) {
++    for (const name of selection)
++      if (!Object.hasOwn(servers, name))
++        throw new PermissionShorthandError("Unknown configured MCP server", name)
++  }
++  const selected = selection === undefined ? undefined : new Set(selection)
++  // The spread preserves each union variant; only disabled is widened. TS cannot
++  // infer that distributive relationship through Object.fromEntries.
++  return Object.fromEntries(
++    Object.entries(servers).map(([name, server]) => [
++      name,
++      selected === undefined ? { ...server } : { ...server, disabled: !selected.has(name) },
++    ]),
++  ) as Record<string, CompiledMcpSetting<T>>
++}
++
++/** Validate both axes before callers apply any settings or scoped grant. */
++export function compilePermissionShorthand<T extends { readonly disabled?: boolean }>(
++  text: string,
++  servers: Readonly<Record<string, T>>,
++) {
++  const decisions = parsePermissionShorthand(text)
++  const mcpSettings = compileMcpSelection(decisions.mcp, servers)
++  return { decisions, mcpSettings }
++}
+diff --git a/packages/schema/src/permission.ts b/packages/schema/src/permission.ts
+index 41887ed9ea640cacba355eabda2d54561747afbc..69cc6a2581239bf0edabbdf8fe3ec5f479d58cc1 100644
+--- a/packages/schema/src/permission.ts
++++ b/packages/schema/src/permission.ts
+@@ -23,10 +23,23 @@ export const Source = Schema.Union([
+ ]).annotate({ identifier: "Permission.Source" })
+ export type Source = typeof Source.Type
+ 
++export const Operation = Schema.Literals(["read", "create", "update", "delete"]).annotate({
++  identifier: "Permission.Operation",
++})
++export type Operation = typeof Operation.Type
++
+ const RequestFields = {
+   sessionID: SessionID,
+   action: Schema.String,
+   resources: Schema.Array(Schema.String),
++  /** Explicit filesystem needs. Omitted for shell and unclassified requests. */
++  operations: Schema.Array(Operation).pipe(optional),
++  /** Absolute lexical paths; never patterns or tool search expressions. */
++  paths: Schema.Array(Schema.String).pipe(optional),
++  /** Exact directory boundaries offered in the prompt, independent of persistent save patterns. */
++  directories: Schema.Array(Schema.String).pipe(optional),
++  /** Listing is distinct from reading file contents (including grep/glob traversal). */
++  access: Schema.Literals(["content", "listing"]).pipe(optional),
+   save: Schema.Array(Schema.String).pipe(optional),
+   metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
+   source: Source.pipe(optional),
+@@ -39,7 +52,48 @@ export const Request = Schema.Struct({
+ }).annotate({ identifier: "Permission.Request" })
+ export interface Request extends Schema.Schema.Type<typeof Request> {}
+ 
+-export const Reply = Schema.Literals(["once", "always", "reject"]).annotate({ identifier: "Permission.Reply" })
++export const SessionPolicy = Schema.Struct({
++  scope: Schema.Literal("session"),
++  read: Schema.Literals(["allow", "ask", "deny"]),
++  create: Schema.Literals(["allow", "ask", "deny"]),
++  update: Schema.Literals(["allow", "ask", "deny"]),
++  delete: Schema.Literals(["allow", "ask", "deny"]),
++  /** Omitted means all four operations apply recursively to the displayed subtree. */
++  recursive: Schema.Array(Operation).pipe(optional),
++}).annotate({ identifier: "Permission.SessionPolicy" })
++export interface SessionPolicy extends Schema.Schema.Type<typeof SessionPolicy> {}
++
++export const CompactPolicy = Schema.Struct({
++  scope: Schema.Literal("session"),
++  /** CRUD only, e.g. "RU=S* CD=D*". Contradictions and other tool switches are rejected. */
++  policy: Schema.String,
++}).annotate({ identifier: "Permission.CompactPolicy" })
++export interface CompactPolicy extends Schema.Schema.Type<typeof CompactPolicy> {}
++
++export const Selection = Schema.Struct({
++  operation: Operation,
++  effect: Schema.Literals(["allow", "deny", "ask"]),
++  lifetime: Schema.Literals(["once", "session"]),
++  recursive: Schema.Boolean,
++  scope: Schema.Literals(["selected", "parent-list"]),
++}).annotate({ identifier: "Permission.Selection" })
++export interface Selection extends Schema.Schema.Type<typeof Selection> {}
++export const StructuredPolicy = Schema.Struct({
++  scope: Schema.Literal("session"),
++  rules: Schema.Array(Selection),
++}).annotate({ identifier: "Permission.StructuredPolicy" })
++export interface StructuredPolicy extends Schema.Schema.Type<typeof StructuredPolicy> {}
++
++export class InvalidPolicyError extends Schema.TaggedError<InvalidPolicyError>()(
++  "Permission.InvalidPolicyError",
++  { message: Schema.String },
++  { httpApiStatus: 400 },
++) {}
++
++export const Reply = Schema.Union([Schema.Literals([
++  "once", "always", "reject",
++  "session_read", "session_create", "session_update", "session_delete", "session_crud",
++]), SessionPolicy, CompactPolicy, StructuredPolicy]).annotate({ identifier: "Permission.Reply" })
+ export type Reply = typeof Reply.Type
+ 
+ const Asked = ephemeral({ type: "permission.asked", schema: Request.fields })
+diff --git a/packages/server/src/handlers/permission.ts b/packages/server/src/handlers/permission.ts
+index 68d0543a4c158270200ae200ddede57bd07ba894..8ea42f6d0e5d27f1ec2a31d06b5f3846b52cb2bc 100644
+--- a/packages/server/src/handlers/permission.ts
++++ b/packages/server/src/handlers/permission.ts
+@@ -6,7 +6,7 @@ import { Session } from "@opencode/core/session"
+ import { Effect } from "effect"
+ import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
+ import { Api } from "../api"
+-import { ConflictError, PermissionNotFoundError, PermissionSavedNotFoundError } from "@opencode/protocol/errors"
++import { ConflictError, InvalidRequestError, PermissionNotFoundError, PermissionSavedNotFoundError } from "@opencode/protocol/errors"
+ import { locationErrors, response, sessionInfo } from "../location"
+ import { missingSession } from "./session-error"
+ 
+@@ -47,6 +47,10 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission",
+                 sessionID: ctx.params.sessionID,
+                 action: ctx.payload.action,
+                 resources: ctx.payload.resources,
++                operations: ctx.payload.operations,
++                paths: ctx.payload.paths,
++                directories: ctx.payload.directories,
++                access: ctx.payload.access,
+                 save: ctx.payload.save,
+                 metadata: ctx.payload.metadata,
+                 source: ctx.payload.source,
+@@ -79,7 +83,12 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission",
+           const owned = yield* requireOwnedRequest(ctx.params.sessionID, ctx.params.requestID)
+           yield* owned.permission
+             .reply({ requestID: ctx.params.requestID, reply: ctx.payload.decision, message: ctx.payload.message })
+-            .pipe(Effect.catchTag("Permission.NotFoundError", () => missingRequest(ctx.params.requestID)))
++            .pipe(
++              Effect.catchTag("Permission.NotFoundError", () => missingRequest(ctx.params.requestID)),
++              Effect.catchTag("Session.NotFoundError", missingSession),
++              Effect.catchTag("Permission.InvalidPolicyError", (error) =>
++                new InvalidRequestError({ message: error.message, kind: "permission_policy", field: "decision" })),
++            )
+           return HttpApiSchema.NoContent.make()
+         }),
+       )
+diff --git a/packages/tui/src/mini/footer.permission.tsx b/packages/tui/src/mini/footer.permission.tsx
+index 235aa5a0b4a459889e96125caed86c3aad306f81..cb04ec5fd7a0c3a0116c3a4ad41b05c695d30684 100644
+--- a/packages/tui/src/mini/footer.permission.tsx
++++ b/packages/tui/src/mini/footer.permission.tsx
+@@ -23,6 +23,7 @@ import {
+   permissionInfo,
+   permissionLabel,
+   permissionOptions,
++  permissionPolicyError,
+   permissionReject,
+   permissionRun,
+   permissionShift,
+@@ -165,7 +166,13 @@ export function RunPermissionBody(props: {
+     },
+   }))
+   const opts = createMemo(() =>
+-    permissionOptions(stage()).filter((option) => option !== "always" || (props.request.save?.length ?? 0) > 0),
++    permissionOptions(stage()).filter((option) => {
++      if (option === "always") return (props.request.save?.length ?? 0) > 0
++      if (option === "policy" || option === "session_read") return (!!props.request.directories?.length || props.request.action === "external_directory") &&
++        !!props.request.operations?.length &&
++        (option !== "session_read" || props.request.operations.every((operation) => operation === "read"))
++      return true
++    }),
+   )
+   const busy = createMemo(() => state().submitting)
+   const controlsWidth = () => opts().reduce((total, option) => total + stringWidth(permissionLabel(option)) + 3, -1)
+@@ -175,6 +182,7 @@ export function RunPermissionBody(props: {
+       : `${props.mono ? "left/right" : "⇆"} select  enter confirm  esc ${stage() === "always" ? "cancel" : "reject"}`
+   const inlineControls = () => controlsWidth() + stringWidth(hint()) + 1 <= width() - (compact() ? 0 : 5)
+   const title = createMemo(() => {
++    if (stage() === "policy") return "Session CRUD policy"
+     if (stage() === "always") {
+       return "Always allow"
+     }
+@@ -206,6 +214,13 @@ export function RunPermissionBody(props: {
+   })
+ 
+   const submit = async (next: PermissionReply) => {
++    if (typeof next.decision === "object" && "policy" in next.decision) {
++      const error = permissionPolicyError(next.decision.policy)
++      if (error) {
++        setState((prev) => ({ ...prev, error, submitting: false }))
++        return
++      }
++    }
+     setState((prev) => ({
+       ...prev,
+       submitting: true,
+@@ -213,10 +228,12 @@ export function RunPermissionBody(props: {
+ 
+     try {
+       await props.onReply(next)
+-    } catch {
++      setState((prev) => ({ ...prev, stage: "permission", submitting: false, error: undefined }))
++    } catch (error) {
+       setState((prev) => ({
+         ...prev,
+         submitting: false,
++        error: error instanceof Error ? error.message : String(error),
+       }))
+     }
+   }
+@@ -250,7 +267,7 @@ export function RunPermissionBody(props: {
+ 
+   useKeyboard((event) => {
+     const cur = state()
+-    if (cur.stage === "reject") {
++    if (cur.stage === "reject" || cur.stage === "policy") {
+       return
+     }
+ 
+@@ -321,14 +338,23 @@ export function RunPermissionBody(props: {
+         <text height={1} fg={props.theme.text} wrapMode="none" truncate>
+           <span style={{ fg: props.theme.permission }}>{props.mono ? "! " : "△ "}</span>
+           {title()}
++          {props.request.operations?.length ? ` · ${props.request.operations.join("/")}` : ""}
+         </text>
+-        <Show when={!compact() && stage() === "reject"}>
+-          <text fg={props.theme.muted}>Tell OpenCode what to do differently</text>
++        <Show when={!compact() && (stage() === "reject" || stage() === "policy")}>
++          <text fg={props.theme.muted}>{stage() === "policy"
++            ? "RU=S* CD=D* · exact subtree + descendants · survives restart · =1 once · R=-S parent listing · omitted unchanged"
++            : "Tell OpenCode what to do differently"}</text>
++        </Show>
++        <Show when={state().error}><text fg={props.theme.permission}>{state().error}</text></Show>
++        <Show when={stage() === "policy" || stage() === "permission"}>
++          <For each={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}>
++            {(directory) => <text fg={props.theme.text}>{directory}</text>}
++          </For>
+         </Show>
+       </box>
+ 
+       <Show
+-        when={stage() !== "reject"}
++        when={stage() !== "reject" && stage() !== "policy"}
+         fallback={
+           <box width="100%" flexGrow={1} minHeight={0} justifyContent="flex-end">
+             <box
+diff --git a/packages/tui/src/mini/permission.shared.ts b/packages/tui/src/mini/permission.shared.ts
+index 38d2de31354ac64d9acceb0b3e5a6ba033549d1f..89d51e88289d1aefe24593abb1eb0714bbd72a1b 100644
+--- a/packages/tui/src/mini/permission.shared.ts
++++ b/packages/tui/src/mini/permission.shared.ts
+@@ -1,10 +1,11 @@
+ import type { MiniPermissionRequest, PermissionReply } from "./types"
++import { parsePermissionShorthand } from "@opencode/schema/permission-shorthand"
+ import { permissionAlwaysLines, permissionOptionLabel, permissionPresentation } from "../util/permission"
+ import { toolPath } from "./tool"
+ import { monoPrefix } from "./mono"
+ 
+-export type PermissionStage = "permission" | "always" | "reject"
+-export type PermissionOption = "once" | "always" | "reject" | "confirm" | "cancel"
++export type PermissionStage = "permission" | "always" | "reject" | "policy"
++export type PermissionOption = "once" | "always" | "reject" | "confirm" | "cancel" | "session_read" | "policy"
+ 
+ export type PermissionBodyState = {
+   requestID: string
+@@ -13,6 +14,7 @@ export type PermissionBodyState = {
+   selected: PermissionOption
+   message: string
+   submitting: boolean
++  error?: string
+ }
+ 
+ export type PermissionStep = {
+@@ -35,7 +37,7 @@ export function createPermissionBodyState(
+ 
+ export function permissionOptions(stage: PermissionStage): PermissionOption[] {
+   if (stage === "permission") {
+-    return ["once", "always", "reject"]
++    return ["once", "session_read", "policy", "always", "reject"]
+   }
+ 
+   if (stage === "always") {
+@@ -71,9 +73,20 @@ export function permissionInfo(request: MiniPermissionRequest, directory?: strin
+ }
+ 
+ export function permissionLabel(option: PermissionOption): string {
++  if (option === "session_read") return "Read subtree/session"
++  if (option === "policy") return "Session CRUD…"
+   return permissionOptionLabel(option)
+ }
+ 
++export function permissionPolicyError(text: string): string | undefined {
++  try {
++    const parsed = parsePermissionShorthand(text)
++    if (parsed.mcp !== undefined) return "MCP selection belongs to tool configuration, not a directory permission grant."
++  } catch (error) {
++    return error instanceof Error ? error.message : String(error)
++  }
++}
++
+ export { permissionAlwaysLines }
+ 
+ function permissionReply(
+@@ -120,6 +133,10 @@ export function permissionRun(state: PermissionBodyState, requestID: string, opt
+   }
+ 
+   if (state.stage === "permission") {
++    if (option === "session_read") return {
++      state, reply: permissionReply(state.sessionID, requestID, "session_read"),
++    }
++    if (option === "policy") return { state: { ...state, stage: "policy", message: "" } }
+     if (option === "always") {
+       return {
+         state: {
+@@ -171,6 +188,9 @@ export function permissionReject(state: PermissionBodyState, requestID: string):
+     return undefined
+   }
+ 
++  if (state.stage === "policy") return permissionReply(state.sessionID, requestID, {
++    scope: "session", policy: state.message.trim(),
++  })
+   return permissionReply(state.sessionID, requestID, "reject", state.message)
+ }
+ 
+diff --git a/packages/tui/src/mini/types.ts b/packages/tui/src/mini/types.ts
+index 4519a2a91402bb80aa0b4c32ff63b264c22f2e5d..28e0c0a8f8797c208c2f003950fea3f0095fba3a 100644
+--- a/packages/tui/src/mini/types.ts
++++ b/packages/tui/src/mini/types.ts
+@@ -17,7 +17,6 @@ import type {
+   OpenCodeClient,
+   LocationGetOutput,
+   LocationRef,
+-  PermissionRequest,
+   ReferenceListOutput,
+   SessionMessageAssistantTool,
+ } from "@opencode/client/promise"
+@@ -25,6 +24,8 @@ import type { Config } from "../config"
+ import type { Todo } from "../util/todo"
+ import type { CliRenderer } from "@opentui/core"
+ import type { SessionInbox } from "@opencode/schema/session-inbox"
++import type { Permission } from "@opencode/schema/permission"
++type PermissionRequest = Permission.Request
+ 
+ export type RunFilePart = {
+   type: "file"
+@@ -389,7 +390,9 @@ export type FooterEvent =
+       state: FooterSubagentState
+     }
+ 
+-export type PermissionReply = Parameters<OpenCodeClient["permission"]["reply"]>[0]
++export type PermissionReply = Omit<Parameters<OpenCodeClient["permission"]["reply"]>[0], "decision"> & {
++  decision: Permission.Reply
++}
+ 
+ export type FormReply = {
+   sessionID: string
+diff --git a/packages/tui/src/routes/session/permission.tsx b/packages/tui/src/routes/session/permission.tsx
+index 3618f19e0f852e3f649118485bb8ab460650ae05..cf24d0d4ceca874e6d9feb65ffcd06c2839050fc 100644
+--- a/packages/tui/src/routes/session/permission.tsx
++++ b/packages/tui/src/routes/session/permission.tsx
+@@ -3,7 +3,10 @@ import { createMemo, For, Match, Show, Switch } from "solid-js"
+ import { Portal, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+ import type { TextareaRenderable } from "@opentui/core"
+ import { useTheme, useThemes } from "../../context/theme"
+-import type { PermissionReply, PermissionRequest } from "@opencode/client"
++import type { Permission } from "@opencode/schema/permission"
++import { parsePermissionShorthand } from "@opencode/schema/permission-shorthand"
++type PermissionReply = Permission.Reply
++type PermissionRequest = Permission.Request
+ import { SplitBorder } from "../../ui/border"
+ import { useData } from "../../context/data"
+ import { filetype } from "../../util/filetype"
+@@ -17,7 +20,7 @@ import { SimulationSemantics } from "../../simulation/semantics"
+ import { PatchDiff } from "../../component/patch-diff"
+ import { useToast } from "../../ui/toast"
+ 
+-type PermissionStage = "permission" | "reject"
++type PermissionStage = "permission" | "reject" | "policy"
+ 
+ function EditBody(props: { file?: string; diff?: string; patch?: string }) {
+   const theme = useTheme()
+@@ -115,6 +118,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+   const toast = useToast()
+   const [store, setStore] = createStore({
+     stage: "permission" as PermissionStage,
++    error: "",
+   })
+   const pathFormatter = usePathFormatter()
+   const session = createMemo(() => data.session.get(props.request.sessionID))
+@@ -134,13 +138,38 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+   const theme = useTheme()
+ 
+   function reply(value: PermissionReply, message?: string) {
++    if (typeof value === "object" && "policy" in value) {
++      try {
++        const parsed = parsePermissionShorthand(value.policy)
++        if (parsed.mcp !== undefined) throw new Error("MCP selection belongs to tool configuration, not a directory permission grant.")
++      } catch (error) {
++        setStore("error", error instanceof Error ? error.message : String(error))
++        return
++      }
++    }
++    setStore("error", "")
+     void data.session.permission
+       .reply({ sessionID: props.request.sessionID, requestID: props.request.id, decision: value, message })
+-      .catch((error: unknown) => toast.error(error))
++      .then(() => setStore("stage", "permission"))
++      .catch((error: unknown) => {
++        setStore("error", error instanceof Error ? error.message : String(error))
++        toast.error(error)
++      })
+   }
+ 
+   return (
+-    <Switch>
++      <Switch>
++        <Match when={store.stage === "policy"}>
++          <RejectPrompt
++            action={props.request.action}
++            instance={props.request.id}
++            policy
++            directories={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}
++            error={store.error}
++            onConfirm={(policy) => reply({ scope: "session", policy })}
++            onCancel={() => setStore("stage", "permission")}
++          />
++        </Match>
+       <Match when={store.stage === "reject"}>
+         <RejectPrompt
+           action={props.request.action}
+@@ -201,7 +230,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+             <box flexDirection="column" gap={0}>
+               <box flexDirection="row" gap={1} flexShrink={0}>
+                 <text fg={theme.text.feedback.warning.base}>{"△"}</text>
+-                <text fg={theme.text.base}>Permission required</text>
++                <text fg={theme.text.base}>Permission required{props.request.operations?.length ? ` · ${props.request.operations.join("/")}` : ""}</text>
+               </box>
+               <Show when={props.request.action !== "shell" && current.title}>
+                 <box flexDirection="row" gap={1} paddingLeft={2} flexShrink={0}>
+@@ -221,6 +250,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+               instance={props.request.id}
+               header={header()}
+               body={(option) => (
++                <box gap={1}>
++                <For each={props.request.directories}>
++                  {(directory) => <text fg={theme.text.muted}>Policy directory: {directory}</text>}
++                </For>
+                 <Show when={option === "always"} fallback={presentationBody()}>
+                   <box paddingLeft={1} gap={1}>
+                     <For each={permissionAlwaysLines(props.request)}>
+@@ -228,19 +261,27 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
+                     </For>
+                   </box>
+                 </Show>
++                </box>
+               )}
+-              options={
+-                props.request.save?.length
+-                  ? {
+-                      once: permissionOptionLabel("once"),
+-                      always: permissionOptionLabel("always"),
+-                      reject: permissionOptionLabel("reject"),
+-                    }
+-                  : { once: permissionOptionLabel("once"), reject: permissionOptionLabel("reject") }
+-              }
++              options={{
++                once: permissionOptionLabel("once"),
++                ...((props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length
++                  ? { policy: "Session CRUD policy…", ...(props.request.operations.every((operation) => operation === "read")
++                    ? { session_read: "Read subtree · session + descendants" } : {}) } : {}),
++                ...(props.request.save?.length ? { always: permissionOptionLabel("always") } : {}),
++                reject: permissionOptionLabel("reject"),
++              }}
+               escapeKey="reject"
+               fullscreen
+               onSelect={(option) => {
++                if (option === "policy") {
++                  setStore("stage", "policy")
++                  return
++                }
++                if (option === "session_read") {
++                  reply("session_read")
++                  return
++                }
+                 if (option === "always") {
+                   reply("always")
+                   return
+@@ -274,6 +315,9 @@ function RejectPrompt(props: {
+   instance: string
+   onConfirm: (message: string) => void
+   onCancel: () => void
++  policy?: boolean
++  error?: string
++  directories?: readonly string[]
+ }) {
+   let input: TextareaRenderable
+   const enabled = useInteractivity()
+@@ -322,11 +366,15 @@ function RejectPrompt(props: {
+       <box gap={1} paddingLeft={1} paddingRight={3} paddingTop={1} paddingBottom={1}>
+         <box flexDirection="row" gap={1} paddingLeft={1}>
+           <text fg={theme.text.feedback.error.base}>{"△"}</text>
+-          <text fg={theme.text.base}>Reject permission</text>
++          <text fg={theme.text.base}>{props.policy ? "Session CRUD policy" : "Reject permission"}</text>
+         </box>
+         <box paddingLeft={1}>
+-          <text fg={theme.text.muted}>Tell OpenCode what to do differently</text>
++          <text fg={theme.text.muted}>{props.policy
++            ? "RU=S* CD=D* · selected subtree + descendants · survives restart · =1 once · =S session · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged."
++            : "Tell OpenCode what to do differently"}</text>
+         </box>
++        <Show when={props.error}><text fg={theme.text.feedback.error.base}>{props.error}</text></Show>
++        <For each={props.directories}>{(directory) => <text fg={theme.text.base}>{directory}</text>}</For>
+       </box>
+       <box
+         flexDirection={narrow() ? "column" : "row"}

@@ -30,6 +30,9 @@ import { Instance } from "../instance/service.js"
 import { Database } from "../database/database.js"
 import { SessionHistory } from "../session/history.js"
 import { SessionModelRequest } from "../session/model-request.js"
+import { Agent } from "../agent.js"
+import { Service } from "../tool.js"
+import { registerSubagentCapabilities } from "../personalize/subagent-capabilities.js"
 import { Service as ModelResolverService } from "../model-resolver.js"
 import { capRequest } from "../personalize/output-request"
 
@@ -277,9 +280,12 @@ const isDue = (entry: ScheduleEntry, now: Date): boolean => {
 // ----------------------------------------------------------------------------
 
 const DESC_COUNCIL =
-  "Convene a multi-model council: fan the same question to several models directly (bypasses the " +
-  "task tool's single-model limit) and combine their answers by strategy. See the `strategy` " +
-  "parameter for the seven modes and their aliases.\n\nMembers come from council.json — a " +
+  "Run equal-tier reviewer slots, then a separate judge. Modes: independent (default; no peer " +
+  "answers or parent history), collaborative (peer debate/voting permitted). Strategies: council, " +
+  "compare, debate, moa, router, consensus, arena. action=list_modes returns the complete catalog, " +
+  "aliases and examples without a model call. Repeated models are separate reviewers. " +
+  "Default reviewers/judge are text-only; reviewer_agent/judge_agent enable real tool-using " +
+  "subagents with required-tool preflight. Text reviews are not executed tests.\n\nMembers come from council.json — a " +
   'per-project ".opencode/council.json" overrides the global config dir. Resolution: the inline ' +
   "`members` argument, else the per-project file (entries with " +
   'an empty "model" are skipped), else the global file.\n\nIf nothing is configured, the tool ' +
@@ -288,8 +294,13 @@ const DESC_COUNCIL =
 
 const PROMPT_COUNCIL =
   "Convene a council on this request via `council`.\n\n$ARGUMENTS\n\n" +
+  "For empty arguments, help, or modes: call action=list_modes and relay the catalog. " +
+  "Modes: independent (default; blind reviewers and fresh judge) or collaborative (peer exchange). " +
+  "Preserve requested slots, including repeated models. Council/moa/debate use a separate final judge; router is selector-only. " +
   "Pass user's question as `question`. If a strategy was named (council, compare, debate, moa, " +
-  "router, consensus, arena — aliases ok), pass it; else omit. Do not answer yourself first.\n\n" +
+  "router, consensus, arena — aliases ok), pass it; else omit. Consensus requires collaborative mode. " +
+  "For file research/testing use reviewer_agent/judge_agent and reviewer_tools/judge_tools; " +
+  "otherwise include the evidence in the question because text-only members have no tools. Do not answer yourself first.\n\n" +
   "Relay results as-is: synthesized/resolved answer for council/moa/debate; side-by-side for " +
   "compare/arena (for arena, ask which to keep); winner + scoreboard for consensus; chosen model " +
   "for router.\n\nIf not configured, print returned file path and tell user to add two or more " +
@@ -314,14 +325,49 @@ const STRATEGY_ALIASES: Record<string, string> = {
   arena: "arena",
 }
 
+const COUNCIL_CATALOG = `Interaction modes:
+- independent (default): each reviewer receives only the task and its own previous answer; no peer transcript or parent conversation. A fresh judge receives anonymized slots after all reviewers finish.
+- collaborative: debate may exchange peer answers; consensus uses peer ballots. The default text chair retains the invoking session context.
+
+Result strategies (aliases):
+- council (synth): reviewers -> judge synthesis.
+- compare (sidebyside): show reviewer answers; no judge.
+- debate (roundtable): 1-5 rounds -> judge; independent = private self-review, collaborative = peer rebuttals.
+- moa (map): reviewers -> judge aggregation.
+- router (route): text selector chooses ONE slot before it answers; no final judge/tester. Rejects judge_agent/judge_tools; judge selects the selector model.
+- consensus (vote): reviewers score all answers; collaborative ONLY. Invalid/tied ballots get one whole-panel correction.
+- arena: show answers for the user to choose; no judge.
+
+Roles/capabilities:
+- members is an ordered list of equal-tier slots; duplicate model IDs remain distinct reviewers.
+- judge selects a separate judge model; omitted = invoking session model.
+- reviewer_agent enables tool-using reviewers; reviewer_tools (default ["read"]) must be available before any reviewers start.
+- judge_agent enables a final judge/tester/executor; judge_tools lists required tools, e.g. ["shell"].
+- Omit agent fields for bounded text-only calls, which cannot inspect files or execute tests.
+- subagent_capabilities lists actual agent tools; subagent.required_tools fails before spawning if a required tool is unavailable.
+- Tool-enabled roles use fresh sessions and normal permissions. Independence prevents transcript sharing, not access to shared external sources.
+
+Example: two independent Terra reviewers + one Astra reviewer -> separate Sol judge:
+{"mode":"independent","strategy":"council","members":["openai/gpt-6.1-terra","openai/gpt-6.1-terra","openai/gpt-6-astra"],"judge":"openai/gpt-6.1-sol","question":"Self-contained task and evidence"}
+For file review/testing add reviewer_agent="general", reviewer_tools=["read"], judge_agent="sol-write", judge_tools=["shell"] when configured.
+Information isolation reduces peer anchoring; it does not guarantee unbiased models.`
+
 type CouncilInput = {
+  action?: "run" | "list_modes"
   question?: string
+  mode?: "independent" | "collaborative"
   strategy?: string
   members?: string[]
   rounds?: number
+  judge?: string
+  reviewer_agent?: string
+  reviewer_tools?: string[]
+  judge_agent?: string
+  judge_tools?: string[]
 }
 
-type MemberAnswer = { readonly member: MemberRef; readonly answer: string; readonly failed?: boolean }
+type CouncilStage = { readonly role: string; readonly status: string; readonly sessionID?: string; readonly output: string }
+type MemberAnswer = { readonly member: MemberRef; readonly answer: string; readonly failed?: boolean; readonly stage?: CouncilStage; readonly slot?: number }
 
 type Checked<T> = { ok: true; value: T } | { ok: false; error: string }
 const checkJson = <T>(raw: string, validate: (value: unknown) => T): Checked<T> => {
@@ -454,6 +500,8 @@ export const Plugin = define({
     const instances = yield* Instance.Service
     const database = yield* Database.Service
     const schedules = yield* Schedule.Service
+    const agents = yield* Agent.Service
+    const registry = yield* Service
     const projectDirectory = ctx.location.directory
 
     const globalCouncilPath = path.join(global.config, "council.json")
@@ -578,6 +626,7 @@ export const Plugin = define({
     // Tools
     // -------------------------------------------------------------------------
     yield* ctx.tool.transform((editor) => {
+      registerSubagentCapabilities(editor, { agents, registry, sessions })
       // ---- distill_session --------------------------------------------------
       editor.add({
         name: "distill_session",
@@ -704,9 +753,12 @@ export const Plugin = define({
         input: {
           type: "object",
           properties: {
+            action: { type: "string", enum: ["run", "list_modes"], description: "run (default), or list_modes for the full mode/strategy/capability catalog without inference." },
             question: { type: "string", description: "The question to put to the council." },
+            mode: { type: "string", enum: ["independent", "collaborative"], description: "independent (default): no parent history or peer answers; collaborative: peer debate/voting permitted." },
             strategy: {
               type: "string",
+              enum: Object.keys(STRATEGY_ALIASES),
               description:
                 "council (chairman synthesizes), compare (side by side), debate (members argue over " +
                 "`rounds`, chairman resolves), moa (Mixture-of-Agents aggregate), router (chairman " +
@@ -721,19 +773,39 @@ export const Plugin = define({
                 "When omitted, members are read from council.json.",
             },
             rounds: { type: "number", description: "Debate rounds (debate strategy only, default 2)." },
+            judge: { type: "string", description: "Separate judge provider/model (router: text selector only); defaults to the invoking session model. Repeated reviewer models remain distinct slots." },
+            reviewer_agent: { type: "string", description: "Optional tool-enabled subagent profile for each reviewer; otherwise reviews are text-only." },
+            reviewer_tools: { type: "array", items: { type: "string" }, description: "Required reviewer tools, default [read] when reviewer_agent is set; checked before any reviewer starts." },
+            judge_agent: { type: "string", description: "Optional final judge/tester/executor profile for council/moa/debate; router rejects this. Without it the judge cannot execute tools." },
+            judge_tools: { type: "array", items: { type: "string" }, description: "Tools required by the final agent, e.g. [shell] for executing tests; checked before reviewers start." },
           },
-          required: ["question"],
           additionalProperties: false,
         },
         execute: (raw, context) =>
           Effect.gen(function* () {
             const input = (raw ?? {}) as CouncilInput
+            if (input.action === "list_modes") return text(COUNCIL_CATALOG)
+            if (input.action !== undefined && input.action !== "run")
+              return yield* new Tool.Error({ message: "Unknown council action. Use run or list_modes." })
             const question = (input.question ?? "").trim()
-            if (!question) return yield* new Tool.Error({ message: "council requires a question." })
-            const strategy = STRATEGY_ALIASES[(input.strategy ?? "council").toLowerCase()] ?? "council"
+            if (!question) return yield* new Tool.Error({ message: "council run requires a question; use action=list_modes for help." })
+            const mode = input.mode ?? "independent"
+            if (mode !== "independent" && mode !== "collaborative")
+              return yield* new Tool.Error({ message: "Unknown council mode. Use independent or collaborative." })
+            const strategy = STRATEGY_ALIASES[(input.strategy ?? "council").toLowerCase()]
+            if (!strategy) return yield* new Tool.Error({ message: "Unknown council strategy. Use action=list_modes for all choices." })
+            if (mode === "independent" && strategy === "consensus")
+              return yield* new Tool.Error({ message: "consensus exposes peer answers for voting and requires mode=collaborative; use council/moa for independent reviewers plus a separate judge." })
+            if (strategy === "router" && (input.judge_agent !== undefined || input.judge_tools !== undefined))
+              return yield* new Tool.Error({ message: "router is selector-only and has no final judge/tester; judge_agent/judge_tools require council, moa, or debate." })
+            const usesJudge = ["council", "moa", "debate", "router"].includes(strategy)
+            if (!usesJudge && (input.judge || input.judge_agent || input.judge_tools))
+              return yield* new Tool.Error({ message: `${strategy} has no separate judge; choose council, moa, debate, or router for a judge/tester stage.` })
+            if ((!input.reviewer_agent && input.reviewer_tools) || (!input.judge_agent && input.judge_tools))
+              return yield* new Tool.Error({ message: "Required tools need the corresponding reviewer_agent or judge_agent; text-only generations have no tools." })
             const resolved = yield* loadMembers(input.members)
             if ("error" in resolved) return yield* new Tool.Error({ message: resolved.error! })
-            let members = resolved.members ?? []
+            const members = resolved.members ?? []
             if (members.length === 0) {
               const seeded = resolved.path ? { path: resolved.path, seeded: false } : yield* seedCouncil(context.sessionID).pipe(
                 Effect.mapError((cause) => new Tool.Error({ message: `Cannot seed council.json: ${cause}` })),
@@ -743,39 +815,103 @@ export const Plugin = define({
                   'Add two or more "provider/model" entries, then retry. Available models can be listed via the models command.',
               )
             }
-            // Validate against the live provider registry; unknown models are skipped with a note.
+            // Never silently change the explicitly requested reviewer panel.
             const available = yield* models.available()
             const known = new Set(available.map((model) => `${model.providerID}/${model.id}`))
-            const notes: string[] = []
-            members = members.filter((member) => {
-              if (known.has(refToString(member.model))) return true
-              notes.push(`Skipped unknown model: ${refToString(member.model)}`)
-              return false
-            })
+            const unknown = members.flatMap((member, index) => known.has(refToString(member.model)) ? [] : [`slot ${index + 1}: ${refToString(member.model)}`])
+            if (unknown.length) return yield* new Tool.Error({ message: `Unknown council reviewer models (${unknown.join("; ")}); no reviewers started.` })
             if (members.length < 2)
               return yield* new Tool.Error({
                 message:
-                  `A council needs at least two valid members (have ${members.length}` +
-                  `${notes.length > 0 ? `; ${notes.join("; ")}` : ""}). With one, use the normal task/subagent flow.`,
+                  `A council needs at least two valid members (have ${members.length}). With one, use the normal task/subagent flow.`,
               })
 
+            const parent = usesJudge ? yield* sessions.get(context.sessionID) : undefined
+            const judgeModel = !usesJudge ? undefined : input.judge ? parseModelRef(input.judge) : parent?.model ?? (yield* models.default())
+            if (usesJudge && (!judgeModel || !known.has(refToString(judgeModel))))
+              return yield* new Tool.Error({ message: "Judge model is unavailable; no reviewers started." })
+            const tools = input.reviewer_agent || input.judge_agent ? yield* ctx.tool.list() : []
+            const delegate = tools.find((tool) => tool.name === "subagent")
+            const inspect = tools.find((tool) => tool.name === "subagent_capabilities")
+            for (const role of [
+              { agent: input.reviewer_agent, required: input.reviewer_tools ?? ["read"] },
+              { agent: input.judge_agent, required: input.judge_tools ?? [] },
+            ]) {
+              if (!role.agent) continue
+              if (!delegate || !inspect) return yield* new Tool.Error({ message: "Tool-enabled council requires subagent and subagent_capabilities registration." })
+              const capabilities = (yield* inspect.execute({ agent: role.agent }, context)).metadata?.subagentCapabilities
+              if (!record(capabilities) || capabilities.verified !== true || !Array.isArray(capabilities.tools))
+                return yield* new Tool.Error({ message: "Subagent capability inspection did not return a verified tool list." })
+              const visible = capabilities.tools
+              const missing = role.required.filter((name) => !visible.includes(name))
+              if (missing.length) return yield* new Tool.Error({ message: `Agent ${role.agent} lacks required tools: ${missing.join(", ")}; no reviewers started.` })
+            }
+            const askAgent = (agent: string, model: ModelSchema.Ref, prompt: string, required: string[], role: string) =>
+              Effect.gen(function* () {
+                if (!delegate) return yield* new Tool.Error({ message: "Subagent tool is unavailable." })
+                // No sessionID is supplied: every role/round starts a fresh child.
+                const result = yield* delegate.execute({
+                  agent, model: refToString(model), description: `Council ${role}`, prompt,
+                  required_tools: required, background: false,
+                }, context)
+                const output = record(result.output) ? result.output : {}
+                return {
+                  role,
+                  status: typeof output.status === "string" ? output.status : "invalid",
+                  ...(typeof output.sessionID === "string" ? { sessionID: output.sessionID } : {}),
+                  output: typeof output.output === "string" ? output.output : "",
+                } satisfies CouncilStage
+              })
             const ask = (member: MemberRef, prompt: string) =>
-              askCouncilMember({
+              (input.reviewer_agent ? askAgent(input.reviewer_agent, member.model,
+                `You are one equal-tier ${mode} reviewer. Use only this task and evidence; do not seek sibling sessions or delegate another council. Distinguish inspected facts, executed tests, and hypotheses.\n\n${prompt}`,
+                input.reviewer_tools ?? ["read"], "reviewer") : askCouncilMember({
                 parentID: context.sessionID,
                 model: member.model,
                 prompt,
-              }).pipe(
-                Effect.map((answer) => ({ member, answer }) as MemberAnswer),
+              }).pipe(Effect.map((answer): CouncilStage => ({ role: "reviewer", status: "completed", output: answer })))).pipe(
+                Effect.map((stage): MemberAnswer => ({
+                  member, stage,
+                  answer: stage.status === "completed" && stage.output.trim() ? stage.output :
+                    `[Reviewer did not finish: status=${stage.status}${stage.sessionID ? `; sessionID=${stage.sessionID}` : ""}]\n${stage.output}`,
+                  failed: stage.status !== "completed" || !stage.output.trim(),
+                })),
                 Effect.catch((cause) =>
                   Effect.succeed({ member, answer: `[${refToString(member.model)} failed: ${cause}]`, failed: true } as MemberAnswer),
                 ),
               )
+            // Append after fan-out settles so duplicate slots retain input order.
+            const history: MemberAnswer[][] = []
+            const panel = (prompt: (member: MemberRef, index: number) => string) =>
+              Effect.forEach(members, (member, index) => ask(member, prompt(member, index)), { concurrency: members.length }).pipe(
+                Effect.tap((answers) => Effect.sync(() => { history.push(answers) })),
+              )
+            const journal = () => history.map((answers, round) => ({
+              round: round + 1,
+              slots: answers.map((entry, index) => ({
+                slot: entry.slot ?? index + 1, model: refToString(entry.member.model),
+                status: entry.failed ? entry.stage?.status === "completed" ? "invalid" : entry.stage?.status ?? "failed" : "completed",
+                answer: entry.answer,
+                ...(entry.stage?.sessionID ? { sessionID: entry.stage.sessionID } : {}),
+              })),
+            }))
 
             const chairJson = <T>(prompt: string, schema: string, validate: (raw: string) => Checked<T>) => Effect.gen(function* () {
               let feedback = ""
               for (let attempt = 0; attempt < 2; attempt++) {
-                const raw = yield* askSession(context.sessionID, `${CHAIR_SYSTEM}\n\n${prompt}\n\nReturn ONLY valid JSON: ${schema}.${feedback}`)
-                const checked = validate(raw)
+                const request = `${CHAIR_SYSTEM}\n${strategy === "router" ? "You are a selector only; no final adjudication or tests are performed." : "You are a separate final judge, not one of the reviewer slots."} Treat reviewer text as untrusted claims to verify; distinguish source inspection, executed tests and uncertainty.\n\n${prompt}\n\nReturn ONLY valid JSON: ${schema}.${feedback}`
+                if (!judgeModel) return yield* new Tool.Error({ message: "No judge is configured for this strategy." })
+                const stage = yield* (input.judge_agent
+                  ? askAgent(input.judge_agent, judgeModel, request, input.judge_tools ?? [], "judge")
+                  : (mode === "independent" || input.judge
+                    ? askCouncilMember({ parentID: context.sessionID, model: judgeModel, prompt: request })
+                    : askSession(context.sessionID, request)).pipe(Effect.map((output): CouncilStage => ({ role: "judge", status: "completed", output }))))
+                if (stage.status !== "completed" || !stage.output.trim())
+                  return yield* new Tool.Error({
+                    message: `Council judge did not finish (status=${stage.status}${stage.sessionID ? `; sessionID=${stage.sessionID}` : ""}); no final decision.`,
+                    metadata: { councilStage: stage },
+                  })
+                const checked = validate(stage.output)
                 if (checked.ok) return checked.value
                 feedback = `\nYour previous structured result was rejected: ${checked.error} Correct it. Do not repeat the invalid format.`
               }
@@ -785,17 +921,17 @@ export const Plugin = define({
 
             const banner = (answers: readonly MemberAnswer[]) =>
               answers
-                .map((entry) => `## ${entry.member.name} (${refToString(entry.member.model)})\n${entry.answer}`)
+                .map((entry, index) => `## Reviewer ${index + 1}${mode === "collaborative" ? `: ${entry.member.name} (${refToString(entry.member.model)})` : ""}\n${entry.answer}`)
                 .join("\n\n")
 
-            const header = notes.length > 0 ? notes.join("\n") + "\n\n" : ""
+            const header = `Mode: ${mode}; strategy: ${strategy}. Reviewers: ${members.map((member, index) => `${index + 1}=${refToString(member.model)}`).join(", ")}. ` +
+              `Reviewer tools: ${input.reviewer_agent ?? "none (text-only)"}. Final stage: ${strategy === "router" ? "none (text selector only)" : usesJudge ? input.judge_agent ?? "text-only judge; no tests executed" : "no judge"}.\n\n`
 
+            return yield* Effect.gen(function* () {
             switch (strategy) {
               case "compare":
               case "arena": {
-                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
-                  concurrency: members.length,
-                })
+                const answers = yield* panel(() => question)
                 const suffix = strategy === "arena" ? "\n\n(Ask the user which answer to keep.)" : ""
                 return text(header + banner(answers) + suffix)
               }
@@ -809,14 +945,15 @@ export const Plugin = define({
                 )
                 const chosen = members[index]!
                 const answer = yield* ask(chosen, question)
+                history.push([{ ...answer, slot: index + 1 }])
                 return text(
                   `${header}Routed to ${chosen.name} (${refToString(chosen.model)}).\n\n${answer.answer}`,
                 )
               }
               case "moa": {
-                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
-                  concurrency: members.length,
-                })
+                const answers = yield* panel(() => question)
+                if (mode === "independent" && answers.some((answer) => answer.failed))
+                  return yield* new Tool.Error({ message: "Independent panel is incomplete; no judge/tester was started." })
                 const synthesis = yield* chair(
                   `Aggregate the member proposals below into one higher-quality answer (Mixture-of-Agents). Do not mention the members.\n\n${banner(answers)}\n\nQuestion:\n${question}`,
                 )
@@ -824,20 +961,19 @@ export const Plugin = define({
               }
               case "debate": {
                 const rounds = Math.min(Math.max(Math.round(input.rounds ?? 2), 1), 5)
-                let answers = yield* Effect.forEach(members, (member) => ask(member, question), {
-                  concurrency: members.length,
-                })
+                let answers = yield* panel(() => question)
+                if (mode === "independent" && answers.some((answer) => answer.failed))
+                  return yield* new Tool.Error({ message: "Independent panel is incomplete; no judge/tester was started." })
                 for (let round = 2; round <= rounds; round += 1) {
                   const transcript = banner(answers)
-                  answers = yield* Effect.forEach(
-                    members,
-                    (member) =>
-                      ask(
-                        member,
-                        `Round ${round} of a debate. Your previous position and the others' are below. Defend or revise your answer; attack weak arguments directly.\n\n${transcript}\n\nQuestion:\n${question}`,
-                      ),
-                    { concurrency: members.length },
+                  answers = yield* panel(
+                    (_member, index) =>
+                        mode === "independent"
+                          ? `Private review round ${round}. Recheck your own reasoning and evidence; no peer answers are supplied.\n\nYour previous answer:\n${answers[index]!.answer}\n\nQuestion:\n${question}`
+                          : `Round ${round} of a debate. Your previous position and the others' are below. Defend or revise your answer; attack weak arguments directly.\n\n${transcript}\n\nQuestion:\n${question}`,
                   )
+                  if (mode === "independent" && answers.some((answer) => answer.failed))
+                    return yield* new Tool.Error({ message: "Independent panel is incomplete; no judge/tester was started." })
                 }
                 const resolution = yield* chair(
                   `Resolve this debate: declare the strongest final position and justify briefly.\n\n${banner(answers)}\n\nQuestion:\n${question}`,
@@ -845,16 +981,13 @@ export const Plugin = define({
                 return text(header + resolution)
               }
               case "consensus": {
-                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
-                  concurrency: members.length,
-                })
+                const answers = yield* panel(() => question)
                 if (answers.some((answer) => answer.failed)) return yield* new Tool.Error({ message: "Consensus cannot score failed candidate answers." })
                 const candidates = answers.map((entry, index) => `Candidate ${index + 1}: ${entry.member.name}\n${entry.answer}`).join("\n\n")
                 let feedback = ""
                 for (let round = 0; round < 2; round++) {
-                  const ballots = yield* Effect.forEach(members, (judge) => ask(judge,
-                    `Score EACH numbered candidate 1-10. Return ONLY valid JSON: {"scores":[{"member":1,"score":8},...]}. Include every candidate exactly once; no extra fields.\n\n${candidates}\n\nQuestion:\n${question}${feedback}`),
-                    { concurrency: members.length })
+                  const ballots = yield* panel(() =>
+                    `Score EACH numbered candidate 1-10. Return ONLY valid JSON: {"scores":[{"member":1,"score":8},...]}. Include every candidate exactly once; no extra fields.\n\n${candidates}\n\nQuestion:\n${question}${feedback}`)
                   if (ballots.some((ballot) => ballot.failed)) return yield* new Tool.Error({ message: "Consensus ballot generation failed; no further voting round." })
                   const checked = ballots.map((ballot) => validateBallot(ballot.answer, members.length))
                   const errors = checked.flatMap((ballot, index) => ballot.ok ? [] : [`Judge ${index + 1}: ${ballot.error}`])
@@ -870,15 +1003,38 @@ export const Plugin = define({
               }
               case "council":
               default: {
-                const answers = yield* Effect.forEach(members, (member) => ask(member, question), {
-                  concurrency: members.length,
-                })
+                const answers = yield* panel(() => question)
+                if (mode === "independent" && answers.some((answer) => answer.failed))
+                  return yield* new Tool.Error({ message: "Independent panel is incomplete; no judge/tester was started." })
                 const synthesis = yield* chair(
                   `Synthesize the council answers below into one final answer. Resolve disagreements explicitly.\n\n${banner(answers)}\n\nQuestion:\n${question}`,
                 )
                 return text(header + synthesis)
               }
             }
+            }).pipe(
+              Effect.map((result) => ({
+                ...result,
+                metadata: { council: {
+                  status: history.some((answers) => answers.some((entry) => entry.failed)) ? "incomplete_panel" : "completed",
+                  mode, strategy, rounds: journal(),
+                } },
+              })),
+              Effect.mapError((error) => {
+                const rounds = journal()
+                const stage = error instanceof Tool.Error ? error.metadata?.councilStage : undefined
+                const status = history.some((answers) => answers.some((entry) => entry.failed))
+                  ? "incomplete_panel" : record(stage) && ["running", "backgrounded"].includes(String(stage.status))
+                    ? "final_stage_pending" : "final_stage_failed"
+                const evidence = rounds.map((round) => `## Round ${round.round}\n` +
+                  round.slots.map((slot) => `### Reviewer ${slot.slot} (${slot.status}${slot.sessionID ? `; sessionID=${slot.sessionID}` : ""})\n${slot.answer}`).join("\n\n")).join("\n\n")
+                return new Tool.Error({
+                  message: `${error instanceof Error ? error.message : String(error)}\n\nCouncil status: ${status}; no final decision.\n${evidence}`,
+                  error,
+                  metadata: { council: { status, mode, strategy, rounds, ...(stage ? { stage } : {}) } },
+                })
+              }),
+            )
           }).pipe(Effect.mapError((cause) => cause instanceof Tool.Error ? cause : new Tool.Error({ message: `Council operation failed: ${cause}` }))),
       })
     })

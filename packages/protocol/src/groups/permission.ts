@@ -8,6 +8,7 @@ import { Context, Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/http-api"
 import {
   ConflictError,
+  InvalidRequestError,
   LocationNotFoundError,
   PermissionNotFoundError,
   PermissionSavedNotFoundError,
@@ -91,6 +92,10 @@ export const makePermissionGroup = <
           id: Permission.ID.pipe(Schema.optional),
           action: Permission.Request.fields.action,
           resources: Permission.Request.fields.resources,
+          operations: Permission.Request.fields.operations,
+          paths: Permission.Request.fields.paths,
+          directories: Permission.Request.fields.directories,
+          access: Permission.Request.fields.access,
           save: Permission.Request.fields.save,
           metadata: Permission.Request.fields.metadata,
           source: Permission.Request.fields.source,
@@ -146,7 +151,7 @@ export const makePermissionGroup = <
           message: Schema.String.pipe(Schema.optional),
         }),
         success: HttpApiSchema.NoContent,
-        error: [SessionNotFoundError, PermissionNotFoundError],
+        error: [SessionNotFoundError, PermissionNotFoundError, InvalidRequestError],
       })
         .middleware(sessionLocationMiddleware)
         .annotateMerge(

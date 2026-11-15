@@ -3,10 +3,23 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
-const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { analyze } = require('./check-personalize-hooks.cjs');
+
+test('the mandatory base embeds the complete pinned permissions patch', () => {
+  const dir = path.resolve(__dirname, '../../patches');
+  const names = ['FinalPERSONALIZE.patch', 'FinalPersonalizeX.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeR.patch'];
+  const patches = Object.fromEntries(names.map((name) => [name, readFileSync(path.join(dir, name), 'utf8')]));
+  const permissions = readFileSync(path.join(dir, 'HarnessPermissions.base.patch'), 'utf8');
+  assert.equal(analyze(patches, undefined, permissions).permissionFiles, 33);
+  assert.throws(
+    () => analyze({ ...patches, 'FinalPERSONALIZE.patch': patches['FinalPERSONALIZE.patch'].slice(0, -1) }, undefined, permissions),
+    /permissions are missing or altered/,
+  );
+  assert.throws(() => analyze(patches, undefined, permissions + '\n'), /permissions patch checksum mismatch/);
+});
 
 const ALLOWED = 'packages/cli/script/build.ts';
 const MANIFEST = JSON.stringify({ modules: [] });

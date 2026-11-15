@@ -253,7 +253,7 @@ const layer = Layer.effect(
           const data = state.get()
           const active = new Map<string, Tool.Info>()
           const rules = permissions ?? []
-          for (const [name, tool] of data.tools) {
+        for (const [name, tool] of data.tools) {
             if (whollyDisabled(tool.options?.permission ?? name, rules)) continue
             active.set(name, tool)
           }

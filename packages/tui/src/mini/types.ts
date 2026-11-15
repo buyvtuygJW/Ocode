@@ -17,7 +17,6 @@ import type {
   OpenCodeClient,
   LocationGetOutput,
   LocationRef,
-  PermissionRequest,
   ReferenceListOutput,
   SessionMessageAssistantTool,
 } from "@opencode/client/promise"
@@ -25,6 +24,8 @@ import type { Config } from "../config"
 import type { Todo } from "../util/todo"
 import type { CliRenderer } from "@opentui/core"
 import type { SessionInbox } from "@opencode/schema/session-inbox"
+import type { Permission } from "@opencode/schema/permission"
+type PermissionRequest = Permission.Request
 
 export type RunFilePart = {
   type: "file"
@@ -390,7 +391,9 @@ export type FooterEvent =
       state: FooterSubagentState
     }
 
-export type PermissionReply = Parameters<OpenCodeClient["permission"]["reply"]>[0]
+export type PermissionReply = Omit<Parameters<OpenCodeClient["permission"]["reply"]>[0], "decision"> & {
+  decision: Permission.Reply
+}
 
 export type FormReply = {
   sessionID: string

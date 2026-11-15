@@ -83,12 +83,18 @@ export const Plugin = {
           execute: (input, context) =>
             Effect.gen(function* () {
               const target = yield* access.resolve({ path: input.path ?? "." })
-              yield* access.authorizeExternal([target], context)
+              const type = yield* ToolSearch.pathType(environment.files, target.absolute, input.path ?? ".")
+              const scope = type === "directory" ? { filesystemReadScope: "recursive" } : {}
+              yield* access.authorizeExternal([target], context, scope, ["read"])
               yield* permission.assert({
                 action: name,
+                operations: ["read"],
+                paths: [target.absolute],
+                directories: [type === "directory" ? target.absolute : path.dirname(target.absolute)],
                 resources: [input.pattern],
                 save: ["*"],
                 metadata: {
+                  ...scope,
                   root: ".",
                   path: input.path,
                   include: input.include,
@@ -99,7 +105,6 @@ export const Plugin = {
                 ...Permission.invocation(context),
               })
               const root = target.absolute
-              const type = yield* ToolSearch.pathType(environment.files, root, input.path ?? ".")
               const cwd = type === "directory" ? root : path.dirname(root)
               const result = yield* ToolSearch.bounded(input.limit ?? FileSystem.DEFAULT_SEARCH_LIMIT, (limit) =>
                 ripgrep.grep({

@@ -1,0 +1,1718 @@
+{
+  "scanned_roots": [
+    "C:\\Users\\o\\AppData\\Local\\Temp\\opencode",
+    "X:\\extbins\\opencode\\repos\\github.com\\Effect-TS\\effect-smol"
+  ],
+  "scope": "Known OpenCode scratch/reference roots, not a machine-wide ownership claim.",
+  "measurement": "Logical file bytes; reparse/junction targets excluded. Hard links can make actual reclaimed space lower.",
+  "attribution": "Nearby matching writer records are provenance clues, not proof that every file was created by that model. Unmatched entries remain unverified.",
+  "history_scan_error": null,
+  "live_use": [
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lan-transcriber-c-build\\sdk\\platform-tools\\adb.exe",
+      "pid": 15248
+    }
+  ],
+  "totals": {
+    "A": 7743005972,
+    "B": 1367099211,
+    "C": 464426807,
+    "D": 12796690973,
+    "E": 35524934,
+    "F": 14011732466,
+    "G": 68067150,
+    "H": 0
+  },
+  "items": [
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\.opencode",
+      "name": ".opencode",
+      "group": "H",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-09-17T19:02:08",
+      "modified": "2026-09-25T17:24:58",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\aiwdog-before-fix-2bd6325aadd9402c80b2af79a0a57e01",
+      "name": "aiwdog-before-fix-2bd6325aadd9402c80b2af79a0a57e01",
+      "group": "G",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-10-20T00:15:54",
+      "modified": "2026-10-27T07:53:54",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools",
+      "name": "android-transcriber-tools",
+      "group": "D",
+      "bytes": 1884960530,
+      "files": 6392,
+      "junctions_skipped": 0,
+      "errors": [
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\org.jetbrains.kotlin.android\\org.jetbrains.kotlin.android.gradle.plugin\\2.0.21\\82b52e35f2dfac66e3236b2db82076005f875593\\org.jetbrains.kotlin.android.gradle.plugin-2.0.21.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\org.jetbrains.kotlin.android\\\\org.jetbrains.kotlin.android.gradle.plugin\\\\2.0.21\\\\82b52e35f2dfac66e3236b2db82076005f875593\\\\org.jetbrains.kotlin.android.gradle.plugin-2.0.21.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\org.jetbrains.kotlin\\kotlin-scripting-compiler-impl-embeddable\\2.0.21\\84c79a332f515fd6dd3ea2ab50c227c4a5756c37\\kotlin-scripting-compiler-impl-embeddable-2.0.21.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\org.jetbrains.kotlin\\\\kotlin-scripting-compiler-impl-embeddable\\\\2.0.21\\\\84c79a332f515fd6dd3ea2ab50c227c4a5756c37\\\\kotlin-scripting-compiler-impl-embeddable-2.0.21.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\org.jetbrains.kotlin\\kotlin-scripting-compiler-impl-embeddable\\2.0.21\\595db4a964b5e26311b7ee895d51bf62248af3c6\\kotlin-scripting-compiler-impl-embeddable-2.0.21.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\org.jetbrains.kotlin\\\\kotlin-scripting-compiler-impl-embeddable\\\\2.0.21\\\\595db4a964b5e26311b7ee895d51bf62248af3c6\\\\kotlin-scripting-compiler-impl-embeddable-2.0.21.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.google.guava\\listenablefuture\\9999.0-empty-to-avoid-conflict-with-guava\\b421526c5f297295adef1c886e5246c39d4ac629\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.google.guava\\\\listenablefuture\\\\9999.0-empty-to-avoid-conflict-with-guava\\\\b421526c5f297295adef1c886e5246c39d4ac629\\\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.google.guava\\listenablefuture\\9999.0-empty-to-avoid-conflict-with-guava\\1b77ba79f9b2b7dfd4e15ea7bb0d568d5eb9cb8d\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.google.guava\\\\listenablefuture\\\\9999.0-empty-to-avoid-conflict-with-guava\\\\1b77ba79f9b2b7dfd4e15ea7bb0d568d5eb9cb8d\\\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-result-listener-gradle-proto\\31.7.3\\f51d5e35aa252438265500d79fc2d314b7555b94\\android-test-plugin-result-listener-gradle-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-result-listener-gradle-proto\\\\31.7.3\\\\f51d5e35aa252438265500d79fc2d314b7555b94\\\\android-test-plugin-result-listener-gradle-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-result-listener-gradle-proto\\31.7.3\\43fdc959f4040f32e8b6eefb2f6926d63f72dfdd\\android-test-plugin-result-listener-gradle-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-result-listener-gradle-proto\\\\31.7.3\\\\43fdc959f4040f32e8b6eefb2f6926d63f72dfdd\\\\android-test-plugin-result-listener-gradle-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-retention-proto\\31.7.3\\8ef946d4477f3b40b3bcb7d151131483b6d77d67\\android-test-plugin-host-retention-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-retention-proto\\\\31.7.3\\\\8ef946d4477f3b40b3bcb7d151131483b6d77d67\\\\android-test-plugin-host-retention-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-retention-proto\\31.7.3\\71b36c934bebde45dcd1abd7db6439fa6b105b2e\\android-test-plugin-host-retention-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-retention-proto\\\\31.7.3\\\\71b36c934bebde45dcd1abd7db6439fa6b105b2e\\\\android-test-plugin-host-retention-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-logcat-proto\\31.7.3\\d8f873c14c5c65746b97801c2c6cae506d0b3d29\\android-test-plugin-host-logcat-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-logcat-proto\\\\31.7.3\\\\d8f873c14c5c65746b97801c2c6cae506d0b3d29\\\\android-test-plugin-host-logcat-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-logcat-proto\\31.7.3\\50628357834d93f2fa23b32945b5c22cb7df2658\\android-test-plugin-host-logcat-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-logcat-proto\\\\31.7.3\\\\50628357834d93f2fa23b32945b5c22cb7df2658\\\\android-test-plugin-host-logcat-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-emulator-control-proto\\31.7.3\\faaddb0258a839e6ab89fe2acbe20ce29b403b43\\android-test-plugin-host-emulator-control-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-emulator-control-proto\\\\31.7.3\\\\faaddb0258a839e6ab89fe2acbe20ce29b403b43\\\\android-test-plugin-host-emulator-control-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-emulator-control-proto\\31.7.3\\3b78e35ad440b1b2ce2a3cfd5a4a37b2a27bdf8c\\android-test-plugin-host-emulator-control-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-emulator-control-proto\\\\31.7.3\\\\3b78e35ad440b1b2ce2a3cfd5a4a37b2a27bdf8c\\\\android-test-plugin-host-emulator-control-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-coverage-proto\\31.7.3\\c780344aab70a33c454ad697295e12278fed16db\\android-test-plugin-host-coverage-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-coverage-proto\\\\31.7.3\\\\c780344aab70a33c454ad697295e12278fed16db\\\\android-test-plugin-host-coverage-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-coverage-proto\\31.7.3\\8b07ef86f9293fed0190b573ae07450b18995ada\\android-test-plugin-host-coverage-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-coverage-proto\\\\31.7.3\\\\8b07ef86f9293fed0190b573ae07450b18995ada\\\\android-test-plugin-host-coverage-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-apk-installer-proto\\31.7.3\\6b9f2a57e88722a47f45fd01313c9f5c0ab0b05c\\android-test-plugin-host-apk-installer-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-apk-installer-proto\\\\31.7.3\\\\6b9f2a57e88722a47f45fd01313c9f5c0ab0b05c\\\\android-test-plugin-host-apk-installer-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-apk-installer-proto\\31.7.3\\695cf71232626eeca4d84f72314196b270ca1c11\\android-test-plugin-host-apk-installer-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-apk-installer-proto\\\\31.7.3\\\\695cf71232626eeca4d84f72314196b270ca1c11\\\\android-test-plugin-host-apk-installer-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-additional-test-output-proto\\31.7.3\\c02332c53d95a3e0ccd7ad9d6d97f8fec5d1a469\\android-test-plugin-host-additional-test-output-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-additional-test-output-proto\\\\31.7.3\\\\c02332c53d95a3e0ccd7ad9d6d97f8fec5d1a469\\\\android-test-plugin-host-additional-test-output-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-additional-test-output-proto\\31.7.3\\9a473c6705200363e5ce7530b603c1c45c35df37\\android-test-plugin-host-additional-test-output-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-additional-test-output-proto\\\\31.7.3\\\\9a473c6705200363e5ce7530b603c1c45c35df37\\\\android-test-plugin-host-additional-test-output-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-device-provider-profile-proto\\31.7.3\\5d4fe489b09ee45524d665a175aad834ecf2c81d\\android-device-provider-profile-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-device-provider-profile-proto\\\\31.7.3\\\\5d4fe489b09ee45524d665a175aad834ecf2c81d\\\\android-device-provider-profile-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-device-provider-profile-proto\\31.7.3\\25c923e4e4a064f6afc59e3f2d560cd96b580dc3\\android-device-provider-profile-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-device-provider-profile-proto\\\\31.7.3\\\\25c923e4e4a064f6afc59e3f2d560cd96b580dc3\\\\android-device-provider-profile-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.build\\transform-api\\2.0.0-deprecated-use-gradle-api\\7d636f89a401a7603740ef05ac87f5a1e2811efe\\transform-api-2.0.0-deprecated-use-gradle-api.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.build\\\\transform-api\\\\2.0.0-deprecated-use-gradle-api\\\\7d636f89a401a7603740ef05ac87f5a1e2811efe\\\\transform-api-2.0.0-deprecated-use-gradle-api.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.tools.build\\transform-api\\2.0.0-deprecated-use-gradle-api\\47f6c56527c42425742fa9b56ffd3fd80763fe03\\transform-api-2.0.0-deprecated-use-gradle-api.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.build\\\\transform-api\\\\2.0.0-deprecated-use-gradle-api\\\\47f6c56527c42425742fa9b56ffd3fd80763fe03\\\\transform-api-2.0.0-deprecated-use-gradle-api.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\android-transcriber-tools\\gradle-cache\\caches\\modules-2\\files-2.1\\com.android.application\\com.android.application.gradle.plugin\\8.7.3\\77425ba1abe021b7c756b77ffc7c2596902e181d\\com.android.application.gradle.plugin-8.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\android-transcriber-tools\\\\gradle-cache\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.application\\\\com.android.application.gradle.plugin\\\\8.7.3\\\\77425ba1abe021b7c756b77ffc7c2596902e181d\\\\com.android.application.gradle.plugin-8.7.3.pom'"
+        }
+      ],
+      "created": "2026-11-09T04:06:25",
+      "modified": "2026-11-09T04:22:47",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\autorepo",
+      "name": "autorepo",
+      "group": "A",
+      "bytes": 238019776,
+      "files": 9319,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:44:11",
+      "modified": "2026-11-02T00:29:42",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\bods158-direct-publish-WTFvUK",
+      "name": "bods158-direct-publish-WTFvUK",
+      "group": "G",
+      "bytes": 47415532,
+      "files": 21,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T08:41:45",
+      "modified": "2026-11-11T08:41:46",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\build-run.log",
+      "name": "build-run.log",
+      "group": "A",
+      "bytes": 32033,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T13:54:35",
+      "modified": "2026-11-01T14:04:52",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\build-run2.log",
+      "name": "build-run2.log",
+      "group": "A",
+      "bytes": 616,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T14:11:57",
+      "modified": "2026-11-01T14:11:58",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\build-run3.log",
+      "name": "build-run3.log",
+      "group": "A",
+      "bytes": 616,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T18:11:28",
+      "modified": "2026-11-01T18:11:29",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\build.mjs.debug-backup",
+      "name": "build.mjs.debug-backup",
+      "group": "A",
+      "bytes": 7804,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T14:09:55",
+      "modified": "2026-11-01T14:02:11",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\bun-portable",
+      "name": "bun-portable",
+      "group": "A",
+      "bytes": 115281496,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T13:36:28",
+      "modified": "2026-11-01T13:36:28",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\bun-probe",
+      "name": "bun-probe",
+      "group": "A",
+      "bytes": 115277864,
+      "files": 13,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T13:24:44",
+      "modified": "2026-11-01T13:50:19",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\bun-windows-x64.zip",
+      "name": "bun-windows-x64.zip",
+      "group": "A",
+      "bytes": 54731706,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T13:36:00",
+      "modified": "2026-11-01T13:36:28",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\chatgpt-proxy-diagnostic-20261101",
+      "name": "chatgpt-proxy-diagnostic-20261101",
+      "group": "G",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T03:39:46",
+      "modified": "2026-11-01T03:42:07",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\council-isolated-prototype",
+      "name": "council-isolated-prototype",
+      "group": "A",
+      "bytes": 6366861,
+      "files": 91,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-09T22:02:49",
+      "modified": "2026-11-09T23:52:35",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\council-modes-20261112",
+      "name": "council-modes-20261112",
+      "group": "A",
+      "bytes": 12244366,
+      "files": 130,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-12T05:20:10",
+      "modified": "2026-11-13T02:48:59",
+      "attribution": [],
+      "known_use": "Created and used by this Astra-led council/permission task, including Sol fixtures."
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\council-validation-20261111",
+      "name": "council-validation-20261111",
+      "group": "A",
+      "bytes": 947773647,
+      "files": 68868,
+      "junctions_skipped": 3,
+      "errors": [],
+      "created": "2026-11-11T00:19:23",
+      "modified": "2026-11-11T08:30:37",
+      "attribution": [],
+      "known_use": "Earlier validation artifacts retained and reused by this Astra-led task."
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dashboard-artifact-fix-9GbMr0",
+      "name": "dashboard-artifact-fix-9GbMr0",
+      "group": "B",
+      "bytes": 57680763,
+      "files": 399,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:08:02",
+      "modified": "2026-11-10T00:08:48",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dashboard-launcher-check-RcGKIG",
+      "name": "dashboard-launcher-check-RcGKIG",
+      "group": "B",
+      "bytes": 22755,
+      "files": 8,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T20:24:52",
+      "modified": "2026-11-09T20:24:52",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dashboard-layout-pack-Wi5njW",
+      "name": "dashboard-layout-pack-Wi5njW",
+      "group": "B",
+      "bytes": 57683374,
+      "files": 398,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T01:58:40",
+      "modified": "2026-11-10T01:58:44",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dashboard-route-fix-32azZF",
+      "name": "dashboard-route-fix-32azZF",
+      "group": "B",
+      "bytes": 57680924,
+      "files": 399,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:15:35",
+      "modified": "2026-11-10T00:16:14",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dashboard-route-fix-VlV2Ku",
+      "name": "dashboard-route-fix-VlV2Ku",
+      "group": "B",
+      "bytes": 16506169,
+      "files": 132,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:15:15",
+      "modified": "2026-11-10T00:15:15",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dayjump",
+      "name": "dayjump",
+      "group": "A",
+      "bytes": 2476935,
+      "files": 48,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-10-31T11:23:36",
+      "modified": "2026-10-31T18:56:09",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dbcheck.ts",
+      "name": "dbcheck.ts",
+      "group": "C",
+      "bytes": 1170,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:05:45",
+      "modified": "2026-11-01T23:05:45",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dbcheck2.ts",
+      "name": "dbcheck2.ts",
+      "group": "C",
+      "bytes": 964,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:53:23",
+      "modified": "2026-11-01T23:53:23",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dbtimes.ts",
+      "name": "dbtimes.ts",
+      "group": "C",
+      "bytes": 591,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:57:29",
+      "modified": "2026-11-01T23:57:29",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dbtimes2.ts",
+      "name": "dbtimes2.ts",
+      "group": "C",
+      "bytes": 798,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:59:19",
+      "modified": "2026-11-01T23:59:19",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\decay-bypass-prototype",
+      "name": "decay-bypass-prototype",
+      "group": "A",
+      "bytes": 23485,
+      "files": 12,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-09T13:44:32",
+      "modified": "2026-11-09T13:59:37",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\dedupe-20261027",
+      "name": "dedupe-20261027",
+      "group": "G",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-10-27T20:31:55",
+      "modified": "2026-11-04T08:28:55",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\drtest",
+      "name": "drtest",
+      "group": "A",
+      "bytes": 1266,
+      "files": 2,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-02T00:25:31",
+      "modified": "2026-11-02T00:26:41",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\effect-http-20261110",
+      "name": "effect-http-20261110",
+      "group": "A",
+      "bytes": 155594638,
+      "files": 11522,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T22:09:35",
+      "modified": "2026-11-10T22:10:38",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\fixallowance.ts",
+      "name": "fixallowance.ts",
+      "group": "C",
+      "bytes": 1350,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:21:56",
+      "modified": "2026-11-01T23:21:56",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\fixallowance2.ts",
+      "name": "fixallowance2.ts",
+      "group": "C",
+      "bytes": 1070,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:39:20",
+      "modified": "2026-11-01T23:39:20",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\git-exe-rewrite-ZwT6pg",
+      "name": "git-exe-rewrite-ZwT6pg",
+      "group": "B",
+      "bytes": 1342709,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T16:38:23",
+      "modified": "2026-11-09T16:38:23",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\guard-drill",
+      "name": "guard-drill",
+      "group": "A",
+      "bytes": 650712,
+      "files": 126,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-02T00:36:38",
+      "modified": "2026-11-02T00:39:20",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\hf-asr-cache",
+      "name": "hf-asr-cache",
+      "group": "D",
+      "bytes": 4718965390,
+      "files": 28,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T02:29:49",
+      "modified": "2026-11-11T02:29:49",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\hf-cache",
+      "name": "hf-cache",
+      "group": "D",
+      "bytes": 78245962,
+      "files": 9,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T04:13:54",
+      "modified": "2026-11-09T04:13:55",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\hf-model-download-diagnostic",
+      "name": "hf-model-download-diagnostic",
+      "group": "D",
+      "bytes": 16156,
+      "files": 2,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-12T04:49:16",
+      "modified": "2026-11-12T04:49:26",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\honorX7c_user0_debloat_test",
+      "name": "honorX7c_user0_debloat_test",
+      "group": "G",
+      "bytes": 28454,
+      "files": 169,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-13T02:21:11",
+      "modified": "2026-11-13T02:39:12",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lan-transcriber-c-build",
+      "name": "lan-transcriber-c-build",
+      "group": "F",
+      "bytes": 14011732466,
+      "files": 51948,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T04:46:31",
+      "modified": "2026-11-11T02:20:34",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lan-transcriber-https-test-20261111",
+      "name": "lan-transcriber-https-test-20261111",
+      "group": "D",
+      "bytes": 4143,
+      "files": 3,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T02:47:43",
+      "modified": "2026-11-11T02:47:44",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lan-transcriber-https-test-20261111-v2",
+      "name": "lan-transcriber-https-test-20261111-v2",
+      "group": "D",
+      "bytes": 8229,
+      "files": 8,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T02:48:28",
+      "modified": "2026-11-11T02:48:29",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\launcher-check-U7Qumg",
+      "name": "launcher-check-U7Qumg",
+      "group": "B",
+      "bytes": 22680,
+      "files": 8,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T19:54:20",
+      "modified": "2026-11-09T19:54:20",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\launcher-reuse-check-CsVyLq",
+      "name": "launcher-reuse-check-CsVyLq",
+      "group": "B",
+      "bytes": 24971,
+      "files": 8,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T21:05:39",
+      "modified": "2026-11-09T21:05:39",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lifetime-check",
+      "name": "lifetime-check",
+      "group": "A",
+      "bytes": 464242190,
+      "files": 25565,
+      "junctions_skipped": 3,
+      "errors": [],
+      "created": "2026-11-02T22:16:44",
+      "modified": "2026-11-10T00:18:38",
+      "attribution": [],
+      "known_use": "Existing dependency cache reused by this task; creation attribution is separate."
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lifetime-grace-final-validation",
+      "name": "lifetime-grace-final-validation",
+      "group": "A",
+      "bytes": 36946,
+      "files": 7,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T01:32:30",
+      "modified": "2026-11-09T01:33:16",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lifetime-grace-validation",
+      "name": "lifetime-grace-validation",
+      "group": "A",
+      "bytes": 35599,
+      "files": 7,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T01:30:04",
+      "modified": "2026-11-09T01:30:25",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lifetime-review-unit.txt",
+      "name": "lifetime-review-unit.txt",
+      "group": "A",
+      "bytes": 2134,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T00:52:09",
+      "modified": "2026-11-09T00:52:09",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lifetime-review.txt",
+      "name": "lifetime-review.txt",
+      "group": "A",
+      "bytes": 4642,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T00:51:51",
+      "modified": "2026-11-09T00:51:51",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\lifetime-source-tests.txt",
+      "name": "lifetime-source-tests.txt",
+      "group": "A",
+      "bytes": 4222,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T01:31:16",
+      "modified": "2026-11-09T01:31:16",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\model-dashboard-render-check.html",
+      "name": "model-dashboard-render-check.html",
+      "group": "B",
+      "bytes": 132714,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:06:33",
+      "modified": "2026-11-10T00:06:33",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\model-layout-check.html",
+      "name": "model-layout-check.html",
+      "group": "B",
+      "bytes": 133105,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T01:54:38",
+      "modified": "2026-11-10T01:54:38",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\model-persistence-check.html",
+      "name": "model-persistence-check.html",
+      "group": "B",
+      "bytes": 132925,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:49:03",
+      "modified": "2026-11-10T00:49:03",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\model-persistence-pack-Mm32c0",
+      "name": "model-persistence-pack-Mm32c0",
+      "group": "B",
+      "bytes": 57681467,
+      "files": 398,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:51:24",
+      "modified": "2026-11-10T00:51:28",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\npx-local-cache-test-sXaiBm",
+      "name": "npx-local-cache-test-sXaiBm",
+      "group": "B",
+      "bytes": 14463,
+      "files": 20,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T00:16:48",
+      "modified": "2026-11-10T00:16:48",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101",
+      "name": "oc-patch-check-20261101",
+      "group": "A",
+      "bytes": 1191890793,
+      "files": 35537,
+      "junctions_skipped": 0,
+      "errors": [
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\node_modules\\@trickfilm400\\rollup-plugin-off-main-thread\\tests\\fixtures\\import-worker-url-custom-scheme\\build\\worker-ef1d7c89.js",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\\\node_modules\\\\@trickfilm400\\\\rollup-plugin-off-main-thread\\\\tests\\\\fixtures\\\\import-worker-url-custom-scheme\\\\build\\\\worker-ef1d7c89.js'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\node_modules\\@trickfilm400\\rollup-plugin-off-main-thread\\tests\\fixtures\\import-worker-url-custom-scheme\\build\\worker-e37d535c.js",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\\\node_modules\\\\@trickfilm400\\\\rollup-plugin-off-main-thread\\\\tests\\\\fixtures\\\\import-worker-url-custom-scheme\\\\build\\\\worker-e37d535c.js'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\node_modules\\@trickfilm400\\rollup-plugin-off-main-thread\\tests\\fixtures\\import-worker-url-custom-scheme\\build\\worker-Bq6uP7t8.js",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\\\node_modules\\\\@trickfilm400\\\\rollup-plugin-off-main-thread\\\\tests\\\\fixtures\\\\import-worker-url-custom-scheme\\\\build\\\\worker-Bq6uP7t8.js'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@babel+plugin-transform-duplicate-named-capturing-groups-regex@7.29.7+497cea1c68b2b111\\node_modules\\@babel\\plugin-transform-duplicate-named-capturing-groups-regex\\lib\\index.js.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@babel+plugin-transform-duplicate-named-capturing-groups-regex@7.29.7+497cea1c68b2b111\\\\node_modules\\\\@babel\\\\plugin-transform-duplicate-named-capturing-groups-regex\\\\lib\\\\index.js.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@babel+plugin-proposal-private-property-in-object@7.21.0-placeholder-for-preset-env.2+497cea1c68b2b111\\node_modules\\@babel\\plugin-proposal-private-property-in-object\\lib\\index.js.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@babel+plugin-proposal-private-property-in-object@7.21.0-placeholder-for-preset-env.2+497cea1c68b2b111\\\\node_modules\\\\@babel\\\\plugin-proposal-private-property-in-object\\\\lib\\\\index.js.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@babel+plugin-bugfix-v8-spread-parameters-in-optional-chaining@7.29.7+497cea1c68b2b111\\node_modules\\@babel\\plugin-bugfix-v8-spread-parameters-in-optional-chaining\\lib\\index.js.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@babel+plugin-bugfix-v8-spread-parameters-in-optional-chaining@7.29.7+497cea1c68b2b111\\\\node_modules\\\\@babel\\\\plugin-bugfix-v8-spread-parameters-in-optional-chaining\\\\lib\\\\index.js.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@babel+plugin-bugfix-safari-id-destructuring-collision-in-function-expression@7.29.7+497cea1c68b2b111\\node_modules\\@babel\\plugin-bugfix-safari-id-destructuring-collision-in-function-expression",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@babel+plugin-bugfix-safari-id-destructuring-collision-in-function-expression@7.29.7+497cea1c68b2b111\\\\node_modules\\\\@babel\\\\plugin-bugfix-safari-id-destructuring-collision-in-function-expression'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@aws+durable-execution-sdk-js@1.0.2\\node_modules\\@aws\\durable-execution-sdk-js\\dist-types\\utils\\durable-execution-invocation-input\\durable-execution-invocation-input.test.d.ts.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@aws+durable-execution-sdk-js@1.0.2\\\\node_modules\\\\@aws\\\\durable-execution-sdk-js\\\\dist-types\\\\utils\\\\durable-execution-invocation-input\\\\durable-execution-invocation-input.test.d.ts.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@aws+durable-execution-sdk-js@1.0.2\\node_modules\\@aws\\durable-execution-sdk-js\\dist-types\\handlers\\run-in-child-context-handler\\run-in-child-context-handler-two-phase.test.d.ts.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@aws+durable-execution-sdk-js@1.0.2\\\\node_modules\\\\@aws\\\\durable-execution-sdk-js\\\\dist-types\\\\handlers\\\\run-in-child-context-handler\\\\run-in-child-context-handler-two-phase.test.d.ts.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@aws+durable-execution-sdk-js@1.0.2\\node_modules\\@aws\\durable-execution-sdk-js\\dist-types\\handlers\\concurrent-execution-handler\\concurrent-execution-handler.integration.test.d.ts.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@aws+durable-execution-sdk-js@1.0.2\\\\node_modules\\\\@aws\\\\durable-execution-sdk-js\\\\dist-types\\\\handlers\\\\concurrent-execution-handler\\\\concurrent-execution-handler.integration.test.d.ts.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\oc-patch-check-20261101\\node_modules\\.bun\\@aws+durable-execution-sdk-js@1.0.2\\node_modules\\@aws\\durable-execution-sdk-js\\dist-types\\handlers\\concurrent-execution-handler\\concurrent-execution-handler-two-phase.test.d.ts.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\oc-patch-check-20261101\\\\node_modules\\\\.bun\\\\@aws+durable-execution-sdk-js@1.0.2\\\\node_modules\\\\@aws\\\\durable-execution-sdk-js\\\\dist-types\\\\handlers\\\\concurrent-execution-handler\\\\concurrent-execution-handler-two-phase.test.d.ts.map'"
+        }
+      ],
+      "created": "2026-11-01T10:33:57",
+      "modified": "2026-11-01T20:21:42",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\opx.db",
+      "name": "opx.db",
+      "group": "C",
+      "bytes": 464420864,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:05:38",
+      "modified": "2026-11-01T23:22:06",
+      "attribution": [],
+      "known_use": "Old scratch DB from 2026-11-01; repair scripts reference it. Not the active X:/extbins/opencode/opencode.db."
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\output-compat-validation",
+      "name": "output-compat-validation",
+      "group": "G",
+      "bytes": 16797,
+      "files": 5,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T00:58:55",
+      "modified": "2026-11-09T01:01:21",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\patch-gate-test-NRrGzh",
+      "name": "patch-gate-test-NRrGzh",
+      "group": "B",
+      "bytes": 2727,
+      "files": 13,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T17:53:05",
+      "modified": "2026-11-09T17:53:05",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\patch-report-20261110",
+      "name": "patch-report-20261110",
+      "group": "A",
+      "bytes": 762231709,
+      "files": 47063,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T21:29:39",
+      "modified": "2026-11-10T21:47:24",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\patchtest",
+      "name": "patchtest",
+      "group": "A",
+      "bytes": 304771639,
+      "files": 12573,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-02T00:25:35",
+      "modified": "2026-11-02T21:31:00",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\patchtest-b",
+      "name": "patchtest-b",
+      "group": "A",
+      "bytes": 234120665,
+      "files": 9361,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-02T00:33:10",
+      "modified": "2026-11-02T00:33:41",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\PDFWidget.class",
+      "name": "PDFWidget.class",
+      "group": "G",
+      "bytes": 13154,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T23:17:22",
+      "modified": "2026-11-09T23:17:22",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-boot-locks",
+      "name": "personalize-boot-locks",
+      "group": "H",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T18:19:48",
+      "modified": "2026-11-12T21:53:39",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-bcOOX0",
+      "name": "personalize-regenerate-bcOOX0",
+      "group": "A",
+      "bytes": 25889,
+      "files": 2,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T11:47:14",
+      "modified": "2026-11-01T11:47:14",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-GzyiUI",
+      "name": "personalize-regenerate-GzyiUI",
+      "group": "A",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T11:46:12",
+      "modified": "2026-11-01T11:46:12",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-iqpHIr",
+      "name": "personalize-regenerate-iqpHIr",
+      "group": "A",
+      "bytes": 608069,
+      "files": 10,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T18:30:03",
+      "modified": "2026-11-01T18:30:04",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-IrbKOk",
+      "name": "personalize-regenerate-IrbKOk",
+      "group": "A",
+      "bytes": 597564,
+      "files": 10,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T12:24:14",
+      "modified": "2026-11-01T12:24:17",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-K9CVD8",
+      "name": "personalize-regenerate-K9CVD8",
+      "group": "A",
+      "bytes": 608222,
+      "files": 10,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T14:10:57",
+      "modified": "2026-11-01T14:11:00",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-Mbdy6C",
+      "name": "personalize-regenerate-Mbdy6C",
+      "group": "A",
+      "bytes": 635356,
+      "files": 10,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T20:21:28",
+      "modified": "2026-11-01T20:21:31",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-suImM0",
+      "name": "personalize-regenerate-suImM0",
+      "group": "A",
+      "bytes": 621585,
+      "files": 10,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T20:13:35",
+      "modified": "2026-11-01T20:13:36",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-UsKWxA",
+      "name": "personalize-regenerate-UsKWxA",
+      "group": "A",
+      "bytes": 316732,
+      "files": 6,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T12:16:25",
+      "modified": "2026-11-01T12:16:26",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\personalize-regenerate-WdJyhO",
+      "name": "personalize-regenerate-WdJyhO",
+      "group": "A",
+      "bytes": 311224,
+      "files": 6,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T11:47:57",
+      "modified": "2026-11-01T11:47:57",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\photon-patch-investigation-20261109",
+      "name": "photon-patch-investigation-20261109",
+      "group": "A",
+      "bytes": 365343700,
+      "files": 131,
+      "junctions_skipped": 4,
+      "errors": [],
+      "created": "2026-11-09T16:53:01",
+      "modified": "2026-11-09T17:09:08",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-injection-syntax-check.mjs",
+      "name": "proxy-injection-syntax-check.mjs",
+      "group": "B",
+      "bytes": 9543703,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T23:55:23",
+      "modified": "2026-11-09T23:55:23",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-local-trace-0OY4Iv",
+      "name": "proxy-local-trace-0OY4Iv",
+      "group": "B",
+      "bytes": 6356457,
+      "files": 85,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-09T23:56:34",
+      "modified": "2026-11-09T23:56:34",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-local-trace-7UGCXs",
+      "name": "proxy-local-trace-7UGCXs",
+      "group": "B",
+      "bytes": 6356457,
+      "files": 85,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T00:52:38",
+      "modified": "2026-11-10T00:52:38",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-local-trace-ADSalS",
+      "name": "proxy-local-trace-ADSalS",
+      "group": "B",
+      "bytes": 6356457,
+      "files": 85,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T00:54:27",
+      "modified": "2026-11-10T00:54:27",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-local-trace-CF0rku",
+      "name": "proxy-local-trace-CF0rku",
+      "group": "B",
+      "bytes": 6356457,
+      "files": 85,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T02:28:25",
+      "modified": "2026-11-10T02:28:25",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-local-trace-pOzpjA",
+      "name": "proxy-local-trace-pOzpjA",
+      "group": "B",
+      "bytes": 6356457,
+      "files": 85,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-09T23:55:04",
+      "modified": "2026-11-09T23:55:04",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\proxy-local-trace-y1xmMu",
+      "name": "proxy-local-trace-y1xmMu",
+      "group": "B",
+      "bytes": 6356457,
+      "files": 85,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T00:44:40",
+      "modified": "2026-11-10T00:44:40",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxmerge",
+      "name": "pxmerge",
+      "group": "B",
+      "bytes": 65704625,
+      "files": 496,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-03T23:34:38",
+      "modified": "2026-11-03T23:34:38",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-base-rebuild-aYoc4g",
+      "name": "pxpipe-base-rebuild-aYoc4g",
+      "group": "B",
+      "bytes": 100501691,
+      "files": 611,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T02:27:18",
+      "modified": "2026-11-10T02:31:57",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-ci-rebuild-eSWYFV",
+      "name": "pxpipe-ci-rebuild-eSWYFV",
+      "group": "B",
+      "bytes": 0,
+      "files": 0,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T02:23:46",
+      "modified": "2026-11-10T02:23:46",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-ci-rebuild-w2bbM6",
+      "name": "pxpipe-ci-rebuild-w2bbM6",
+      "group": "B",
+      "bytes": 34627082,
+      "files": 196,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T02:25:38",
+      "modified": "2026-11-10T02:25:38",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-full-ci-fixed-TgGjyg",
+      "name": "pxpipe-full-ci-fixed-TgGjyg",
+      "group": "B",
+      "bytes": 281746699,
+      "files": 3656,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T19:37:51",
+      "modified": "2026-11-10T19:38:42",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-full-ci-mkJC4G",
+      "name": "pxpipe-full-ci-mkJC4G",
+      "group": "B",
+      "bytes": 127173426,
+      "files": 2500,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-10T19:26:55",
+      "modified": "2026-11-10T19:27:09",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-launch-fix-vAZNZn",
+      "name": "pxpipe-launch-fix-vAZNZn",
+      "group": "B",
+      "bytes": 100505059,
+      "files": 608,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T02:47:32",
+      "modified": "2026-11-10T02:48:55",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-model-build-YqQbjZ",
+      "name": "pxpipe-model-build-YqQbjZ",
+      "group": "B",
+      "bytes": 63393384,
+      "files": 336,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-09T20:22:21",
+      "modified": "2026-11-09T20:25:45",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-oauth-baseline-output.txt",
+      "name": "pxpipe-oauth-baseline-output.txt",
+      "group": "B",
+      "bytes": 5364,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-08T18:10:27",
+      "modified": "2026-11-08T18:10:30",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-oauth-usage-validation",
+      "name": "pxpipe-oauth-usage-validation",
+      "group": "B",
+      "bytes": 247307543,
+      "files": 3012,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-08T17:58:27",
+      "modified": "2026-11-08T18:15:29",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-proxy-patch-check-v0151",
+      "name": "pxpipe-proxy-patch-check-v0151",
+      "group": "B",
+      "bytes": 49390147,
+      "files": 467,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T03:49:06",
+      "modified": "2026-11-09T04:56:27",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-single-final-v016",
+      "name": "pxpipe-single-final-v016",
+      "group": "G",
+      "bytes": 4103743,
+      "files": 3,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-12T08:51:14",
+      "modified": "2026-11-12T08:51:27",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\pxpipe-v016-final-out",
+      "name": "pxpipe-v016-final-out",
+      "group": "G",
+      "bytes": 8207390,
+      "files": 4,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-12T04:57:18",
+      "modified": "2026-11-12T04:57:52",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\qwen3-merges-68818b.txt",
+      "name": "qwen3-merges-68818b.txt",
+      "group": "D",
+      "bytes": 1671853,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T02:19:56",
+      "modified": "2026-11-11T02:19:57",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\sherpa-aar-inspect",
+      "name": "sherpa-aar-inspect",
+      "group": "D",
+      "bytes": 245045,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T04:15:32",
+      "modified": "2026-11-09T04:15:32",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\solid-audit-20261111",
+      "name": "solid-audit-20261111",
+      "group": "A",
+      "bytes": 14695,
+      "files": 5,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T02:31:36",
+      "modified": "2026-11-11T02:34:05",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\subagent-test",
+      "name": "subagent-test",
+      "group": "A",
+      "bytes": 5542,
+      "files": 2,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-02T20:43:19",
+      "modified": "2026-11-02T20:43:19",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\theme-audit-20261110",
+      "name": "theme-audit-20261110",
+      "group": "A",
+      "bytes": 155584139,
+      "files": 11523,
+      "junctions_skipped": 1,
+      "errors": [],
+      "created": "2026-11-10T23:45:53",
+      "modified": "2026-11-10T23:47:34",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android",
+      "name": "ttlock-android",
+      "group": "G",
+      "bytes": 8273560,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.google.guava\\listenablefuture\\9999.0-empty-to-avoid-conflict-with-guava\\b421526c5f297295adef1c886e5246c39d4ac629\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.google.guava\\\\listenablefuture\\\\9999.0-empty-to-avoid-conflict-with-guava\\\\b421526c5f297295adef1c886e5246c39d4ac629\\\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.google.guava\\listenablefuture\\9999.0-empty-to-avoid-conflict-with-guava\\1b77ba79f9b2b7dfd4e15ea7bb0d568d5eb9cb8d\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.google.guava\\\\listenablefuture\\\\9999.0-empty-to-avoid-conflict-with-guava\\\\1b77ba79f9b2b7dfd4e15ea7bb0d568d5eb9cb8d\\\\listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-result-listener-gradle-proto\\31.7.3\\f51d5e35aa252438265500d79fc2d314b7555b94\\android-test-plugin-result-listener-gradle-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-result-listener-gradle-proto\\\\31.7.3\\\\f51d5e35aa252438265500d79fc2d314b7555b94\\\\android-test-plugin-result-listener-gradle-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-result-listener-gradle-proto\\31.7.3\\43fdc959f4040f32e8b6eefb2f6926d63f72dfdd\\android-test-plugin-result-listener-gradle-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-result-listener-gradle-proto\\\\31.7.3\\\\43fdc959f4040f32e8b6eefb2f6926d63f72dfdd\\\\android-test-plugin-result-listener-gradle-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-emulator-control-proto\\31.7.3\\faaddb0258a839e6ab89fe2acbe20ce29b403b43\\android-test-plugin-host-emulator-control-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-emulator-control-proto\\\\31.7.3\\\\faaddb0258a839e6ab89fe2acbe20ce29b403b43\\\\android-test-plugin-host-emulator-control-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-emulator-control-proto\\31.7.3\\3b78e35ad440b1b2ce2a3cfd5a4a37b2a27bdf8c\\android-test-plugin-host-emulator-control-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-emulator-control-proto\\\\31.7.3\\\\3b78e35ad440b1b2ce2a3cfd5a4a37b2a27bdf8c\\\\android-test-plugin-host-emulator-control-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-apk-installer-proto\\31.7.3\\6b9f2a57e88722a47f45fd01313c9f5c0ab0b05c\\android-test-plugin-host-apk-installer-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-apk-installer-proto\\\\31.7.3\\\\6b9f2a57e88722a47f45fd01313c9f5c0ab0b05c\\\\android-test-plugin-host-apk-installer-proto-31.7.3.pom'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-apk-installer-proto\\31.7.3\\695cf71232626eeca4d84f72314196b270ca1c11\\android-test-plugin-host-apk-installer-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-apk-installer-proto\\\\31.7.3\\\\695cf71232626eeca4d84f72314196b270ca1c11\\\\android-test-plugin-host-apk-installer-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-additional-test-output-proto\\31.7.3\\c02332c53d95a3e0ccd7ad9d6d97f8fec5d1a469\\android-test-plugin-host-additional-test-output-proto-31.7.3.jar",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-additional-test-output-proto\\\\31.7.3\\\\c02332c53d95a3e0ccd7ad9d6d97f8fec5d1a469\\\\android-test-plugin-host-additional-test-output-proto-31.7.3.jar'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\ttlock-android\\gradle-home\\caches\\modules-2\\files-2.1\\com.android.tools.utp\\android-test-plugin-host-additional-test-output-proto\\31.7.3\\9a473c6705200363e5ce7530b603c1c45c35df37\\android-test-plugin-host-additional-test-output-proto-31.7.3.pom",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\ttlock-android\\\\gradle-home\\\\caches\\\\modules-2\\\\files-2.1\\\\com.android.tools.utp\\\\android-test-plugin-host-additional-test-output-proto\\\\31.7.3\\\\9a473c6705200363e5ce7530b603c1c45c35df37\\\\android-test-plugin-host-additional-test-output-proto-31.7.3.pom'"
+        }
+      ],
+      "created": "2026-10-24T08:47:02",
+      "modified": "2026-10-31T18:02:00",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\TuitionBrochure.class",
+      "name": "TuitionBrochure.class",
+      "group": "G",
+      "bytes": 4495,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T23:44:06",
+      "modified": "2026-11-09T23:47:20",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\TuitionBrochure.java",
+      "name": "TuitionBrochure.java",
+      "group": "G",
+      "bytes": 4025,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T23:43:46",
+      "modified": "2026-11-09T23:47:03",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\upstream-prod",
+      "name": "upstream-prod",
+      "group": "A",
+      "bytes": 148386624,
+      "files": 9263,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:34:42",
+      "modified": "2026-11-01T23:42:18",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\upstream-prod.zip",
+      "name": "upstream-prod.zip",
+      "group": "A",
+      "bytes": 88251227,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-01T23:34:43",
+      "modified": "2026-11-01T23:42:17",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\uv-cache",
+      "name": "uv-cache",
+      "group": "D",
+      "bytes": 6112573665,
+      "files": 41081,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T04:13:42",
+      "modified": "2026-11-11T02:39:04",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation",
+      "name": "v11-build-validation",
+      "group": "A",
+      "bytes": 2140054093,
+      "files": 44508,
+      "junctions_skipped": 6306,
+      "errors": [
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation\\node_modules\\.bun\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\node_modules\\@trickfilm400\\rollup-plugin-off-main-thread\\tests\\fixtures\\import-worker-url-custom-scheme\\build\\worker-ef1d7c89.js",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\v11-build-validation\\\\node_modules\\\\.bun\\\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\\\node_modules\\\\@trickfilm400\\\\rollup-plugin-off-main-thread\\\\tests\\\\fixtures\\\\import-worker-url-custom-scheme\\\\build\\\\worker-ef1d7c89.js'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation\\node_modules\\.bun\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\node_modules\\@trickfilm400\\rollup-plugin-off-main-thread\\tests\\fixtures\\import-worker-url-custom-scheme\\build\\worker-e37d535c.js",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\v11-build-validation\\\\node_modules\\\\.bun\\\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\\\node_modules\\\\@trickfilm400\\\\rollup-plugin-off-main-thread\\\\tests\\\\fixtures\\\\import-worker-url-custom-scheme\\\\build\\\\worker-e37d535c.js'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation\\node_modules\\.bun\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\node_modules\\@trickfilm400\\rollup-plugin-off-main-thread\\tests\\fixtures\\import-worker-url-custom-scheme\\build\\worker-Bq6uP7t8.js",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\v11-build-validation\\\\node_modules\\\\.bun\\\\@trickfilm400+rollup-plugin-off-main-thread@3.0.0-pre1\\\\node_modules\\\\@trickfilm400\\\\rollup-plugin-off-main-thread\\\\tests\\\\fixtures\\\\import-worker-url-custom-scheme\\\\build\\\\worker-Bq6uP7t8.js'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation\\node_modules\\.bun\\@babel+plugin-proposal-private-property-in-object@7.21.0-placeholder-for-preset-env.2+497cea1c68b2b111\\node_modules\\@babel\\plugin-proposal-private-property-in-object\\lib\\index.js.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\v11-build-validation\\\\node_modules\\\\.bun\\\\@babel+plugin-proposal-private-property-in-object@7.21.0-placeholder-for-preset-env.2+497cea1c68b2b111\\\\node_modules\\\\@babel\\\\plugin-proposal-private-property-in-object\\\\lib\\\\index.js.map'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation\\node_modules\\.bun\\@babel+plugin-bugfix-safari-id-destructuring-collision-in-function-expression@7.29.7+497cea1c68b2b111\\node_modules\\@babel\\plugin-bugfix-safari-id-destructuring-collision-in-function-expression",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\v11-build-validation\\\\node_modules\\\\.bun\\\\@babel+plugin-bugfix-safari-id-destructuring-collision-in-function-expression@7.29.7+497cea1c68b2b111\\\\node_modules\\\\@babel\\\\plugin-bugfix-safari-id-destructuring-collision-in-function-expression'"
+        },
+        {
+          "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation\\node_modules\\.bun\\@aws+durable-execution-sdk-js@1.0.2\\node_modules\\@aws\\durable-execution-sdk-js\\dist-types\\handlers\\concurrent-execution-handler\\concurrent-execution-handler.integration.test.d.ts.map",
+          "error": "[WinError 3] The system cannot find the path specified: 'C:\\\\Users\\\\o\\\\AppData\\\\Local\\\\Temp\\\\opencode\\\\v11-build-validation\\\\node_modules\\\\.bun\\\\@aws+durable-execution-sdk-js@1.0.2\\\\node_modules\\\\@aws\\\\durable-execution-sdk-js\\\\dist-types\\\\handlers\\\\concurrent-execution-handler\\\\concurrent-execution-handler.integration.test.d.ts.map'"
+        }
+      ],
+      "created": "2026-11-09T14:00:15",
+      "modified": "2026-11-09T14:10:11",
+      "attribution": [],
+      "known_use": "Existing dependency cache reused by this task; creation attribution is separate."
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-build-validation-output",
+      "name": "v11-build-validation-output",
+      "group": "A",
+      "bytes": 248,
+      "files": 1,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T14:08:32",
+      "modified": "2026-11-09T14:08:32",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-dbg-src",
+      "name": "v11-dbg-src",
+      "group": "A",
+      "bytes": 234801331,
+      "files": 11601,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-11T01:14:13",
+      "modified": "2026-11-11T01:14:26",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-patch-check-Hr32X6",
+      "name": "v11-patch-check-Hr32X6",
+      "group": "A",
+      "bytes": 161957,
+      "files": 52,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T13:59:14",
+      "modified": "2026-11-09T13:59:14",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-patch-check-wQF0UZ",
+      "name": "v11-patch-check-wQF0UZ",
+      "group": "A",
+      "bytes": 161957,
+      "files": 52,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T13:59:00",
+      "modified": "2026-11-09T13:59:01",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-patch-final-pKIlNz",
+      "name": "v11-patch-final-pKIlNz",
+      "group": "A",
+      "bytes": 165222,
+      "files": 53,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T14:14:54",
+      "modified": "2026-11-09T14:14:54",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-photon-check-gtzRAI",
+      "name": "v11-photon-check-gtzRAI",
+      "group": "A",
+      "bytes": 179051,
+      "files": 55,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T17:21:36",
+      "modified": "2026-11-09T17:21:37",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-photon-final-2O2Neq",
+      "name": "v11-photon-final-2O2Neq",
+      "group": "A",
+      "bytes": 166836,
+      "files": 54,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T17:20:39",
+      "modified": "2026-11-09T17:20:39",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "C:\\Users\\o\\AppData\\Local\\Temp\\opencode\\v11-transient-check-T8WedK",
+      "name": "v11-transient-check-T8WedK",
+      "group": "A",
+      "bytes": 180349,
+      "files": 55,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-11-09T17:53:30",
+      "modified": "2026-11-09T17:53:30",
+      "attribution": [],
+      "known_use": null
+    },
+    {
+      "path": "X:\\extbins\\opencode\\repos\\github.com\\Effect-TS\\effect-smol",
+      "name": "effect-smol",
+      "group": "E",
+      "bytes": 35524934,
+      "files": 2446,
+      "junctions_skipped": 0,
+      "errors": [],
+      "created": "2026-09-20T14:32:54",
+      "modified": "2026-09-20T14:32:56",
+      "attribution": [],
+      "known_use": "Configured in finalsnap/.opencode/opencode.jsonc:5-9; OpenCode Reference.refresh materializes it. Git reflog records a 2026-09-20 clone, not a model identity."
+    }
+  ]
+}

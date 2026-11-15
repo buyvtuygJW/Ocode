@@ -65,12 +65,16 @@ export const Plugin = {
             Effect.gen(function* () {
               const searchPath = input.path === "undefined" || input.path === "null" ? undefined : input.path
               const target = yield* access.resolve({ path: searchPath ?? ".", kind: "directory" })
-              yield* access.authorizeExternal([target], context)
+              yield* access.authorizeExternal([target], context, { filesystemReadScope: "recursive" }, ["read"])
               yield* permission.assert({
                 action: name,
+                operations: ["read"],
+                paths: [target.absolute],
+                directories: [target.absolute],
                 resources: [input.pattern],
                 save: ["*"],
                 metadata: {
+                  filesystemReadScope: "recursive",
                   root: searchPath ?? ".",
                   path: searchPath,
                   hidden: input.hidden,

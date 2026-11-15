@@ -38,7 +38,7 @@ export const Plugin = {
                 action: "opencode_list_mcp_resources",
                 resources: servers,
                 save: servers,
-                metadata: {},
+                metadata: { filesystemEffects: "unknown" },
                 ...Permission.invocation(context),
               })
               if (input.server === undefined) return { output: yield* mcp.resourceCatalog() }
@@ -65,7 +65,7 @@ export const Plugin = {
                 action: "opencode_read_mcp_resource",
                 resources: [`${input.server}:${input.uri}`],
                 save: [`${input.server}:*`],
-                metadata: { server: input.server, uri: input.uri },
+                metadata: { server: input.server, uri: input.uri, filesystemEffects: "unknown" },
                 ...Permission.invocation(context),
               })
               const resource = yield* mcp.readResource(input)

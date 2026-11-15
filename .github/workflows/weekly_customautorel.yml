@@ -160,6 +160,11 @@ jobs:
           echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
           echo "Using upstream Bun version: $BUN_VERSION"
 
+      - name: Setup Node for capability regressions
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -224,6 +229,11 @@ jobs:
             echo "Applying final personalize patch:"
             echo "  $PATCH"
 
+            # Mandatory on every attempt, including fallback builds.
+            if ! node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches; then
+              echo "ERROR: mandatory base/permissions verification failed."
+              return 20
+            fi
             if [ ! -f "$PATCH" ]; then
               echo "ERROR: Missing patch:"
               echo "  $PATCH"
@@ -234,23 +244,11 @@ jobs:
               echo "Patch applied cleanly:"
               echo "  $PATCH"
             else
-              echo "Patch conflicted or failed:"
+              echo "ERROR: mandatory base/permissions patch conflicted or failed:"
               echo "  $PATCH"
-
               git status --short || true
-
-              echo ""
-              echo "Conflict markers before auto-resolve:"
-              git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . || true
-
-              if auto_resolve_git_apply_conflict_take_patch_side; then
-                echo "Auto-resolved by taking patch side."
-              else
-                echo "ERROR: auto-resolve failed for:"
-                echo "  $PATCH"
-                git status --short || true
-                return 20
-              fi
+              echo "Permission conflicts require review; automatic patch-side resolution is forbidden."
+              return 20
             fi
 
             echo ""
@@ -444,6 +442,8 @@ jobs:
               packages/core/test/session-context-decay.test.ts
               packages/core/test/session/content-guards.test.ts
               packages/core/test/session-model-request-hooks.test.ts
+              packages/core/test/session-title.test.ts
+              packages/core/test/permission.test.ts
             )
             # This test is owned by optional FinalPersonalizeR, not the core patch.
             # Require it when R is applied; do not require it after dropping R.
@@ -476,6 +476,29 @@ jobs:
             if ! (cd "$pkgdir" && bun test "${rel[@]}"); then
               echo "ERROR: patched unit tests FAILED -- refusing to build this ref"
               return 1
+            fi
+            # Permission regressions are mandatory, including when optional patches are dropped.
+            local permission_tests=(
+              packages/core/test/permission/session-grant.test.mjs
+              packages/core/test/permission/service.node.test.mjs
+              packages/core/test/config/mcp-selection.node.test.mjs
+              packages/app/src/session/requests/permission-machine.node.test.mjs
+            )
+            for f in "${permission_tests[@]}"; do
+              if [ ! -f "$f" ]; then
+                echo "ERROR: mandatory permission test missing: $f"
+                return 1
+              fi
+            done
+            if ! node --experimental-transform-types --test "${permission_tests[@]}"; then
+              echo "ERROR: mandatory permission regressions FAILED -- refusing to build this ref"
+              return 1
+            fi
+            if [ "${APPLIED_RSI:-off}" = "on" ]; then
+              if ! (cd packages/core && node --test ../../.personalize/subagent-capabilities.test.mjs); then
+                echo "ERROR: subagent capability regressions FAILED -- refusing to build this ref"
+                return 1
+              fi
             fi
             return 0
           }
@@ -582,6 +605,13 @@ jobs:
 
             if ! apply_custom_git_patches; then
               echo "ERROR: custom patch application failed"
+              cd ..
+              return 20
+            fi
+
+            # User-approved session naming; never change it without explicit approval.
+            if ! git apply --3way --index --whitespace=fix ../patches/SessionTitleNaming.patch; then
+              echo "ERROR: session title patch failed; refusing to build"
               cd ..
               return 20
             fi
@@ -921,9 +951,11 @@ jobs:
           mkdir -p "$STATE_FILE_DIR"
 
           cp "../patches/FinalPERSONALIZE.patch" "patches/FinalPERSONALIZE.patch"
+          cp "../patches/HarnessPermissions.base.patch" "patches/HarnessPermissions.base.patch"
           if [ -f "../patches/FinalPersonalizeX.patch" ]; then cp "../patches/FinalPersonalizeX.patch" "patches/FinalPersonalizeX.patch"; fi
           if [ -f "../patches/FinalPersonalizeS.patch" ]; then cp "../patches/FinalPersonalizeS.patch" "patches/FinalPersonalizeS.patch"; fi
           if [ -f "../patches/FinalPersonalizeR.patch" ]; then cp "../patches/FinalPersonalizeR.patch" "patches/FinalPersonalizeR.patch"; fi
+          cp "../patches/SessionTitleNaming.patch" "patches/SessionTitleNaming.patch"
           if [ -f "../patches/build-openscience-skills.sh" ]; then cp "../patches/build-openscience-skills.sh" "patches/build-openscience-skills.sh"; fi
 
           # GITHUB_TOKEN cannot CREATE or UPDATE a workflow file -- but an UNCHANGED

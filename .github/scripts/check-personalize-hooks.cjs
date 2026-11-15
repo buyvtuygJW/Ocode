@@ -16,9 +16,12 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 
 const NAMES = ['FinalPERSONALIZE.patch', 'FinalPersonalizeR.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeX.patch'];
 const MANDATORY = 'FinalPERSONALIZE.patch';
+const PERMISSIONS = 'HarnessPermissions.base.patch';
+const PERMISSIONS_SHA256 = 'ad57c9b8af974985f7dc64e3f10b46d2330464c07c5e42233780a21c06a3783f';
 const ALLOWED = 'packages/cli/script/build.ts';
 const MANIFESTS = ['manifest.json', 'R.json', 'S.json', 'X.json'];
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -95,7 +98,29 @@ function addedLines(section, file) {
   return section.split('\n').filter((line) => line.startsWith('+') && line !== header).map((line) => line.slice(1));
 }
 
-function analyze(patches, upstream) {
+function analyze(patches, upstream, permissions) {
+  let permissionFiles = 0;
+  if (permissions !== undefined) {
+    const required = String(permissions).replaceAll('\r\n', '\n');
+    const hash = createHash('sha256').update(required).digest('hex');
+    if (hash !== PERMISSIONS_SHA256) throw new Error('Mandatory permissions patch checksum mismatch');
+    const base = String(patches[MANDATORY] || '').replaceAll('\r\n', '\n');
+    if (!base.endsWith(required)) throw new Error('Mandatory permissions are missing or altered in the base patch');
+    const seen = new Set();
+    for (const section of required.split(/(?=^diff --git )/m).filter((s) => s.startsWith('diff --git '))) {
+      const file = safePath(PERMISSIONS, diffPath(PERMISSIONS, section));
+      if (seen.has(file)) throw new Error(`Duplicate permission file: ${file}`);
+      seen.add(file);
+      if (upstream) {
+        const exists = fs.existsSync(path.join(upstream, file));
+        if (section.includes('\n--- /dev/null\n') && exists) throw new Error(`Permission file collision with upstream: ${file}`);
+        if (!section.includes('\n--- /dev/null\n') && !exists) throw new Error(`Permission target missing upstream: ${file}`);
+      }
+    }
+    permissionFiles = seen.size;
+    if (permissionFiles !== 33) throw new Error(`Expected 33 mandatory permission files; found ${permissionFiles}`);
+    patches = { ...patches, [MANDATORY]: base.slice(0, -required.length) };
+  }
   const hooks = [];
   const additions = new Map();
   for (const [name, text] of Object.entries(patches)) {
@@ -171,7 +196,7 @@ function analyze(patches, upstream) {
     );
     if (!wired) throw new Error('The allowed build hook does not load the owned module boundaries');
   }
-  return { files: new Set(hooks.map((h) => h.file)).size, hunks, owned: additions.size };
+  return { files: new Set(hooks.map((h) => h.file)).size, hunks, owned: additions.size, ...(permissions === undefined ? {} : { permissionFiles }) };
 }
 
 if (require.main === module) {
@@ -184,6 +209,8 @@ if (require.main === module) {
   if (missing.includes(MANDATORY)) {
     throw new Error(`Missing mandatory patch in ${directory}: ${MANDATORY}`);
   }
+  const permissionPath = path.join(directory, PERMISSIONS);
+  if (!fs.existsSync(permissionPath)) throw new Error(`Missing mandatory permission source: ${permissionPath}`);
   if (missing.length > 0) {
     console.error(`WARNING: optional patches missing (checked the rest): ${missing.join(', ')}`);
   }
@@ -194,9 +221,9 @@ if (require.main === module) {
   const patches = Object.fromEntries(
     NAMES.filter((name) => fs.existsSync(path.join(directory, name))).map((name) => [name, fs.readFileSync(path.join(directory, name), 'utf8')])
   );
-  const result = analyze(patches, upstream);
+  const result = analyze(patches, upstream, fs.readFileSync(permissionPath, 'utf8'));
   console.log(
-    `Personalize hook budget PASS: ${result.hunks}/4 hook points across ${result.files} upstream file, ${result.owned} owned files.`
+    `Personalize hook budget PASS: ${result.hunks}/4 hook points across ${result.files} upstream file, ${result.owned} owned files; ${result.permissionFiles} mandatory permission files verified.`
   );
 }
 

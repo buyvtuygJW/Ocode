@@ -3,7 +3,10 @@ import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { Portal, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { TextareaRenderable } from "@opentui/core"
 import { useTheme, useThemes } from "../../context/theme"
-import type { PermissionReply, PermissionRequest } from "@opencode/client"
+import type { Permission } from "@opencode/schema/permission"
+import { parsePermissionShorthand } from "@opencode/schema/permission-shorthand"
+type PermissionReply = Permission.Reply
+type PermissionRequest = Permission.Request
 import { SplitBorder } from "../../ui/border"
 import { useData } from "../../context/data"
 import { filetype } from "../../util/filetype"
@@ -17,7 +20,7 @@ import { SimulationSemantics } from "../../simulation/semantics"
 import { PatchDiff } from "../../component/patch-diff"
 import { useToast } from "../../ui/toast"
 
-type PermissionStage = "permission" | "reject"
+type PermissionStage = "permission" | "reject" | "policy"
 
 function EditBody(props: { file?: string; diff?: string; patch?: string }) {
   const theme = useTheme()
@@ -115,6 +118,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const toast = useToast()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
+    error: "",
   })
   const pathFormatter = usePathFormatter()
   const session = createMemo(() => data.session.get(props.request.sessionID))
@@ -134,13 +138,38 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const theme = useTheme()
 
   function reply(value: PermissionReply, message?: string) {
+    if (typeof value === "object" && "policy" in value) {
+      try {
+        const parsed = parsePermissionShorthand(value.policy)
+        if (parsed.mcp !== undefined) throw new Error("MCP selection belongs to tool configuration, not a directory permission grant.")
+      } catch (error) {
+        setStore("error", error instanceof Error ? error.message : String(error))
+        return
+      }
+    }
+    setStore("error", "")
     void data.session.permission
       .reply({ sessionID: props.request.sessionID, requestID: props.request.id, decision: value, message })
-      .catch((error: unknown) => toast.error(error))
+      .then(() => setStore("stage", "permission"))
+      .catch((error: unknown) => {
+        setStore("error", error instanceof Error ? error.message : String(error))
+        toast.error(error)
+      })
   }
 
   return (
-    <Switch>
+      <Switch>
+        <Match when={store.stage === "policy"}>
+          <RejectPrompt
+            action={props.request.action}
+            instance={props.request.id}
+            policy
+            directories={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}
+            error={store.error}
+            onConfirm={(policy) => reply({ scope: "session", policy })}
+            onCancel={() => setStore("stage", "permission")}
+          />
+        </Match>
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           action={props.request.action}
@@ -201,7 +230,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
             <box flexDirection="column" gap={0}>
               <box flexDirection="row" gap={1} flexShrink={0}>
                 <text fg={theme.text.feedback.warning.base}>{"△"}</text>
-                <text fg={theme.text.base}>Permission required</text>
+                <text fg={theme.text.base}>Permission required{props.request.operations?.length ? ` · ${props.request.operations.join("/")}` : ""}</text>
               </box>
               <Show when={props.request.action !== "shell" && current.title}>
                 <box flexDirection="row" gap={1} paddingLeft={2} flexShrink={0}>
@@ -221,6 +250,10 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               instance={props.request.id}
               header={header()}
               body={(option) => (
+                <box gap={1}>
+                <For each={props.request.directories}>
+                  {(directory) => <text fg={theme.text.muted}>Policy directory: {directory}</text>}
+                </For>
                 <Show when={option === "always"} fallback={presentationBody()}>
                   <box paddingLeft={1} gap={1}>
                     <For each={permissionAlwaysLines(props.request)}>
@@ -228,19 +261,27 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     </For>
                   </box>
                 </Show>
+                </box>
               )}
-              options={
-                props.request.save?.length
-                  ? {
-                      once: permissionOptionLabel("once"),
-                      always: permissionOptionLabel("always"),
-                      reject: permissionOptionLabel("reject"),
-                    }
-                  : { once: permissionOptionLabel("once"), reject: permissionOptionLabel("reject") }
-              }
+              options={{
+                once: permissionOptionLabel("once"),
+                ...((props.request.directories?.length || props.request.action === "external_directory") && props.request.operations?.length
+                  ? { policy: "Session CRUD policy…", ...(props.request.operations.every((operation) => operation === "read")
+                    ? { session_read: "Read subtree · session + descendants" } : {}) } : {}),
+                ...(props.request.save?.length ? { always: permissionOptionLabel("always") } : {}),
+                reject: permissionOptionLabel("reject"),
+              }}
               escapeKey="reject"
               fullscreen
               onSelect={(option) => {
+                if (option === "policy") {
+                  setStore("stage", "policy")
+                  return
+                }
+                if (option === "session_read") {
+                  reply("session_read")
+                  return
+                }
                 if (option === "always") {
                   reply("always")
                   return
@@ -274,6 +315,9 @@ function RejectPrompt(props: {
   instance: string
   onConfirm: (message: string) => void
   onCancel: () => void
+  policy?: boolean
+  error?: string
+  directories?: readonly string[]
 }) {
   let input: TextareaRenderable
   const enabled = useInteractivity()
@@ -322,11 +366,15 @@ function RejectPrompt(props: {
       <box gap={1} paddingLeft={1} paddingRight={3} paddingTop={1} paddingBottom={1}>
         <box flexDirection="row" gap={1} paddingLeft={1}>
           <text fg={theme.text.feedback.error.base}>{"△"}</text>
-          <text fg={theme.text.base}>Reject permission</text>
+          <text fg={theme.text.base}>{props.policy ? "Session CRUD policy" : "Reject permission"}</text>
         </box>
         <box paddingLeft={1}>
-          <text fg={theme.text.muted}>Tell OpenCode what to do differently</text>
+          <text fg={theme.text.muted}>{props.policy
+            ? "RU=S* CD=D* · selected subtree + descendants · survives restart · =1 once · =S session · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged."
+            : "Tell OpenCode what to do differently"}</text>
         </box>
+        <Show when={props.error}><text fg={theme.text.feedback.error.base}>{props.error}</text></Show>
+        <For each={props.directories}>{(directory) => <text fg={theme.text.base}>{directory}</text>}</For>
       </box>
       <box
         flexDirection={narrow() ? "column" : "row"}

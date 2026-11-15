@@ -1,0 +1,216 @@
+{
+  "name": "HarnessPermissions.patch",
+  "bytes": 125437,
+  "sha256": "ae95dc6de5c2bc26055bac537a720c51ebc0d90d4ae78b3456619e6a000b3bd5",
+  "baseRevision": "eedb7fb3d0b984a606812adee6eb25d23415882f",
+  "separateSourcePatch": true,
+  "automaticallyAppliedByWorkflow": false,
+  "verification": {
+    "strictParse": true,
+    "forwardAndReverseReconstruction": true,
+    "gitApplyRun": false,
+    "canonicalCheckRun": false,
+    "nativeSqliteRun": false,
+    "browserRenderingRun": false
+  },
+  "files": [
+    {
+      "file": "packages/schema/src/permission.ts",
+      "kind": "modify",
+      "before": "45b63a6d9f7619d9285663111f26a9a939d64683cac3272881e6dd196409bc1d",
+      "after": "b825e88ca19a5cce873a1b9a4cddfbb471231e3dfefe485bb9aa25d03789d67d"
+    },
+    {
+      "file": "packages/schema/src/permission-shorthand.ts",
+      "kind": "add",
+      "before": null,
+      "after": "90a78a5a4a6cbf885778bc9634db7c0bdb0e91c4788be4b4b2a5f0824feb034d"
+    },
+    {
+      "file": "packages/schema/src/config/experimental.ts",
+      "kind": "modify",
+      "before": "98e6ea5814f4c1db7872a6b8f923ee9c6019682d9400f1f4d1dc3d27334ef50d",
+      "after": "e3f8dd51cea81b002e1ecd3b7004e5c2f06095d769b8885b978e7bae7fac76fe"
+    },
+    {
+      "file": "packages/core/src/config/plugin/mcp.ts",
+      "kind": "modify",
+      "before": "b582fbbb99e98d9e5fd4df48598da12ca128f57021e038c32bf3dcc16a561330",
+      "after": "fc9cd73145d120c68b2ebf040af98c5b717c8ce0c7217a22b1dae29578e0b037"
+    },
+    {
+      "file": "packages/core/test/config/mcp-selection.node.test.mjs",
+      "kind": "add",
+      "before": null,
+      "after": "113363c6d79c842f2f12e811bd37ed335ccb71bf0d10fc8ec4e9eb5630660eee"
+    },
+    {
+      "file": "packages/core/src/permission.ts",
+      "kind": "modify",
+      "before": "fb3c9eb5226761074e9f4f293b215e99a345a232d7fe88a6584667f6a9e48e40",
+      "after": "1bcf5cfd2b407c988ce33cb3b9968accbc3427c967e51a275dd80f40344ed655"
+    },
+    {
+      "file": "packages/core/src/permission/session-grant.ts",
+      "kind": "add",
+      "before": null,
+      "after": "508c318f9fb9ae8ca22a051c1e76542d91dd995bd84e62e76cb9ef142915c8e9"
+    },
+    {
+      "file": "packages/core/src/file-access.ts",
+      "kind": "modify",
+      "before": "6bcfbf1f53b9a2e5dd497bc50f12c6a6d610b68694641fb35ba8464ac82496bd",
+      "after": "3fb4af63a61296aa48f4f860b227cd3698552b7e2ee2755836d46d9996e99563"
+    },
+    {
+      "file": "packages/core/src/file-write.ts",
+      "kind": "modify",
+      "before": "82b9b349f1b120776c6d895749f3c0daa97e5b1649844412cb5b918137a110ea",
+      "after": "773fe0536f593c6ef2b492e3bec2069a9953ca859c3a5e7e0d01f6df49b13ee8"
+    },
+    {
+      "file": "packages/core/src/tool/plugin/glob.ts",
+      "kind": "modify",
+      "before": "eb445d4d5ebb8d974c92791c3c653f6c100c3e945364e34755ed0e5e9fc62aa5",
+      "after": "e3d444d4b6a0f73730743cf6c66c302c4d13542c16bf0403449652c18f20939d"
+    },
+    {
+      "file": "packages/core/src/tool/plugin/grep.ts",
+      "kind": "modify",
+      "before": "ed9f51c067caa4e5a220b97311adad8f5a743f01b21a93618934936182ead1a5",
+      "after": "b0862530dada50d43f27b4b99d28599a3a4f5144209ac376f3b00ecf076aba74"
+    },
+    {
+      "file": "packages/core/src/tool/plugin/patch.ts",
+      "kind": "modify",
+      "before": "96f639b33d0d5270bfcabae934cddb2e1fe2e35e3e26f060ab2e048b1cf92458",
+      "after": "628b8bb37e312d678a964b6543b4f82daaf8710e8e4b7bfcf967994fadd2100d"
+    },
+    {
+      "file": "packages/core/src/tool/plugin/shell.ts",
+      "kind": "modify",
+      "before": "3a831f5b9a4c74fe8adde5831c22129536fedbdf649a40fa6885caccdd82335f",
+      "after": "2c3bfe40902748c953105f4cdeb0e557db452273f84cbfc5938c0213c0935e1e"
+    },
+    {
+      "file": "packages/core/src/tool/mcp.ts",
+      "kind": "modify",
+      "before": "eead09dddf29082187cc293e63510b578b568d0cc489fd5a6f366cac51e3ca34",
+      "after": "fc582b992367db8471889efe625620d80eb96f62921188351b40dbb952c01582"
+    },
+    {
+      "file": "packages/core/src/tool/plugin/mcp-resource.ts",
+      "kind": "modify",
+      "before": "849391cf7de17c392d45037ab9f6d7bc55b85d29558eb7ada0656ae4ea59f881",
+      "after": "32fae8263b93698523cb10d3ffdd9c507765613e9ef1675a63d7ef7f8bc9ec69"
+    },
+    {
+      "file": "packages/core/test/permission.test.ts",
+      "kind": "modify",
+      "before": "22dcb08c237c5dda588a02ee7cc3c0c2e9af21b03aa6c6a9ad78585b2e9885de",
+      "after": "d2d5aa5a6e7d99e8c482db68263a4d173449d8041807d184ef849656de786c07"
+    },
+    {
+      "file": "packages/core/test/permission/session-grant.test.mjs",
+      "kind": "add",
+      "before": null,
+      "after": "1da2f08022a34970ac988b227dfc6304ca7fe6bb30c7cb443360c30981499d35"
+    },
+    {
+      "file": "packages/core/test/permission/service-fixture.mjs",
+      "kind": "add",
+      "before": null,
+      "after": "a6e6aac292411b73c7a23b342f55cf776b7d93e4dd59b6cd5c2fe942be9b81b0"
+    },
+    {
+      "file": "packages/core/test/permission/service.node.test.mjs",
+      "kind": "add",
+      "before": null,
+      "after": "e265620cb1f908b0dfec816dd574666f7c55734e6f428db0e6faf03ac4cae166"
+    },
+    {
+      "file": "packages/tui/src/routes/session/permission.tsx",
+      "kind": "modify",
+      "before": "8231042655d5e767063a8500a4c1ee7a8241c3602e77f0d5bf2deb07fedc4910",
+      "after": "a58276c6884d486009d44f1914c59323372567364d44cfcc75d246f45954b278"
+    },
+    {
+      "file": "packages/tui/src/mini/types.ts",
+      "kind": "modify",
+      "before": "9712035e588f8bbdc9784c22236079c89b526064512f931361021649f43a1bcf",
+      "after": "66c090d81bcb94034d286461f15cdc95cb50c04b29bcaccd1c8ca5a9b90a025e"
+    },
+    {
+      "file": "packages/tui/src/mini/permission.shared.ts",
+      "kind": "modify",
+      "before": "39e2400721a29b4a419f76cfcc0521cb6bf66e8284abce545169951802b5b4a2",
+      "after": "65496cfc02be27184b84c792fdd72674ffce49a540f12e5ce4b94e0b107d612a"
+    },
+    {
+      "file": "packages/tui/src/mini/footer.permission.tsx",
+      "kind": "modify",
+      "before": "84934a1f6ff6e10e65ae6811ec567b35c6b0ff8c643d1150b2e2449c8734ebd7",
+      "after": "245b9ea7b229190ce4e9ed9ec6f3b69995304162bfe31a90fd784ecb532037cc"
+    },
+    {
+      "file": "packages/app/src/session/requests/permission-machine.ts",
+      "kind": "modify",
+      "before": "239e5ec990d9901b7ed9cd6830254cc5a7167ad07b618dbf9afc78bb5d0aebe5",
+      "after": "82894b858921b3ed73623eca6b442f20ed8538a04d289a01267440a9e3a51898"
+    },
+    {
+      "file": "packages/app/src/session/requests/permission-machine.node.test.mjs",
+      "kind": "add",
+      "before": null,
+      "after": "fec725ae950962e618da4886337134ec31d3f81b8249cdabe950ec2ef5c44e08"
+    },
+    {
+      "file": "packages/app/src/session/requests/session-permission-dock.tsx",
+      "kind": "modify",
+      "before": "74adf243f0b0e91bfa4010b92b2b1d05bf9cbfeb819fbcfe3446608f2df6bdc3",
+      "after": "8d74e852a317803868523874dc031dc550be83e3a9d4e30310778d581071d690"
+    },
+    {
+      "file": "packages/app/src/runtime/i18n/en.ts",
+      "kind": "modify",
+      "before": "1884b9bd2f5059f42954c2876855c2f3a38f2a48ab50bd5526fb70e4ca0ccf2e",
+      "after": "e0401a8d3c60904d62cb1dd0ab4040a538afcbb028eb745f955433d1f4c1e18a"
+    },
+    {
+      "file": "packages/protocol/src/groups/permission.ts",
+      "kind": "modify",
+      "before": "7423b57b5a39a2151871031910b492bb25cf177654e310a512b49871b0e70819",
+      "after": "dbe802bb0d03734346d690004e48b28ba536c61e30cde581eb1ccb38fe4ee0be"
+    },
+    {
+      "file": "packages/server/src/handlers/permission.ts",
+      "kind": "modify",
+      "before": "045c05a2a6c4281b82daa8dc21b4df7417bbfdd0f411a2934f5d50927d6dc59d",
+      "after": "672db0509c1110c90d328607f94d41fd9acb4132c341249aa101f38a749adbd3"
+    },
+    {
+      "file": "packages/client/src/promise/generated/client.ts",
+      "kind": "modify",
+      "before": "3dcbfe595973c5ca99292fc087eb33965b515042b21528fe19fc3ba3b27b03b1",
+      "after": "59e9f6ac17f7eaeb96f0b1700626c85346f76fd53dec68a07c0a2f2abd51b7c0"
+    },
+    {
+      "file": "packages/client/src/promise/generated/types.ts",
+      "kind": "modify",
+      "before": "13702e1a43df13d3b936836506edc8b63888ea19ef7a7a9b063652d87ad9faf4",
+      "after": "304d5dc0c744c47200243b431ddae0a740705b28f0325fc34813b94958ade407"
+    },
+    {
+      "file": "packages/client/src/effect/generated/client.ts",
+      "kind": "modify",
+      "before": "2929bc19c91f7a7083ffa8256546c51a9ca96577d954251793eb2ef163ad8f19",
+      "after": "183bd55c281b2ae11c9eb45e414c185a6a367fea86287317d2596eb0ba812f7d"
+    },
+    {
+      "file": "packages/client/src/effect/api/api.ts",
+      "kind": "modify",
+      "before": "b2b33ef173a9e845ef90504d363046caaee8effa4988df0c961b458a618ec97e",
+      "after": "a7e4088619c14be490f065767761f5d050f44edf34badb25e2fce4544b4b8015"
+    }
+  ]
+}

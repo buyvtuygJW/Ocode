@@ -3,6 +3,7 @@ export * as FileWrite from "./file-write.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import type { FileDiff } from "@opencode/schema/file-diff"
 import { Bom } from "@opencode/util/bom"
+import path from "node:path"
 import { Context, Effect, Layer } from "effect"
 import { Environment } from "./environment/index.js"
 import { FileAccess } from "./file-access.js"
@@ -33,7 +34,7 @@ export interface Interface {
     target: FileAccess.Target,
     context: FileAccess.Invocation,
     preview?: FileDiff.Info,
-  ) => Effect.Effect<void, Permission.Error | SessionErrors.NotFoundError>
+  ) => Effect.Effect<void, Environment.Failed | Permission.Error | SessionErrors.NotFoundError>
   /** Write approved text, keeping an existing UTF-8 BOM, then format the file. */
   readonly commit: (
     target: FileAccess.Target,
@@ -58,11 +59,17 @@ const layer = Layer.effect(
     const environment = yield* Environment.Service
     const fileMutation = yield* FileMutation.Service
     const formatter = yield* Formatter.Service
+    const externalApproved = new WeakMap<FileAccess.Target, Permission.Operation>()
     const permission = yield* Permission.Service
 
     const target = Effect.fn("FileWrite.target")(function* (file: string, context: FileAccess.Invocation) {
       const target = yield* access.resolve({ path: file, kind: "file" })
-      yield* access.authorizeExternal([target], context)
+      const exists = yield* environment.files.stat(target.absolute).pipe(
+        Effect.map(() => true),
+        Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(false)),
+      )
+      yield* access.authorizeExternal([target], context, undefined, [exists ? "update" : "create"])
+      externalApproved.set(target, exists ? "update" : "create")
       return target
     })
 
@@ -71,8 +78,18 @@ const layer = Layer.effect(
       context: FileAccess.Invocation,
       preview?: FileDiff.Info,
     ) {
+      const exists = yield* environment.files.stat(target.absolute).pipe(
+        Effect.map(() => true),
+        Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(false)),
+      )
+      const operations: readonly Permission.Operation[] = [exists ? "update" : "create"]
+      if (externalApproved.get(target) !== operations[0])
+        yield* access.authorizeExternal([target], context, undefined, operations)
       yield* permission.assert({
         action: "edit",
+        operations,
+        paths: [target.absolute],
+        directories: [target.externalDirectory?.directory ?? path.dirname(target.absolute)],
         resources: [target.resource],
         save: ["*"],
         metadata: preview ? { files: [preview] } : undefined,

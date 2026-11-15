@@ -23,6 +23,7 @@ import {
   permissionInfo,
   permissionLabel,
   permissionOptions,
+  permissionPolicyError,
   permissionReject,
   permissionRun,
   permissionShift,
@@ -165,7 +166,13 @@ export function RunPermissionBody(props: {
     },
   }))
   const opts = createMemo(() =>
-    permissionOptions(stage()).filter((option) => option !== "always" || (props.request.save?.length ?? 0) > 0),
+    permissionOptions(stage()).filter((option) => {
+      if (option === "always") return (props.request.save?.length ?? 0) > 0
+      if (option === "policy" || option === "session_read") return (!!props.request.directories?.length || props.request.action === "external_directory") &&
+        !!props.request.operations?.length &&
+        (option !== "session_read" || props.request.operations.every((operation) => operation === "read"))
+      return true
+    }),
   )
   const busy = createMemo(() => state().submitting)
   const controlsWidth = () => opts().reduce((total, option) => total + stringWidth(permissionLabel(option)) + 3, -1)
@@ -175,6 +182,7 @@ export function RunPermissionBody(props: {
       : `${props.mono ? "left/right" : "⇆"} select  enter confirm  esc ${stage() === "always" ? "cancel" : "reject"}`
   const inlineControls = () => controlsWidth() + stringWidth(hint()) + 1 <= width() - (compact() ? 0 : 5)
   const title = createMemo(() => {
+    if (stage() === "policy") return "Session CRUD policy"
     if (stage() === "always") {
       return "Always allow"
     }
@@ -206,6 +214,13 @@ export function RunPermissionBody(props: {
   })
 
   const submit = async (next: PermissionReply) => {
+    if (typeof next.decision === "object" && "policy" in next.decision) {
+      const error = permissionPolicyError(next.decision.policy)
+      if (error) {
+        setState((prev) => ({ ...prev, error, submitting: false }))
+        return
+      }
+    }
     setState((prev) => ({
       ...prev,
       submitting: true,
@@ -213,10 +228,12 @@ export function RunPermissionBody(props: {
 
     try {
       await props.onReply(next)
-    } catch {
+      setState((prev) => ({ ...prev, stage: "permission", submitting: false, error: undefined }))
+    } catch (error) {
       setState((prev) => ({
         ...prev,
         submitting: false,
+        error: error instanceof Error ? error.message : String(error),
       }))
     }
   }
@@ -250,7 +267,7 @@ export function RunPermissionBody(props: {
 
   useKeyboard((event) => {
     const cur = state()
-    if (cur.stage === "reject") {
+    if (cur.stage === "reject" || cur.stage === "policy") {
       return
     }
 
@@ -321,14 +338,23 @@ export function RunPermissionBody(props: {
         <text height={1} fg={props.theme.text} wrapMode="none" truncate>
           <span style={{ fg: props.theme.permission }}>{props.mono ? "! " : "△ "}</span>
           {title()}
+          {props.request.operations?.length ? ` · ${props.request.operations.join("/")}` : ""}
         </text>
-        <Show when={!compact() && stage() === "reject"}>
-          <text fg={props.theme.muted}>Tell OpenCode what to do differently</text>
+        <Show when={!compact() && (stage() === "reject" || stage() === "policy")}>
+          <text fg={props.theme.muted}>{stage() === "policy"
+            ? "RU=S* CD=D* · exact subtree + descendants · survives restart · =1 once · R=-S parent listing · omitted unchanged"
+            : "Tell OpenCode what to do differently"}</text>
+        </Show>
+        <Show when={state().error}><text fg={props.theme.permission}>{state().error}</text></Show>
+        <Show when={stage() === "policy" || stage() === "permission"}>
+          <For each={props.request.directories ?? props.request.resources.map((resource) => resource.replace(/\/\*$/, ""))}>
+            {(directory) => <text fg={props.theme.text}>{directory}</text>}
+          </For>
         </Show>
       </box>
 
       <Show
-        when={stage() !== "reject"}
+        when={stage() !== "reject" && stage() !== "policy"}
         fallback={
           <box width="100%" flexGrow={1} minHeight={0} justifyContent="flex-end">
             <box

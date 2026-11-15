@@ -67,7 +67,7 @@ const providerRejected = (input: { readonly message: string }) =>
 
 const successfulTitle = () =>
   Stream.make(
-    LLMEvent.textDelta({ id: "title", text: "Generated Title\n" }),
+    LLMEvent.textDelta({ id: "title", text: "Tree\n" }),
     LLMEvent.stepFinish({
       index: 0,
       reason: { normalized: "stop" },
@@ -228,10 +228,12 @@ it.effect("generates a title from the sole user message and renames the session"
     })
     expect(requests[0]?.promptCacheKey).toBe(sessionID)
     expect(requests[0]?.tools).toEqual([])
-    expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator."])
+    expect(requests[0]?.system.map((part) => part.text)).toEqual([
+      "Summarize: one word, max 5 chars, no spaces.",
+    ])
     expect(JSON.stringify(requests[0]?.messages)).toContain("Help me debug the failing build")
     const renamed = yield* store.get(sessionID)
-    expect(renamed?.title).toBe("Generated Title")
+    expect(renamed?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
     expect(renamed?.tokens).toEqual({ input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } })
     expect(renamed?.cost).toBeCloseTo(0.0000233)
   }),
@@ -261,7 +263,7 @@ for (const timing of ["start", "end"] as const)
             item: { type: "message", id: "commentary", phase: "commentary" },
           },
           { type: "response.output_item.added", item: { type: "message", id: "final", phase: "final_answer" } },
-          { type: "response.output_text.delta", item_id: "final", delta: "Read-only performance investigation" },
+          { type: "response.output_text.delta", item_id: "final", delta: "Speed" },
           { type: "response.output_item.done", item: { type: "message", id: "final", phase: "final_answer" } },
           { type: "response.completed", response: { id: "response_title" } },
         ]).pipe(
@@ -277,9 +279,53 @@ for (const timing of ["start", "end"] as const)
 
       const store = yield* SessionStore.Service
       expect(requests).toHaveLength(1)
-      expect((yield* store.get(sessionID))?.title).toBe("Read-only performance investigation")
+      expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Speed$/)
     }),
   )
+
+it.effect("limits the instruction to 55 characters, retains 1,000 message characters, and prefixes the local datetime", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const sessionID = Session.ID.make("ses_title_55_character_limit")
+    const created = new Date(2026, 10, 15, 14, 32).getTime()
+    yield* insertSession(sessionID, undefined, created)
+    yield* prompt(sessionID, `First message ${"x".repeat(8_000)}`)
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+    const store = yield* SessionStore.Service
+    expect((yield* store.get(sessionID))?.title).toBe("2026-11-15-1432-Tree")
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.maxTokens).toBe(20)
+    const system = requests[0]?.system.map((part) => part.text).join("") ?? ""
+    expect(system.length).toBeLessThanOrEqual(55)
+    expect(system).toBe("Summarize: one word, max 5 chars, no spaces.")
+    expect(requests[0]?.messages).toHaveLength(1)
+    const content = requests[0]?.messages[0]?.content[0]
+    expect(content?.type).toBe("text")
+    if (content?.type !== "text") return
+    expect(content.text.length).toBe(1_000)
+    expect(content.text.startsWith("First message ")).toBe(true)
+  }),
+)
+
+it.effect("uses only the datetime if the pseudonym is invalid", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const sessionID = Session.ID.make("ses_title_invalid_pseudonym")
+    const created = new Date(2026, 10, 15, 14, 32).getTime()
+    yield* insertSession(sessionID, undefined, created)
+    yield* prompt(sessionID, "Hello")
+    titleStream = () =>
+      Stream.make(
+        LLMEvent.textDelta({ id: "title", text: "Too Long" }),
+        LLMEvent.finish({ reason: { normalized: "stop" } }),
+      )
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+    const store = yield* SessionStore.Service
+    expect((yield* store.get(sessionID))?.title).toBe("2026-11-15-1432")
+  }),
+)
 
 it.effect("runs title hooks instead of context hooks", () =>
   Effect.gen(function* () {
@@ -294,10 +340,13 @@ it.effect("runs title hooks instead of context hooks", () =>
     yield* hooks.register("session", "title", (event) =>
       Effect.sync(() => {
         expect(event.sessionID).toBe(sessionID)
-        expect(event.system.map((part) => part.text)).toEqual(["You are a title generator."])
+        expect(event.system.map((part) => part.text)).toEqual([
+          "Summarize: one word, max 5 chars, no spaces.",
+        ])
         event.system.push(SystemPart.make("Prefer short titles."))
         event.messages = [Message.user("[redacted]")]
         event.options.maxTokens = 32
+        event.options.maxCompletionTokens = 128
         event.options.reasoningEffort = "low"
       }),
     )
@@ -307,10 +356,50 @@ it.effect("runs title hooks instead of context hooks", () =>
 
     expect(contexts).toBe(0)
     expect(requests).toHaveLength(1)
-    expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator.", "Prefer short titles."])
+    expect(requests[0]?.system.map((part) => part.text)).toEqual([
+      "Summarize: one word, max 5 chars, no spaces.",
+    ])
     expect(JSON.stringify(requests[0]?.messages)).not.toContain("Redact this message")
-    expect(requests[0]?.maxTokens).toBe(32)
-    expect(requests[0]?.providerOptions).toEqual({ reasoningEffort: "low" })
+    expect(JSON.stringify(requests[0]?.messages)).toContain("[redacted]")
+    expect(requests[0]?.maxTokens).toBe(20)
+    expect(requests[0]?.providerOptions).toEqual({ maxCompletionTokens: 20, reasoningEffort: "low" })
+  }),
+)
+
+it.effect("preserves a smaller provider output limit", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const sessionID = Session.ID.make("ses_title_smaller_output_limit")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Hello")
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "title", (event) =>
+      Effect.sync(() => {
+        event.options.maxTokens = 12
+      }),
+    )
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+    expect(requests[0]?.maxTokens).toBe(12)
+  }),
+)
+
+it.effect("omits the output limit for the ChatGPT Codex backend", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const sessionID = Session.ID.make("ses_title_codex_output_limit")
+    yield* insertSession(sessionID)
+    yield* prompt(sessionID, "Hello")
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "model.request", (event) =>
+      Effect.sync(() => {
+        event.baseURL = "https://chatgpt.com/backend-api/codex"
+      }),
+    )
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID)
+    expect(requests[0]?.model.route.endpoint.baseURL).toBe("https://chatgpt.com/backend-api/codex")
+    expect(requests[0]?.maxTokens).toBeUndefined()
   }),
 )
 
@@ -324,7 +413,7 @@ it.effect("uses a hook-provided title without a model request", () =>
     const hooks = yield* PluginHooks.Service
     yield* hooks.register("session", "title", (event) =>
       Effect.sync(() => {
-        event.result = "Plugin Title"
+        event.result = "Plug"
       }),
     )
 
@@ -333,7 +422,7 @@ it.effect("uses a hook-provided title without a model request", () =>
 
     expect(requests).toHaveLength(0)
     const store = yield* SessionStore.Service
-    expect((yield* store.get(sessionID))?.title).toBe("Plugin Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Plug$/)
   }),
 )
 
@@ -351,7 +440,7 @@ it.effect("uses a small model from the primary provider", () =>
     expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"])
     expect(selections[1]?.variant).toBe(Model.VariantID.make("none"))
     const store = yield* SessionStore.Service
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -388,7 +477,7 @@ it.effect("falls back to the primary model when the small model fails", () =>
     expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
     expect(attempted.map((model) => String(model.variant))).toEqual(["low", "high"])
     const store = yield* SessionStore.Service
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -431,7 +520,7 @@ it.effect("uses the primary model at its lowest variant without a small model", 
       "high",
     )
     expect(result.attempted).toEqual(["none"])
-    expect(result.title).toBe("Generated Title")
+    expect(result.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -446,7 +535,7 @@ it.effect("falls back to the selected primary variant when the lowest variant fa
       "high",
     )
     expect(result.attempted).toEqual(["low", "high"])
-    expect(result.title).toBe("Generated Title")
+    expect(result.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -455,7 +544,7 @@ it.effect("uses the selected primary variant when no lower variant exists", () =
     selectedPrimary = primaryInfo(["high", "max"])
     const result = yield* titleAttempts(Session.ID.make("ses_title_primary_selected"), "No lower variant here", "high")
     expect(result.attempted).toEqual(["high"])
-    expect(result.title).toBe("Generated Title")
+    expect(result.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -468,7 +557,7 @@ it.effect("keeps the primary default variant instead of a low variant that may e
       undefined,
     )
     expect(result.attempted).toEqual(["default"])
-    expect(result.title).toBe("Generated Title")
+    expect(result.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -477,7 +566,7 @@ it.effect("uses the primary none variant from its default variant", () =>
     selectedPrimary = primaryInfo(["none", "low", "high"])
     const result = yield* titleAttempts(Session.ID.make("ses_title_primary_none"), "Disable reasoning", undefined)
     expect(result.attempted).toEqual(["none"])
-    expect(result.title).toBe("Generated Title")
+    expect(result.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -496,7 +585,7 @@ it.effect("generates from the first user message after later messages exist", ()
     expect(requests).toHaveLength(1)
     expect(JSON.stringify(requests[0]?.messages)).toContain("First message")
     expect(JSON.stringify(requests[0]?.messages)).not.toContain("Second message")
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -513,7 +602,7 @@ it.effect("retries a legacy persisted fallback title", () =>
 
     const store = yield* SessionStore.Service
     expect(requests).toHaveLength(1)
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -547,7 +636,7 @@ it.effect("generates a title for an explicitly requested child session", () =>
     yield* title.generate(sessionID)
     const store = yield* SessionStore.Service
     expect(requests).toHaveLength(1)
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
@@ -603,16 +692,18 @@ it.effect("regenerates an existing title using the title agent", () =>
 
     const store = yield* SessionStore.Service
     expect(requests).toHaveLength(1)
-    expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator."])
+    expect(requests[0]?.system.map((part) => part.text)).toEqual([
+      "Summarize: one word, max 5 chars, no spaces.",
+    ])
     expect(JSON.stringify(requests[0]?.messages)).toContain("Investigate the login failure")
-    expect(JSON.stringify(requests[0]?.messages)).toContain("The actual issue is expired OAuth credentials.")
-    expect(JSON.stringify(requests[0]?.messages)).toContain("Switch to fixing OAuth token refresh")
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("The actual issue is expired OAuth credentials.")
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("Switch to fixing OAuth token refresh")
     expect(JSON.stringify(requests[0]?.messages)).not.toContain("Private reasoning that should not appear")
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 
-it.effect("bounds regeneration context while preserving the original request and recent conversation", () =>
+it.effect("bounds the first message to 1,000 characters", () =>
   Effect.gen(function* () {
     yield* enableTitleAgent
     const sessionID = Session.ID.make("ses_title_regenerate_bounded")
@@ -626,9 +717,9 @@ it.effect("bounds regeneration context while preserving the original request and
     const content = requests[0]?.messages[0]?.content[0]
     expect(content?.type).toBe("text")
     if (content?.type !== "text") return
-    expect(content.text.length).toBeLessThanOrEqual(8_000)
+    expect(content.text.length).toBe(1_000)
     expect(content.text).toContain("ORIGINAL_GOAL")
-    expect(content.text).toContain("RECENT_GOAL")
+    expect(content.text).not.toContain("RECENT_GOAL")
     expect(content.text).not.toContain("OMITTED_ORIGINAL_END")
     expect(content.text).not.toContain("OMITTED_OLD_CONTEXT")
   }),
@@ -666,7 +757,7 @@ it.effect("retries after a failed title request", () =>
 
     const store = yield* SessionStore.Service
     expect(requests).toHaveLength(2)
-    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
+    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
   }),
 )
 

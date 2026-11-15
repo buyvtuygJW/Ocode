@@ -53,6 +53,8 @@ export interface Interface {
     targets: readonly Target[],
     context: Invocation,
     metadata?: Permission.AssertInput["metadata"],
+    operations?: readonly Permission.Operation[],
+    access?: "content" | "listing",
   ) => Effect.Effect<void, Permission.Error | SessionErrors.NotFoundError>
   /** Resolve a read target and obtain external-directory approval before read approval. */
   readonly authorizeRead: (
@@ -121,6 +123,8 @@ const layer = Layer.effect(
       targets: readonly Target[],
       context: Invocation,
       metadata?: Permission.AssertInput["metadata"],
+      operations?: readonly Permission.Operation[],
+      access?: "content" | "listing",
     ) {
       const external = Array.dedupeWith(
         targets.flatMap((target) => (target.externalDirectory ? [target.externalDirectory] : [])),
@@ -130,6 +134,10 @@ const layer = Layer.effect(
       yield* permission.assert({
         action: "external_directory",
         resources: external.map((item) => item.resource),
+        operations,
+        access,
+        paths: targets.filter((target) => target.externalDirectory).map((target) => target.absolute),
+        directories: external.map((item) => item.directory),
         save: external.map((item) => item.save),
         ...(metadata === undefined ? {} : { metadata }),
         ...Permission.invocation(context),
@@ -142,12 +150,20 @@ const layer = Layer.effect(
       options?: ReadOptions,
     ) {
       const target = yield* resolve({ path: file, kind: options ? "file" : undefined })
+      const stat = yield* files.stat(target.absolute).pipe(
+        Effect.catchIf((error) => error instanceof Environment.NotFound, () => Effect.succeed(undefined)),
+      )
+      const access = stat?.type === "directory" ? "listing" : "content"
       const sibling = options && path.dirname(target.absolute) === path.dirname(options.siblingOf.absolute)
 
       // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
-      if (!sibling) yield* authorizeExternal([target], context)
+      if (!sibling) yield* authorizeExternal([target], context, undefined, ["read"], access)
       yield* permission.assert({
         action: "read",
+        operations: ["read"],
+        access,
+        paths: [target.absolute],
+        directories: [access === "listing" ? target.absolute : path.dirname(target.absolute)],
         resources: [target.resource],
         save: ["*"],
         ...Permission.invocation(context),

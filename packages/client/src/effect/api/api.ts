@@ -1924,6 +1924,10 @@ export type PermissionCreateInput = {
   readonly id?: Permission.ID | undefined
   readonly action: string
   readonly resources: ReadonlyArray<string>
+  readonly operations?: ReadonlyArray<Permission.Operation> | undefined
+  readonly paths?: ReadonlyArray<string> | undefined
+  readonly directories?: ReadonlyArray<string> | undefined
+  readonly access?: "content" | "listing" | undefined
   readonly save?: ReadonlyArray<string> | undefined
   readonly metadata?: { readonly [x: string]: unknown } | undefined
   readonly source?: Permission.Source | undefined

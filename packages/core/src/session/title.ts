@@ -18,8 +18,17 @@ import { SessionUsage } from "./usage.js"
 import { SessionStore } from "./store.js"
 
 const MAX_LENGTH = 100
-const MAX_CONTEXT_LENGTH = 8_000
-const MAX_FIRST_MESSAGE_LENGTH = 2_000
+const MAX_FIRST_MESSAGE_LENGTH = 1_000
+const MAX_TITLE_OUTPUT_TOKENS = 20
+const outputTokenKeys = new Set([
+  "maxTokens",
+  "maxOutputTokens",
+  "maxCompletionTokens",
+  "max_tokens",
+  "max_output_tokens",
+  "max_completion_tokens",
+  "max_tokens_to_sample",
+])
 const titleChanged = Symbol("Session title changed")
 
 export interface Interface {
@@ -30,11 +39,13 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
 
 const truncate = (value: string) => (value.length <= MAX_LENGTH ? value : `${value.slice(0, MAX_LENGTH - 3)}...`)
-// Framing the input as text to name keeps models from answering or carrying out the request instead.
-const messagePrompt = (text: string) =>
-  `Here is the first message of the conversation:\n\n<message>\n${text}\n</message>\n\nReply with only the title.`
-const conversationPrompt = (text: string) =>
-  `Here is the conversation so far:\n\n<conversation>\n${text}\n</conversation>\n\nReply with only the title.`
+// User-approved naming change: never change session naming without explicit approval.
+const instruction = "Summarize: one word, max 5 chars, no spaces."
+const dateTitle = (created: DateTime.Utc) => {
+  const date = new Date(DateTime.toEpochMillis(created))
+  const two = (n: number) => String(n).padStart(2, "0")
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}-${two(date.getHours())}${two(date.getMinutes())}`
+}
 export const isUntitled = (session: SessionSchema.Info) =>
   isExactRootFallback({
     title: session.title,
@@ -73,12 +84,32 @@ export const layer = Layer.effect(
         session: input.session,
         agent: input.agent.id,
         model: input.model,
-        system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
+        system: [SystemPart.make(instruction)],
         messages: [Message.user(input.text)],
       })
       if (prepared.event.result !== undefined) return prepared.event.result
       const metadataKey = prepared.request.model.route.providerMetadataKey ?? prepared.request.model.provider
-      yield* llm.stream(prepared.request, prepared.options).pipe(
+      // Preserve hook redactions and cap the first message separately from the instruction.
+      const safeText = prepared.request.messages
+        .flatMap((message) => (message.role === "user" ? message.content : []))
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join(" ")
+      const safePrompt = safeText.slice(0, MAX_FIRST_MESSAGE_LENGTH)
+      const { maxTokens: requestedMaxTokens, ...withoutOutputLimit } = prepared.request
+      const baseURL = prepared.request.model.route.endpoint.baseURL
+      const codex = baseURL && URL.canParse(baseURL) && new URL(baseURL).origin === "https://chatgpt.com" &&
+        new URL(baseURL).pathname.startsWith("/backend-api/codex")
+      const maxTokens = codex ? undefined : Math.min(requestedMaxTokens ?? MAX_TITLE_OUTPUT_TOKENS, MAX_TITLE_OUTPUT_TOKENS)
+      const providerOptions = codex || !prepared.request.providerOptions
+        ? prepared.request.providerOptions
+        : Object.fromEntries(Object.entries(prepared.request.providerOptions).map(([key, value]) => [
+            key,
+            outputTokenKeys.has(key) && typeof value === "number" ? Math.min(value, MAX_TITLE_OUTPUT_TOKENS) : value,
+          ]))
+      yield* llm.stream(
+        { ...withoutOutputLimit, ...(maxTokens === undefined ? {} : { maxTokens }), providerOptions, system: [SystemPart.make(instruction)], messages: [Message.user(safePrompt)] },
+        prepared.options,
+      ).pipe(
         Stream.runForEach((event) => {
           // Responses can classify a text block only when it ends; filter after the stream completes.
           if (LLMEvent.is.textStart(event) || LLMEvent.is.textDelta(event) || LLMEvent.is.textEnd(event)) {
@@ -116,37 +147,18 @@ export const layer = Layer.effect(
       if (!session) return
       const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
       if (!firstUser) return
-      const text = !isUntitled(session)
-        ? yield* store.context(session.id).pipe(
-            Effect.map((messages) => {
-              const original = `Original request:\n${firstUser.text.slice(0, MAX_FIRST_MESSAGE_LENGTH)}`
-              const recent = messages
-                .flatMap((message) => {
-                  if (message.type === "user" && message.id !== firstUser.id) return [`User: ${message.text.trim()}`]
-                  if (message.type !== "assistant") return []
-                  const text = message.content
-                    .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []))
-                    .filter(Boolean)
-                    .join("\n")
-                  return text ? [`Assistant: ${text}`] : []
-                })
-                .join("\n\n")
-              if (!recent) return conversationPrompt(original)
-              const prefix = `${original}\n\nRecent conversation:\n`
-              const budget = MAX_CONTEXT_LENGTH - conversationPrompt("").length - prefix.length
-              return conversationPrompt(`${prefix}${recent.slice(-budget)}`)
-            }),
-            Effect.orElseSucceed(() => messagePrompt(firstUser.text)),
-          )
-        : messagePrompt(firstUser.text)
+      const text = firstUser.text.slice(0, MAX_FIRST_MESSAGE_LENGTH)
       const selection = yield* context.selectTitle(session)
       if (!selection) return
-      const title =
+      const generated =
         (yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
         (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
           ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
           : undefined)
-      if (!title) return
+      if (!generated) return
+      const stamp = dateTitle(session.time.created)
+      const pseudonym = /^[\p{L}\p{N}]{1,5}$/u.test(generated) ? generated : ""
+      const title = pseudonym ? `${stamp}-${pseudonym}` : stamp
       const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
       const current = yield* store.get(sessionID)
       if (!current || current.title !== session.title || current.title === truncate(title)) return
