@@ -17,7 +17,7 @@ const bash = process.env.PERSONALIZE_TEST_BASH || 'bash';
 // Execute the workflow's real Bash function in its real `if` calling context:
 // errexit is disabled there. Every external operation is replaced by a shell
 // function; this cannot clone, install, invoke Bun, compile or launch a server.
-function run(scenario) {
+function run(scenario, label = 'latest') {
   const result = spawnSync(bash, ['--noprofile', '--norc', '-c', `
     set -euo pipefail
     export UPSTREAM_REPO=fixture GITHUB_OUTPUT=/dev/null
@@ -34,6 +34,7 @@ function run(scenario) {
     node() {
       echo "CALL node $*" >&2
       if [[ "$1" == *check-personalize-hooks.cjs && "$scenario" == isolation ]]; then return 1; fi
+      if [[ "$*" == *regenerate.test.mjs && "$scenario" == regeneration ]]; then return 1; fi
     }
     strip_upstream_workflows() { :; }
     apply_custom_git_patches() {
@@ -43,7 +44,7 @@ function run(scenario) {
     run_patch_tests() { echo 'CALL tests' >&2; [[ "$scenario" != tests ]]; }
     run_opencode_build() { echo 'CALL build' >&2; [[ "$scenario" != build ]]; }
     ${actual}
-    if try_build fixture latest; then status=0; else status=$?; fi
+    if try_build fixture ${label}; then status=0; else status=$?; fi
     echo "RESULT $status \${APPLIED_TRANSPARENCY:-unset}/\${APPLIED_SCIENCE:-unset}/\${APPLIED_RSI:-unset}"
   `], { encoding: 'utf8', env: process.env });
   assert.ifError(result.error);
@@ -55,6 +56,27 @@ test('a failed isolation gate rejects the ref before patching or install', () =>
   const { output, calls } = run('isolation');
   assert.match(output, /RESULT 12 unset\/unset\/unset/);
   assert.doesNotMatch(calls, /CALL (apply|tests|build)|bun install/);
+});
+
+test('an incompatible fallback is rejected before patching or install', () => {
+  const { output, calls } = run('isolation', 'fallback');
+  assert.match(output, /RESULT 12 unset\/unset\/unset/);
+  assert.match(calls, /check-personalize-hooks\.cjs --patches ..\/patches --upstream \./);
+  assert.doesNotMatch(calls, /CALL (apply|tests|build)|bun install/);
+});
+
+test('a compatible fallback still runs the full patch and regression gates', () => {
+  const { output, calls } = run('success', 'fallback');
+  assert.match(output, /RESULT 0 on\/on\/on/);
+  assert.match(calls, /check-personalize-hooks\.cjs[\s\S]*CALL apply[\s\S]*CALL tests[\s\S]*CALL build/);
+});
+
+test('failed full-stack regeneration blocks patching and building on both refs', () => {
+  for (const label of ['latest', 'fallback']) {
+    const { output, calls } = run('regeneration', label);
+    assert.match(output, /RESULT 13 unset\/unset\/unset/);
+    assert.doesNotMatch(calls, /CALL (apply|tests|build)|bun install/);
+  }
 });
 
 test('one failed test cannot discard X/S/R or retry a reduced build', () => {
@@ -81,7 +103,7 @@ const regressionStart = workflow.indexOf('          run_patch_tests() {');
 const regressionEnd = workflow.indexOf('          run_opencode_build() {', regressionStart);
 assert.ok(regressionStart >= 0 && regressionEnd > regressionStart);
 const regressions = workflow.slice(regressionStart, regressionEnd).replace(/^ {10}/gm, '');
-const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs'];
+const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs'];
 
 function runRegressions(scenario, target = '') {
   const parent = path.join(tmpdir(), 'opencode');

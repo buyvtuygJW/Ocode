@@ -1,13 +1,17 @@
 diff --git a/packages/core/src/session/title.ts b/packages/core/src/session/title.ts
-index c5534dd8b6..8ef9b7e7eb 100644
+index d69dc95ffab9d37318f4b0c5e8f95a2b9866d710..835b92017f0066f702903e5f28511cfbfeaa1956 100644
 --- a/packages/core/src/session/title.ts
 +++ b/packages/core/src/session/title.ts
-@@ -18,8 +18,17 @@ import { SessionUsage } from "./usage.js"
+@@ -17,14 +17,23 @@ import type { SessionRunnerModel } from "./runner/model.js"
+ import { SessionSchema } from "./schema.js"
+ import { SessionUsage } from "./usage.js"
  import { SessionStore } from "./store.js"
++import { dateTitle, renameIfUnchanged } from "../personalize/session-naming.js"
  
  const MAX_LENGTH = 100
 -const MAX_CONTEXT_LENGTH = 8_000
 -const MAX_FIRST_MESSAGE_LENGTH = 2_000
+-const titleChanged = Symbol("Session title changed")
 +const MAX_FIRST_MESSAGE_LENGTH = 1_000
 +const MAX_TITLE_OUTPUT_TOKENS = 20
 +const outputTokenKeys = new Set([
@@ -19,13 +23,17 @@ index c5534dd8b6..8ef9b7e7eb 100644
 +  "max_completion_tokens",
 +  "max_tokens_to_sample",
 +])
- const titleChanged = Symbol("Session title changed")
  
  export interface Interface {
-@@ -30,11 +39,13 @@ export interface Interface {
- export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
+-  /** Generates an initial title or regenerates one from bounded conversation history. */
++  /** Generates or regenerates a dated title from the bounded first user message. */
+   readonly generate: (sessionID: SessionSchema.ID) => Effect.Effect<void>
+ }
  
- const truncate = (value: string) => (value.length <= MAX_LENGTH ? value : `${value.slice(0, MAX_LENGTH - 3)}...`)
+@@ -32,12 +41,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
+ 
+ const truncate = (value: string) =>
+   value.length <= MAX_LENGTH ? value : `${TextBoundary.head(value, MAX_LENGTH - 3)}...`
 -// Framing the input as text to name keeps models from answering or carrying out the request instead.
 -const messagePrompt = (text: string) =>
 -  `Here is the first message of the conversation:\n\n<message>\n${text}\n</message>\n\nReply with only the title.`
@@ -33,15 +41,22 @@ index c5534dd8b6..8ef9b7e7eb 100644
 -  `Here is the conversation so far:\n\n<conversation>\n${text}\n</conversation>\n\nReply with only the title.`
 +// User-approved naming change: never change session naming without explicit approval.
 +const instruction = "Summarize: one word, max 5 chars, no spaces."
-+const dateTitle = (created: DateTime.Utc) => {
-+  const date = new Date(DateTime.toEpochMillis(created))
-+  const two = (n: number) => String(n).padStart(2, "0")
-+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}-${two(date.getHours())}${two(date.getMinutes())}`
-+}
  export const isUntitled = (session: SessionSchema.Info) =>
++  session.title === dateTitle(session.time.created) ||
    isExactRootFallback({
      title: session.title,
-@@ -73,12 +84,32 @@ export const layer = Layer.effect(
+     time: { created: DateTime.toEpochMillis(session.time.created) },
+@@ -50,7 +57,8 @@ export const layer = Layer.effect(
+     const llm = yield* LLMClient.Service
+     const context = yield* SessionContext.Service
+     const store = yield* SessionStore.Service
+-    const db = (yield* Database.Service).db
++    const database = yield* Database.Service
++    const db = database.db
+ 
+     const attempt = Effect.fn("SessionTitle.attempt")(function* (input: {
+       readonly session: SessionSchema.Info
+@@ -75,12 +83,32 @@ export const layer = Layer.effect(
          session: input.session,
          agent: input.agent.id,
          model: input.model,
@@ -57,7 +72,7 @@ index c5534dd8b6..8ef9b7e7eb 100644
 +        .flatMap((message) => (message.role === "user" ? message.content : []))
 +        .flatMap((part) => (part.type === "text" ? [part.text] : []))
 +        .join(" ")
-+      const safePrompt = safeText.slice(0, MAX_FIRST_MESSAGE_LENGTH)
++      const safePrompt = TextBoundary.head(safeText, MAX_FIRST_MESSAGE_LENGTH)
 +      const { maxTokens: requestedMaxTokens, ...withoutOutputLimit } = prepared.request
 +      const baseURL = prepared.request.model.route.endpoint.baseURL
 +      const codex = baseURL && URL.canParse(baseURL) && new URL(baseURL).origin === "https://chatgpt.com" &&
@@ -76,14 +91,31 @@ index c5534dd8b6..8ef9b7e7eb 100644
          Stream.runForEach((event) => {
            // Responses can classify a text block only when it ends; filter after the stream completes.
            if (LLMEvent.is.textStart(event) || LLMEvent.is.textDelta(event) || LLMEvent.is.textEnd(event)) {
-@@ -116,37 +147,18 @@ export const layer = Layer.effect(
+@@ -114,54 +142,39 @@ export const layer = Layer.effect(
+     })
+ 
+     const generate = Effect.fn("SessionTitle.generate")(function* (sessionID: SessionSchema.ID) {
+-      const session = yield* store.get(sessionID)
++      let session = yield* store.get(sessionID)
        if (!session) return
++      // Persist the date before model selection, streaming, or any early return.
++      // A failure must not leave the UI's plain "New session" fallback behind.
++      if (isUntitled(session)) {
++        const title = dateTitle(session.time.created)
++        const renamed = yield* renameIfUnchanged(session, title).pipe(
++          Effect.provideService(Bus.Service, bus),
++          Effect.provideService(SessionStore.Service, store),
++          Effect.provideService(Database.Service, database),
++        )
++        if (!renamed) return
++        session = { ...session, title }
++      }
        const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
        if (!firstUser) return
 -      const text = !isUntitled(session)
 -        ? yield* store.context(session.id).pipe(
 -            Effect.map((messages) => {
--              const original = `Original request:\n${firstUser.text.slice(0, MAX_FIRST_MESSAGE_LENGTH)}`
+-              const original = `Original request:\n${TextBoundary.head(firstUser.text, MAX_FIRST_MESSAGE_LENGTH)}`
 -              const recent = messages
 -                .flatMap((message) => {
 -                  if (message.type === "user" && message.id !== firstUser.id) return [`User: ${message.text.trim()}`]
@@ -98,12 +130,12 @@ index c5534dd8b6..8ef9b7e7eb 100644
 -              if (!recent) return conversationPrompt(original)
 -              const prefix = `${original}\n\nRecent conversation:\n`
 -              const budget = MAX_CONTEXT_LENGTH - conversationPrompt("").length - prefix.length
--              return conversationPrompt(`${prefix}${recent.slice(-budget)}`)
+-              return conversationPrompt(`${prefix}${TextBoundary.tail(recent, budget)}`)
 -            }),
 -            Effect.orElseSucceed(() => messagePrompt(firstUser.text)),
 -          )
 -        : messagePrompt(firstUser.text)
-+      const text = firstUser.text.slice(0, MAX_FIRST_MESSAGE_LENGTH)
++      const text = TextBoundary.head(firstUser.text, MAX_FIRST_MESSAGE_LENGTH)
        const selection = yield* context.selectTitle(session)
        if (!selection) return
 -      const title =
@@ -113,15 +145,33 @@ index c5534dd8b6..8ef9b7e7eb 100644
            ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
            : undefined)
 -      if (!title) return
+-      const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
+-      const current = yield* store.get(sessionID)
+-      if (!current || current.title !== session.title || current.title === truncate(title)) return
+-      yield* bus
+-        .publish(
+-          SessionEvent.Renamed,
+-          {
+-            sessionID: session.id,
+-            title: truncate(title),
+-          },
+-          { commit: (sequence) => (sequence === expectedSequence ? Effect.void : Effect.die(titleChanged)) },
+-        )
+-        .pipe(Effect.catchDefect((defect) => (defect === titleChanged ? Effect.void : Effect.die(defect))))
 +      if (!generated) return
 +      const stamp = dateTitle(session.time.created)
 +      const pseudonym = /^[\p{L}\p{N}]{1,5}$/u.test(generated) ? generated : ""
 +      const title = pseudonym ? `${stamp}-${pseudonym}` : stamp
-       const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
-       const current = yield* store.get(sessionID)
-       if (!current || current.title !== session.title || current.title === truncate(title)) return
++      yield* renameIfUnchanged(session, truncate(title)).pipe(
++        Effect.provideService(Bus.Service, bus),
++        Effect.provideService(SessionStore.Service, store),
++        Effect.provideService(Database.Service, database),
++      )
+     })
+     return Service.of({ generate })
+   }),
 diff --git a/packages/core/test/session-title.test.ts b/packages/core/test/session-title.test.ts
-index 5143eb718c..d8febe82a7 100644
+index 24380c57183784f269ed73607bf7e3836b9cbb8b..47f546d23918c459055cc3e90e6d914b8e7a7138 100644
 --- a/packages/core/test/session-title.test.ts
 +++ b/packages/core/test/session-title.test.ts
 @@ -67,7 +67,7 @@ const providerRejected = (input: { readonly message: string }) =>
@@ -381,12 +431,26 @@ index 5143eb718c..d8febe82a7 100644
    }),
  )
  
-@@ -547,7 +636,7 @@ it.effect("generates a title for an explicitly requested child session", () =>
+@@ -547,11 +636,11 @@ it.effect("generates a title for an explicitly requested child session", () =>
      yield* title.generate(sessionID)
      const store = yield* SessionStore.Service
      expect(requests).toHaveLength(1)
 -    expect((yield* store.get(sessionID))?.title).toBe("Generated Title")
 +    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-Tree$/)
+   }),
+ )
+ 
+-it.effect("does not generate when the title agent is removed", () =>
++it.effect("keeps a date even when the title agent is removed", () =>
+   Effect.gen(function* () {
+     const sessionID = Session.ID.make("ses_title_no_agent")
+     yield* insertSession(sessionID)
+@@ -563,7 +652,7 @@ it.effect("does not generate when the title agent is removed", () =>
+ 
+     expect(requests).toHaveLength(0)
+     const untouched = yield* store.get(sessionID)
+-    expect(untouched?.title).toBeUndefined()
++    expect(untouched?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}$/)
    }),
  )
  
@@ -426,7 +490,48 @@ index 5143eb718c..d8febe82a7 100644
      expect(content.text).not.toContain("OMITTED_ORIGINAL_END")
      expect(content.text).not.toContain("OMITTED_OLD_CONTEXT")
    }),
-@@ -666,7 +757,7 @@ it.effect("retries after a failed title request", () =>
+@@ -639,7 +730,7 @@ it.effect("keeps the clipped regeneration context well formed", () =>
+     yield* enableTitleAgent
+     const sessionID = Session.ID.make("ses_title_regenerate_emoji")
+     yield* insertSession(sessionID, "Original title")
+-    // The leading x puts both cuts, the original request's head and the recent conversation's tail, inside an emoji.
++    // The leading x puts the first-message cut inside an emoji.
+     yield* prompt(sessionID, `x${"😀".repeat(1_500)}`)
+     yield* prompt(sessionID, `x${"😀".repeat(5_000)}`)
+ 
+@@ -649,18 +740,14 @@ it.effect("keeps the clipped regeneration context well formed", () =>
+     const content = requests[0]?.messages[0]?.content[0]
+     expect(content?.type).toBe("text")
+     if (content?.type !== "text") return
+-    expect(content.text.length).toBeLessThanOrEqual(8_000)
+-    expect(content.text.length).toBeGreaterThan(7_900)
++    expect(content.text.length).toBeLessThanOrEqual(1_000)
++    expect(content.text.length).toBeGreaterThan(990)
+     expect(content.text.isWellFormed()).toBe(true)
+   }),
+ )
+ 
+-for (const [prefix, stored] of [
+-  [95, `${"a".repeat(95)}😀...`],
+-  [96, `${"a".repeat(96)}...`],
+-  [97, `${"a".repeat(97)}...`],
+-] as const)
+-  it.effect(`clips a long generated title without splitting an emoji after ${prefix} letters`, () =>
++for (const prefix of [95, 96, 97])
++  it.effect(`rejects an oversized pseudonym with an emoji after ${prefix} letters`, () =>
+     Effect.gen(function* () {
+       yield* enableTitleAgent
+       titleStream = () =>
+@@ -676,7 +763,7 @@ for (const [prefix, stored] of [
+       yield* title.generate(sessionID)
+ 
+       const store = yield* SessionStore.Service
+-      expect((yield* store.get(sessionID))?.title).toBe(stored)
++      expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}$/)
+     }),
+   )
+ 
+@@ -712,11 +799,11 @@ it.effect("retries after a failed title request", () =>
  
      const store = yield* SessionStore.Service
      expect(requests).toHaveLength(2)
@@ -435,3 +540,52 @@ index 5143eb718c..d8febe82a7 100644
    }),
  )
  
+-it.effect("does not rename after a failed title stream", () =>
++it.effect("retains the dated fallback after a failed title stream", () =>
+   Effect.gen(function* () {
+     yield* enableTitleAgent
+     const sessionID = Session.ID.make("ses_title_stream_failure")
+@@ -734,10 +821,42 @@ it.effect("does not rename after a failed title stream", () =>
+ 
+     const store = yield* SessionStore.Service
+     expect(requests).toHaveLength(1)
+-    expect((yield* store.get(sessionID))?.title).toBeUndefined()
++    expect((yield* store.get(sessionID))?.title).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}$/)
++  }),
++)
++
++it.effect("dates an empty session before any user message or model request", () =>
++  Effect.gen(function* () {
++    const sessionID = Session.ID.make("ses_title_empty")
++    // Local creation time, not current time or UTC.
++    const created = new Date(2026, 6, 30, 18, 45, 3).getTime()
++    yield* insertSession(sessionID, undefined, created)
++    const title = yield* SessionTitle.Service
++    yield* title.generate(sessionID)
++    const store = yield* SessionStore.Service
++    expect((yield* store.get(sessionID))?.title).toBe("2026-07-30-1845")
++    expect(requests).toHaveLength(0)
+   }),
+ )
+ 
++for (const result of ["", "   ", "two words", "toolong", "🔥"])
++  it.effect(`keeps the creation date for empty or invalid title output ${JSON.stringify(result)}`, () =>
++    Effect.gen(function* () {
++      yield* enableTitleAgent
++      const sessionID = Session.ID.create()
++      yield* insertSession(sessionID, undefined, new Date(2026, 6, 30, 18, 45).getTime())
++      yield* prompt(sessionID, "Name this session")
++      titleStream = () => Stream.make(
++        LLMEvent.textDelta({ id: "title", text: result }),
++        LLMEvent.finish({ reason: { normalized: "stop" } }),
++      )
++      const title = yield* SessionTitle.Service
++      yield* title.generate(sessionID)
++      const store = yield* SessionStore.Service
++      expect((yield* store.get(sessionID))?.title).toBe("2026-07-30-1845")
++    }),
++  )
++
+ it.effect("preserves a manual rename completed while generation is in flight", () =>
+   Effect.gen(function* () {
+     yield* enableTitleAgent

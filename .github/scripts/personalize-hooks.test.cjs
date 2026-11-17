@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process');
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
-const { analyze } = require('./check-personalize-hooks.cjs');
+const { analyze, footprint, verifyTitle } = require('./check-personalize-hooks.cjs');
 
 test('the mandatory base embeds the complete pinned permissions patch', () => {
   const dir = path.resolve(__dirname, '../../patches');
@@ -24,6 +24,31 @@ test('the mandatory base embeds the complete pinned permissions patch', () => {
     /permissions are missing or altered/,
   );
   assert.throws(() => analyze(patches, undefined, permissions + '\n'), /permissions patch checksum mismatch/);
+});
+
+test('the full footprint cannot hide permission and title edits behind the bootstrap budget', () => {
+  const dir = path.resolve(__dirname, '../../patches');
+  const names = ['FinalPERSONALIZE.patch', 'FinalPersonalizeX.patch', 'FinalPersonalizeS.patch',
+    'FinalPersonalizeR.patch', 'SessionTitleNaming.patch'];
+  const patches = Object.fromEntries(names.map((name) => [name, readFileSync(path.join(dir, name), 'utf8')]));
+  const actual = footprint(patches);
+  assert.equal(actual.files, 29);
+  assert.ok(actual.hunks > 4);
+  const cli = spawnSync(process.execPath, [path.join(__dirname, 'check-personalize-hooks.cjs')], { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /FULL release upstream footprint.*29 existing files/);
+});
+
+test('mandatory title integrity and both title targets are protected', () => {
+  const source = readFileSync(path.resolve(__dirname, '../../patches/SessionTitleNaming.patch'), 'utf8');
+  verifyTitle(source);
+  assert.throws(() => verifyTitle(source + '\n'), /title patch checksum/);
+  const removed = source.split(/(?=^diff --git )/m).slice(0, 1).join('');
+  assert.throws(() => verifyTitle(removed), /title patch checksum/);
+  const hash = (text) => require('node:crypto').createHash('sha256').update(text).digest('hex');
+  assert.throws(() => verifyTitle(removed, undefined, hash(removed)), /Missing mandatory title target/);
+  const unrelated = source + hook('packages/core/src/unrelated.ts', 1);
+  assert.throws(() => verifyTitle(unrelated, undefined, hash(unrelated)), /Unexpected mandatory title target/);
 });
 
 const ALLOWED = 'packages/cli/script/build.ts';

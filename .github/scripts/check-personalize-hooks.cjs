@@ -11,8 +11,8 @@
 //   * with --upstream: declared exports and every `stock.X` access in a factory
 //     still resolve to public exports of the LIVE upstream module.
 //
-// No subset mode on purpose: the budget only means anything when every patch in
-// the set is counted.
+// This FOUR-hunk budget covers the owned-module bootstrap ONLY. Mandatory
+// permission and title edits are separate, explicitly reported coupling.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,7 +21,8 @@ const { createHash } = require('node:crypto');
 const NAMES = ['FinalPERSONALIZE.patch', 'FinalPersonalizeR.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeX.patch'];
 const MANDATORY = 'FinalPERSONALIZE.patch';
 const PERMISSIONS = 'HarnessPermissions.base.patch';
-const PERMISSIONS_SHA256 = '22e1591ee0a41105e703cb2180afd4d6801325317e0beeab0a220cde188f4178';
+const PERMISSIONS_SHA256 = 'f03eca3007369ae419367916174fa06c94ad88af9593ff28154ab2bffd2af398';
+const TITLE_SHA256 = '07d1b59c637afa93635f8bdccde2bda9657fd5eb424405f1652ef156b8d1587f';
 const ALLOWED = 'packages/cli/script/build.ts';
 const MANIFESTS = ['manifest.json', 'R.json', 'S.json', 'X.json'];
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -98,12 +99,14 @@ function addedLines(section, file) {
   return section.split('\n').filter((line) => line.startsWith('+') && line !== header).map((line) => line.slice(1));
 }
 
-function analyze(patches, upstream, permissions) {
+function analyze(patches, upstream, permissions, review = {}) {
   let permissionFiles = 0;
   if (permissions !== undefined) {
     const required = String(permissions).replaceAll('\r\n', '\n');
     const hash = createHash('sha256').update(required).digest('hex');
-    if (hash !== PERMISSIONS_SHA256) throw new Error('Mandatory permissions patch checksum mismatch');
+    // Only the offline generator supplies a reviewed candidate checksum.
+    // The CLI always verifies the committed pin above.
+    if (hash !== (review.permissionSHA256 ?? PERMISSIONS_SHA256)) throw new Error('Mandatory permissions patch checksum mismatch');
     const base = String(patches[MANDATORY] || '').replaceAll('\r\n', '\n');
     if (!base.endsWith(required)) throw new Error('Mandatory permissions are missing or altered in the base patch');
     const seen = new Set();
@@ -199,6 +202,33 @@ function analyze(patches, upstream, permissions) {
   return { files: new Set(hooks.map((h) => h.file)).size, hunks, owned: additions.size, ...(permissions === undefined ? {} : { permissionFiles }) };
 }
 
+function footprint(patches) {
+  const modified = new Set();
+  let hunks = 0;
+  for (const [name, text] of Object.entries(patches)) {
+    for (const section of String(text).replaceAll('\r\n', '\n').split(/(?=^diff --git )/m)) {
+      if (!section.startsWith('diff --git ') || section.includes('\n--- /dev/null\n')) continue;
+      modified.add(safePath(name, diffPath(name, section)));
+      hunks += (section.match(/^@@ /gm) || []).length;
+    }
+  }
+  return { files: modified.size, hunks };
+}
+
+function verifyTitle(text, upstream, expected = TITLE_SHA256) {
+  const normalized = String(text).replaceAll('\r\n', '\n');
+  if (createHash('sha256').update(normalized).digest('hex') !== expected)
+    throw new Error('Mandatory title patch checksum mismatch');
+  const targets = new Set(['packages/core/src/session/title.ts', 'packages/core/test/session-title.test.ts']);
+  for (const section of normalized.split(/(?=^diff --git )/m).filter(Boolean)) {
+    const file = safePath('SessionTitleNaming.patch', diffPath('SessionTitleNaming.patch', section));
+    if (!targets.delete(file) || section.includes('\n--- /dev/null\n'))
+      throw new Error(`Unexpected mandatory title target: ${file}`);
+    if (upstream && !fs.existsSync(path.join(upstream, file))) throw new Error(`Title target missing upstream: ${file}`);
+  }
+  if (targets.size) throw new Error(`Missing mandatory title target: ${[...targets].join(', ')}`);
+}
+
 if (require.main === module) {
   const value = (name) => {
     const i = process.argv.indexOf(name);
@@ -222,9 +252,14 @@ if (require.main === module) {
     NAMES.filter((name) => fs.existsSync(path.join(directory, name))).map((name) => [name, fs.readFileSync(path.join(directory, name), 'utf8')])
   );
   const result = analyze(patches, upstream, fs.readFileSync(permissionPath, 'utf8'));
+  const titlePath = path.join(directory, 'SessionTitleNaming.patch');
+  if (!fs.existsSync(titlePath)) throw new Error(`Missing mandatory title patch: ${titlePath}`);
+  verifyTitle(fs.readFileSync(titlePath, 'utf8'), upstream);
+  const total = footprint({ ...patches, 'SessionTitleNaming.patch': fs.readFileSync(titlePath, 'utf8') });
   console.log(
-    `Personalize hook budget PASS: ${result.hunks}/4 hook points across ${result.files} upstream file, ${result.owned} owned files; ${result.permissionFiles} mandatory permission files verified.`
+    `Owned-module bootstrap budget PASS: ${result.hunks}/4 hunks across ${result.files} upstream file; ${result.owned} owned files; ${result.permissionFiles} mandatory permission files verified separately.`
   );
+  console.log(`FULL release upstream footprint (including permissions and titles): ${total.files} existing files, ${total.hunks} hunks. This is not a four-hook permission implementation.`);
 }
 
-module.exports = { analyze };
+module.exports = { analyze, footprint, verifyTitle };

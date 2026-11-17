@@ -965,10 +965,10 @@ index 0000000000000000000000000000000000000000..d3da95e10bd09fbd15b8986406a03e20
 +})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..766c375f66f62fee3807a582f2ec9b5518a53ffe
+index 0000000000000000000000000000000000000000..90fda8f43220b1e650eabb0a6f31e0ab5588ee81
 --- /dev/null
 +++ b/.personalize/manifest.json
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +{
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
@@ -981,6 +981,7 @@ index 0000000000000000000000000000000000000000..766c375f66f62fee3807a582f2ec9b55
 +    { "target": "packages/core/src/plugin/skill.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["Plugin"] },
 +    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
 +    { "target": "packages/core/src/model-resolver.ts", "factory": "packages/core/src/personalize/model-resolver.ts", "exports": ["node"] },
++    { "target": "packages/core/src/session.ts", "factory": "packages/core/src/personalize/session-create.ts", "exports": ["node"] },
 +    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
 +    { "target": "packages/core/src/session/runner/step.ts", "factory": "packages/core/src/personalize/step.ts", "exports": ["make"] },
 +    { "target": "packages/core/src/session/message-updater.ts", "factory": "packages/core/src/personalize/message-updater.ts", "exports": ["update"] },
@@ -1197,7 +1198,7 @@ index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97
 +  }
 +}
 diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
-index a9ae9e606975bb38fc3b324c435c8c783e094fd4..7ae63416edcdca1a388ed0cfa66f0d64b52b1560 100755
+index a9ae9e606975bb38fc3b324c435c8c783e094fd4..9cccd511893f3440894b91cbd4b45779ece2db49 100755
 --- a/packages/cli/script/build.ts
 +++ b/packages/cli/script/build.ts
 @@ -1,4 +1,5 @@
@@ -1206,7 +1207,7 @@ index a9ae9e606975bb38fc3b324c435c8c783e094fd4..7ae63416edcdca1a388ed0cfa66f0d64
  
  import { $ } from "bun"
  import { createHash } from "node:crypto"
-@@ -160,7 +161,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+@@ -172,7 +173,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
    const result = await Bun.build({
      entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
      tsconfig: "./tsconfig.json",
@@ -1215,7 +1216,8 @@ index a9ae9e606975bb38fc3b324c435c8c783e094fd4..7ae63416edcdca1a388ed0cfa66f0d64
        appAssetsPlugin,
        solidPlugin,
        parcelWatcherPlugin,
-@@ -182,6 +183,6 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+@@ -181,7 +182,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+       wsReexportPlugin,
        simulationGraphPlugin,
        modelsSnapshot,
 -    ],
@@ -3861,8 +3863,320 @@ index 0000000000000000000000000000000000000000..49c9d43d057a2010a9e0341dad58ea50
 +  assert.equal(withoutAnchor.length, 1, "stock drops the failed hosted call")
 +  assert.equal(withoutAnchor[0].result.value, large, "the remaining result must retain the unique evidence")
 +})
+diff --git a/.personalize/session-title.test.mjs b/.personalize/session-title.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..38726317e1eb0c9e1593681e382de80c2fe062f8
+--- /dev/null
++++ b/.personalize/session-title.test.mjs
+@@ -0,0 +1,218 @@
++import assert from "node:assert/strict"
++import { existsSync, readFileSync } from "node:fs"
++import { stripTypeScriptTypes } from "node:module"
++import { isDeepStrictEqual } from "node:util"
++import { test } from "node:test"
++import path from "node:path"
++import { pathToFileURL } from "node:url"
++
++const runtime = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++const { Context, DateTime, Deferred, Effect, Fiber, Layer, Stream } = runtime
++const own = new URL("../", import.meta.url)
++const stock = (file) => {
++  const local = new URL(file, own)
++  if (existsSync(local)) return local
++  assert.ok(process.env.PERSONALIZE_TEST_TITLE_ROOT, "Provide the patched title source tree; this regression must not skip")
++  return pathToFileURL(path.join(process.env.PERSONALIZE_TEST_TITLE_ROOT, file))
++}
++function load(file, deps, names) {
++  let code = stripTypeScriptTypes(readFileSync(file, "utf8"), { mode: "transform" })
++    .replace(/^export \* as \w+ from ["'][^"']+["'];?$/gm, "")
++    .replace(/^import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["'];?$/gm,
++      (_, fields, name) => `const {${fields.replace(/\bas\b/g, ":")}} = deps[${JSON.stringify(name)}];`)
++    .replace(/^export /gm, "")
++  return new Function("deps", `${code}\nreturn {${names.join(",")}}`)(deps)
++}
++const boundary = load(stock("packages/util/src/text-boundary.ts"), {}, ["head", "tail"])
++const fallback = load(stock("packages/util/src/session-title-fallback.ts"), {}, ["isExactRootFallback", "displayLabel"])
++const service = (name) => ({ Service: Context.Service()(`title-test/${name}`) })
++const Bus = service("bus"), Database = service("database"), SessionStore = service("store")
++const LLMClient = service("llm"), SessionContext = service("context")
++const SessionEvent = { Renamed: { type: "renamed" }, UsageRecorded: { type: "usage" } }
++const base = {
++  effect: runtime,
++  "../bus.js": { Bus }, "../database/database.js": { Database },
++  "../session/event.js": { SessionEvent }, "../session/store.js": { SessionStore },
++}
++const naming = load(new URL("packages/core/src/personalize/session-naming.ts", own), base,
++  ["dateTitle", "renameIfUnchanged"])
++const message = (text) => ({ role: "user", content: [{ type: "text", text }] })
++const first = { text: "Help debug this build" }
++const model = { ref: { id: "model" }, cost: [], provider: "test", route: { endpoint: {}, providerMetadataKey: "test" } }
++const selection = { agent: { id: "title" }, selected: model }
++const text = (value) => Stream.make({ type: "textDelta", id: "title", text: value })
++
++function fixture(options = {}) {
++  const created = DateTime.makeUnsafe(new Date(2026, 6, 30, 18, 45, 3))
++  let current = options.missing ? undefined : {
++    id: "ses_title", title: options.title, parentID: options.parentID, time: { created },
++  }
++  let sequence = 0
++  const requests = [], events = []
++  const mutate = (title) => { current = { ...current, title }; sequence++ }
++  const bus = {
++    publish: (event, data, opts) => Effect.gen(function* () {
++      if (event === SessionEvent.Renamed) {
++        if (options.beforeCommit) { options.beforeCommit(mutate, () => sequence++); options.beforeCommit = undefined }
++        // Commit validation represents the real Bus transaction's rollback boundary.
++        if (opts?.commit) yield* opts.commit(sequence + 1)
++        mutate(data.title)
++      }
++      events.push({ event, data })
++    }),
++  }
++  const store = { get: () => Effect.sync(() => current) }
++  const context = {
++    selectTitle: () => options.selectError ? Effect.die("selection failed") : Effect.succeed(options.noModel ? undefined : selection),
++    request: { title: (input) => Effect.sync(() => ({
++      event: options.hook === undefined ? {} : { result: options.hook },
++      request: { model, maxTokens: 100, system: input.system, messages: input.messages },
++      options: {},
++    })) },
++  }
++  const llm = {
++    stream: (request) => {
++      requests.push(request)
++      assert.equal(current?.title, options.title ?? "2026-07-30-1845", "date must exist before a provider call")
++      return options.stream ? options.stream(mutate) : text(options.output ?? "Tree")
++    },
++  }
++  const dependencies = Layer.mergeAll(
++    ...[[Bus, bus], [Database, { db: {} }], [SessionStore, store], [SessionContext, context], [LLMClient, llm]]
++      .map(([key, value]) => Layer.succeed(key.Service, value)),
++  )
++  Bus.latestSequence = () => Effect.sync(() => sequence)
++  const title = load(stock("packages/core/src/session/title.ts"), {
++    effect: runtime, "node:util": { isDeepStrictEqual },
++    "@opencode/ai/effect": {
++      LLMClient, LLMEvent: { is: Object.fromEntries(["textStart", "textDelta", "textEnd", "stepFinish"]
++        .map((type) => [type, (event) => event.type === type])) },
++      Message: { user: message }, SystemPart: { make: (text) => ({ text }) },
++    },
++    "../database/database.js": { Database }, "../bus.js": { Bus },
++    "@opencode/util/effect/app-node": { makeLocationNode: (node) => node },
++    "@opencode/util/session-title-fallback": fallback,
++    "@opencode/util/text-boundary": { TextBoundary: boundary },
++    "../effect/app-node-platform.js": { llmClient: {} },
++    "./context.js": { SessionContext }, "./event.js": { SessionEvent },
++    "./history.js": { SessionHistory: { firstUserMessage: () => Effect.succeed(options.noUser ? undefined : options.first ?? first) } },
++    "./usage.js": { SessionUsage: {} }, "./store.js": { SessionStore }, "./schema.js": {},
++    "../personalize/session-naming.js": naming,
++  }, ["Service", "layer", "isUntitled"])
++  const run = (body) => Effect.runPromise(Effect.scoped(body.pipe(
++    Effect.provide(Layer.provide(title.layer, dependencies)),
++  )).pipe(Effect.timeout("5 seconds")))
++  return { title, requests, events, dependencies, store, mutate, current: () => current, run,
++    generate: () => run(Effect.flatMap(title.Service, (service) => service.generate("ses_title"))) }
++}
++
++for (const [name, options] of [
++  ["no first message", { noUser: true }],
++  ["no model or title agent", { noModel: true }],
++  ["empty output", { output: "" }],
++  ["blank output", { output: " \n" }],
++  ["provider failure", { stream: () => Stream.fail({ _tag: "AI.Error" }) }],
++  ["invalid multiword pseudonym", { output: "two words" }],
++  ["oversized pseudonym", { output: "abcdef" }],
++  ["non-alphanumeric pseudonym", { output: "🔥" }],
++]) test(`dated fallback survives ${name}`, async () => {
++  const state = fixture(options)
++  await state.generate()
++  assert.equal(state.current().title, "2026-07-30-1845")
++  assert.equal(fallback.displayLabel(state.current()), "2026-07-30-1845")
++  assert.equal(state.title.isUntitled(state.current()), true, "a fallback remains eligible for a later pseudonym")
++})
++
++for (const output of ["Tree", "字１２", "𐐀", "a1B2c"])
++  test(`exact date and Unicode alphanumeric pseudonym: ${output}`, async () => {
++    const state = fixture({ output })
++    await state.generate()
++    assert.equal(state.current().title, `2026-07-30-1845-${output}`)
++    assert.equal(state.title.isUntitled(state.current()), false)
++  })
++
++test("hook titles use the same date and validation without requesting a model", async () => {
++  const state = fixture({ hook: "Plug" })
++  await state.generate()
++  assert.equal(state.current().title, "2026-07-30-1845-Plug")
++  assert.equal(state.requests.length, 0)
++})
++
++test("missing sessions remain absent", async () => {
++  const state = fixture({ missing: true })
++  await state.generate()
++  assert.equal(state.current(), undefined)
++  assert.equal(state.events.length, 0)
++})
++
++test("a model-selection defect still leaves the date", async () => {
++  const state = fixture({ selectError: true })
++  await assert.rejects(state.generate())
++  assert.equal(state.current().title, "2026-07-30-1845")
++})
++
++test("manual titles survive failed regeneration", async () => {
++  const state = fixture({ title: "Manual", stream: () => Stream.fail({ _tag: "AI.Error" }) })
++  await state.generate()
++  assert.equal(state.current().title, "Manual")
++})
++
++test("manual rename wins while generation is in flight", async () => {
++  const state = fixture({ stream: (mutate) => { mutate("Manual"); return text("Tree") } })
++  await state.generate()
++  assert.equal(state.current().title, "Manual")
++})
++
++test("manual rename wins the fallback publication race", async () => {
++  const state = fixture({ beforeCommit: (mutate) => mutate("Manual") })
++  await state.generate()
++  assert.equal(state.current().title, "Manual")
++  assert.equal(state.requests.length, 0)
++})
++
++test("an unrelated session event cannot strand the plain fallback", async () => {
++  const state = fixture({ noUser: true, beforeCommit: (_mutate, advance) => advance() })
++  await state.generate()
++  assert.equal(state.current().title, "2026-07-30-1845")
++})
++
++test("interrupted provider request cannot erase the date", async () => {
++  const started = Deferred.makeUnsafe()
++  const state = fixture({ stream: () => Stream.unwrap(
++    Deferred.succeed(started, undefined).pipe(Effect.as(Stream.never)),
++  ) })
++  await state.run(Effect.gen(function* () {
++    const title = yield* state.title.Service
++    const fiber = yield* title.generate("ses_title").pipe(Effect.forkChild)
++    yield* Deferred.await(started)
++    yield* Fiber.interrupt(fiber)
++  }))
++  assert.equal(state.current().title, "2026-07-30-1845")
++})
++
++test("first-message clipping retains upstream Unicode safety and the 1,000-unit budget", async () => {
++  const state = fixture({ first: { text: `x${"😀".repeat(1500)}` } })
++  await state.generate()
++  const prompt = state.requests[0].messages[0].content[0].text
++  assert.equal(prompt.length, 999)
++  assert.equal(prompt.isWellFormed(), true)
++  assert.equal(state.requests[0].maxTokens, 20)
++})
++
++for (const options of [{}, { title: "Explicit" }, { parentID: "parent", title: "Council member" }])
++  test(`public create decorator dates unnamed roots and preserves explicit/child names: ${JSON.stringify(options)}`, async () => {
++    const state = fixture(options)
++    const tag = Context.Service()("title-test/session")
++    const original = { create: () => Effect.succeed(state.current()), other: Symbol("preserved") }
++    const stock = { Service: tag, node: { mapLayer: (f) => ({ layer: f(Layer.succeed(tag, original)) }) } }
++    const { decorate } = load(new URL("packages/core/src/personalize/session-create.ts", own), {
++      ...base, "@opencode/util/session-title-fallback": fallback, "./session-naming": naming,
++    }, ["decorate"])
++    const layer = Layer.provide(decorate(stock).node.layer, state.dependencies)
++    const result = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++      const session = yield* tag
++      assert.equal(session.other, original.other)
++      return yield* session.create(options)
++    }).pipe(Effect.provide(layer))))
++    assert.equal(result.title, options.title ?? "2026-07-30-1845")
++  })
+diff --git a/packages/core/src/personalize/session-create.ts b/packages/core/src/personalize/session-create.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d5e3eff45f0b35f528de44f7ce0d734c6c9be3b
+--- /dev/null
++++ b/packages/core/src/personalize/session-create.ts
+@@ -0,0 +1,35 @@
++import { Context, DateTime, Effect, Layer } from "effect"
++import { Bus } from "../bus.js"
++import { Database } from "../database/database.js"
++import { SessionStore } from "../session/store.js"
++import { isExactRootFallback } from "@opencode/util/session-title-fallback"
++import { dateTitle, renameIfUnchanged } from "./session-naming"
++
++// Compose the public service, never copy or transform stock create's internals.
++// These services already belong to Session.node's dependency graph.
++// mapLayer's generic R cannot express those existing requirements; the final
++// cast preserves that stock contract without introducing a new graph edge.
++export function decorate(stock: typeof import("../session")) {
++  return { node: stock.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) =>
++    Layer.effect(stock.Service, Effect.gen(function* () {
++      const original = Context.get(context, stock.Service)
++      const bus = yield* Bus.Service
++      const database = yield* Database.Service
++      const store = yield* SessionStore.Service
++      const create: typeof original.create = (input) => original.create(input).pipe(Effect.flatMap((session) => {
++        // Explicit titles (including child/council names) remain untouched.
++        if (input.title !== undefined || session.parentID || !isExactRootFallback({
++          title: session.title, time: { created: DateTime.toEpochMillis(session.time.created) },
++        })) return Effect.succeed(session)
++        return renameIfUnchanged(session, dateTitle(session.time.created)).pipe(
++          Effect.provideService(Bus.Service, bus),
++          Effect.provideService(Database.Service, database),
++          Effect.provideService(SessionStore.Service, store),
++          Effect.andThen(store.get(session.id)),
++          Effect.map((current) => current ?? session),
++        )
++      }))
++      return { ...original, create }
++    })),
++  )) as typeof layer) }
++}
+diff --git a/packages/core/src/personalize/session-naming.ts b/packages/core/src/personalize/session-naming.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf777c27f24f46884fb5f4a26fb34b45ce5848a1
+--- /dev/null
++++ b/packages/core/src/personalize/session-naming.ts
+@@ -0,0 +1,41 @@
++import { DateTime, Effect } from "effect"
++import { Bus } from "../bus.js"
++import { Database } from "../database/database.js"
++import { SessionEvent } from "../session/event.js"
++import type { SessionSchema } from "../session/schema.js"
++import { SessionStore } from "../session/store.js"
++
++// User-approved local creation time; never substitute UTC or the rename time.
++export const dateTitle = (created: DateTime.Utc) => {
++  const date = new Date(DateTime.toEpochMillis(created))
++  const two = (n: number) => String(n).padStart(2, "0")
++  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}-${two(date.getHours())}${two(date.getMinutes())}`
++}
++
++const changed = Symbol("Session title changed")
++
++// Same optimistic event-sequence guard as upstream title generation. Both the
++// projection and event roll back if anything wins the race before commit.
++export const renameIfUnchanged = Effect.fn("Personalize.renameIfUnchanged")(function* (
++  session: SessionSchema.Info,
++  title: string,
++) {
++  const bus = yield* Bus.Service
++  const store = yield* SessionStore.Service
++  const { db } = yield* Database.Service
++  while (true) {
++    const expected = (yield* Bus.latestSequence(db, session.id)) + 1
++    const current = yield* store.get(session.id)
++    if (!current || current.title !== session.title) return false
++    if (current.title === title) return true
++    const committed = yield* bus.publish(SessionEvent.Renamed, { sessionID: session.id, title }, {
++      commit: (sequence) => sequence === expected ? Effect.void : Effect.die(changed),
++    }).pipe(
++      Effect.as(true),
++      Effect.catchDefect((defect) => defect === changed ? Effect.succeed(false) : Effect.die(defect)),
++    )
++    if (committed) return true
++    // An unrelated event must not strand an unnamed session. Re-read the title
++    // before retrying; a real rename or deletion still wins.
++  }
++})
 diff --git a/packages/app/src/runtime/i18n/en.ts b/packages/app/src/runtime/i18n/en.ts
-index 43304addcb3b3b1e71b8a7b7210c8bb1e4e0b5af..2124e61ba52e64acc6fcf82f3c549b3e355b0067 100644
+index ab2712371296d36bb3ca359ee8f904409758817c..c99c1b4334be6a5cf9ff0c70e23f291a53d49c1d 100644
 --- a/packages/app/src/runtime/i18n/en.ts
 +++ b/packages/app/src/runtime/i18n/en.ts
 @@ -1,6 +1,11 @@
@@ -4066,10 +4380,10 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..268a8c633e58e714de9a50efe14fd4db
          {(message) => (
            <div data-slot="permission-row">
 diff --git a/packages/client/src/effect/api/api.ts b/packages/client/src/effect/api/api.ts
-index f65ec052c2b3ac664cde9e5a7d3e65f9797de8a0..88a3e43f0f9869534c2e4450254abd02f78203e0 100644
+index 54d8d8c5edc09353210017c8d7d20c9634b7a27a..537f71eafd10bc42569fcf37ee4af3d29bca7eec 100644
 --- a/packages/client/src/effect/api/api.ts
 +++ b/packages/client/src/effect/api/api.ts
-@@ -1944,6 +1944,10 @@ export type PermissionCreateInput = {
+@@ -1970,6 +1970,10 @@ export type PermissionCreateInput = {
    readonly id?: Permission.ID | undefined
    readonly action: string
    readonly resources: ReadonlyArray<string>
@@ -4081,10 +4395,10 @@ index f65ec052c2b3ac664cde9e5a7d3e65f9797de8a0..88a3e43f0f9869534c2e4450254abd02
    readonly metadata?: { readonly [x: string]: unknown } | undefined
    readonly source?: Permission.Source | undefined
 diff --git a/packages/client/src/effect/generated/client.ts b/packages/client/src/effect/generated/client.ts
-index 2631efc70d2b0d98ecefbdd7fb22beb7c5e99958..c85fb80fdfcceab0361611cbb622e6d567a49af8 100644
+index b4c850018c81cd51f672d3c93927f0e48f4ace00..b8fd328fb6d4f8f8320d2d34c4b6657d8f3bd8b1 100644
 --- a/packages/client/src/effect/generated/client.ts
 +++ b/packages/client/src/effect/generated/client.ts
-@@ -1307,6 +1307,10 @@ const EndpointPermissionCreate = (raw: RawClient["server.permission"]) => (input
+@@ -1342,6 +1342,10 @@ const EndpointPermissionCreate = (raw: RawClient["server.permission"]) => (input
          id: input["id"],
          action: input["action"],
          resources: input["resources"],
@@ -4096,10 +4410,10 @@ index 2631efc70d2b0d98ecefbdd7fb22beb7c5e99958..c85fb80fdfcceab0361611cbb622e6d5
          metadata: input["metadata"],
          source: input["source"],
 diff --git a/packages/client/src/promise/generated/client.ts b/packages/client/src/promise/generated/client.ts
-index cb1725def15f94dfd6e99681dfa4a49d7be1536c..0c206747bd91d63a0c97afb875bf3b5a27b6b25b 100644
+index f63890960b6dd95ea014b22a464bb17b9e6cc8a2..c79c4f2bc305b267417c086f6be0f515755d4592 100644
 --- a/packages/client/src/promise/generated/client.ts
 +++ b/packages/client/src/promise/generated/client.ts
-@@ -2150,6 +2150,10 @@ export function make(options: ClientOptions) {
+@@ -2204,6 +2204,10 @@ export function make(options: ClientOptions) {
                id: input["id"],
                action: input["action"],
                resources: input["resources"],
@@ -4111,10 +4425,10 @@ index cb1725def15f94dfd6e99681dfa4a49d7be1536c..0c206747bd91d63a0c97afb875bf3b5a
                metadata: input["metadata"],
                source: input["source"],
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
-index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11b1345098 100644
+index a6a62e36cc2a42862c42fd7eafeeda839bea5c7a..72223c6e4b8e07eed7639757cacf852b3dfbe618 100644
 --- a/packages/client/src/promise/generated/types.ts
 +++ b/packages/client/src/promise/generated/types.ts
-@@ -290,6 +290,8 @@ export type ProjectTime = { created: number; updated: number; active: number; ar
+@@ -296,6 +296,8 @@ export type ProjectTime = { created: number; updated: number; active: number; ar
  
  export type PermissionID = string
  
@@ -4123,7 +4437,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
  export type PermissionSource = { type: "tool"; messageID: string; id: string }
  
  export type PermissionSavedID = string
-@@ -298,7 +300,7 @@ export type CommandInfo = { name: string; description?: string }
+@@ -304,7 +306,7 @@ export type CommandInfo = { name: string; description?: string }
  
  export type RpcOutput = { output?: any }
  
@@ -4132,7 +4446,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
  
  export type PtyID = string
  
-@@ -805,11 +807,32 @@ export type Project = {
+@@ -822,11 +824,32 @@ export type Project = {
    sandboxes: Array<string>
  }
  
@@ -4165,7 +4479,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
    save?: Array<string>
    metadata?: { [x: string]: JsonValue }
    source?: PermissionSource
-@@ -1832,6 +1855,10 @@ export type PermissionAsked = {
+@@ -1854,6 +1877,10 @@ export type PermissionAsked = {
      sessionID: SessionID
      action: string
      resources: Array<string>
@@ -4176,7 +4490,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
      save?: Array<string>
      metadata?: { [x: string]: any }
      source?: PermissionSource
-@@ -1839,15 +1866,6 @@ export type PermissionAsked = {
+@@ -1861,15 +1888,6 @@ export type PermissionAsked = {
    }
  }
  
@@ -4192,7 +4506,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
  export type PluginUpdated = {
    id: EventID
    created: number
-@@ -2209,6 +2227,8 @@ export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExtern
+@@ -2235,6 +2253,8 @@ export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExtern
  
  export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
  
@@ -4201,7 +4515,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
  export type PtyCreated = {
    id: EventID
    created: number
-@@ -2585,6 +2605,7 @@ export type ConfigEntry =
+@@ -2620,6 +2640,7 @@ export type ConfigEntry =
            }
          }
          experimental?: {
@@ -4209,7 +4523,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
            portable_shell_scanner?: boolean
            codemode_vm?: boolean
            all_flags?: boolean
-@@ -2685,6 +2706,19 @@ export type CredentialEntry = {
+@@ -2726,6 +2747,19 @@ export type CredentialEntry = {
    value: CredentialValue
  }
  
@@ -4228,8 +4542,8 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
 +
  export type FormFields1 = [FormField1, ...Array<FormField1>]
  
- export type ScheduleInfo = {
-@@ -2780,6 +2814,15 @@ export type SessionMessageAssistantContentEncoded =
+ export type AgentInfo = {
+@@ -2823,6 +2857,15 @@ export type GenerateVideoGetResponse = { data: GenerateVideoJob }
  
  export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
  
@@ -4245,7 +4559,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
  export type FormInfo1 = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields1 }
  
  export type SessionMessageInfo =
-@@ -4296,6 +4339,10 @@ export type PermissionCreateInput = {
+@@ -4375,6 +4418,10 @@ export type PermissionCreateInput = {
    readonly id?: string | null | undefined
    readonly action: string
    readonly resources: ReadonlyArray<string>
@@ -4256,7 +4570,7 @@ index fc8133fb489cdcd2c536c1b5efd2145deace38d2..da2d8d8e3c7a7f2ca1308749bbfd8c11
    readonly save?: ReadonlyArray<string> | undefined
    readonly metadata?: { readonly [x: string]: JsonValue } | undefined
    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | undefined
-@@ -4315,8 +4362,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
+@@ -4394,8 +4441,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
  export type PermissionReplyInput = {
    readonly sessionID: string
    readonly requestID: string
@@ -4443,7 +4757,7 @@ index 2afb8d3b85df2f3652feaed1de4c7a4ce3268c44..3e241040c56e1b5533813e57ade29f45
          save: ["*"],
          metadata: preview ? { files: [preview] } : undefined,
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
-index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c0302898a 100644
+index 3314c1b91888dfdac47e0913e6e154e6c4cb9631..efa76004da002bd85a9d0e8104bd9a72b7ec990a 100644
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
 @@ -10,13 +10,34 @@ import { Agent } from "./agent.js"
@@ -4491,7 +4805,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
    readonly get: (id: ID) => Effect.Effect<Request | undefined>
    readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
    readonly list: () => Effect.Effect<ReadonlyArray<Request>>
-@@ -136,9 +157,11 @@ const layer = Layer.effect(
+@@ -141,10 +162,12 @@ const layer = Layer.effect(
      const location = yield* Location.Service
      const agents = yield* Agent.Service
      const sessions = yield* SessionStore.Service
@@ -4499,11 +4813,12 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
      const saved = yield* PermissionSaved.Service
      const hooks = yield* PluginHooks.Service
      const pending = new Map<ID, Pending>()
+     const parents = new Map<string, Tool.CallID>()
 +    const onceListings: { sessionID: SessionSchema.ID; grant: SessionGrant.Grant }[] = []
      let closed = false
  
      const close = Effect.gen(function* () {
-@@ -153,6 +176,7 @@ const layer = Layer.effect(
+@@ -159,6 +182,7 @@ const layer = Layer.effect(
            .pipe(Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError()))),
        )
        pending.clear()
@@ -4511,7 +4826,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
      }).pipe(Effect.uninterruptible)
      yield* Effect.addFinalizer(() => close)
  
-@@ -170,7 +194,100 @@ const layer = Layer.effect(
+@@ -176,7 +200,100 @@ const layer = Layer.effect(
        const session = yield* sessions.get(sessionID)
        if (!session) return yield* new SessionErrors.NotFoundError({ sessionID })
        const agent = yield* agents.resolve(agentID ?? session.agent)
@@ -4613,12 +4928,12 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
      })
  
      function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
-@@ -181,12 +298,34 @@ const layer = Layer.effect(
-       return rules.filter((rule) => Wildcard.match(input.action, rule.action))
+@@ -198,22 +315,51 @@ const layer = Layer.effect(
+       return parent ? { ...source, id: parent } : source
      }
  
 -    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
-+    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, consume = false) {
++    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, consume = false, sourceIsRow = false) {
        const rules = yield* configured(input.sessionID, input.agent)
        if (denied(input, rules)) return { effect: "deny" as const, rules }
 +      const grants = yield* sessionGrants(input.sessionID)
@@ -4650,7 +4965,13 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
        const event = yield* hooks.trigger("permission", "evaluate", {
          sessionID: input.sessionID,
          agent: input.agent,
-@@ -197,6 +336,11 @@ const layer = Layer.effect(
+         action: input.action,
+         resources: input.resources,
+         metadata: input.metadata,
+-        source: row(input.source),
++        // Pending requests already carry their UI row. Re-evaluation must not
++        // walk a second parent mapping for a nested call.
++        source: sourceIsRow ? input.source : row(input.source),
          effect,
        })
        const unattended = yield* Unattended
@@ -4662,7 +4983,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
        if (event.effect !== "ask" || unattended === undefined)
          return { effect: event.effect, message: event.message, rules: all }
        const settled = [...all, ...unattended]
-@@ -215,6 +359,10 @@ const layer = Layer.effect(
+@@ -232,6 +378,10 @@ const layer = Layer.effect(
          sessionID: input.sessionID,
          action: input.action,
          resources: input.resources,
@@ -4673,13 +4994,13 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
          save: input.save,
          // Tools copy optional inputs straight into metadata; undefined values are not JSON and would
          // fail the HttpApi response encoder when clients list pending requests.
-@@ -241,13 +389,32 @@ const layer = Layer.effect(
+@@ -258,13 +408,32 @@ const layer = Layer.effect(
            yield* bus
              .publish(Permission.Event.Asked, request)
              .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
 +          // Register first, then recheck: a reply racing the initial evaluation either sees this
 +          // pending request in its sweep, or this check sees its new policy.
-+          const result = yield* evaluateInput({ ...request, agent }, true)
++          const result = yield* evaluateInput({ ...request, agent }, true, true)
 +          if (result.effect !== "ask") {
 +            pending.delete(request.id)
 +            yield* bus.publish(Permission.Event.Replied, {
@@ -4708,7 +5029,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
        const value = request(input, result.message)
        if (result.effect === "ask") yield* create(value, input.agent)
        return { id: value.id, effect: result.effect }
-@@ -256,7 +423,7 @@ const layer = Layer.effect(
+@@ -273,7 +442,7 @@ const layer = Layer.effect(
      const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
        Effect.gen(function* () {
          if (closed) return yield* Effect.die(new DeclinedError())
@@ -4717,7 +5038,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
          return yield* Effect.uninterruptibleMask((restore) =>
            Effect.gen(function* () {
              if (result.effect === "deny") {
-@@ -308,6 +475,70 @@ const layer = Layer.effect(
+@@ -325,6 +494,70 @@ const layer = Layer.effect(
          Effect.gen(function* () {
            const existing = pending.get(input.requestID)
            if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
@@ -4755,7 +5076,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
 +            yield* persist(policyRoot, additions.filter((grant) => grant.lifetime === "session"))
 +            for (const grant of additions.filter((grant) => grant.lifetime === "once" && grant.scope === "parent-list"))
 +              onceListings.push({ sessionID: existing.request.sessionID, grant })
-+            const result = yield* evaluateInput({ ...existing.request, agent: existing.agent })
++            const result = yield* evaluateInput({ ...existing.request, agent: existing.agent }, false, true)
 +            const once = SessionGrant.decision([
 +              ...((yield* sessionGrants(existing.request.sessionID)) ?? []),
 +              ...additions.filter((grant) => grant.lifetime === "once" && grant.scope === "selected"),
@@ -4773,7 +5094,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
 +            }
 +            for (const [id, item] of pending) {
 +              if ((yield* family(item.request.sessionID)) !== policyRoot) continue
-+              const decision = yield* evaluateInput({ ...item.request, agent: item.agent }, true)
++              const decision = yield* evaluateInput({ ...item.request, agent: item.agent }, true, true)
 +              if (decision.effect === "ask") continue
 +              pending.delete(id)
 +              yield* bus.publish(Permission.Event.Replied, {
@@ -4788,8 +5109,12 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
            yield* bus.publish(Permission.Event.Replied, {
              sessionID: existing.request.sessionID,
              requestID: existing.request.id,
-@@ -352,11 +583,11 @@ const layer = Layer.effect(
-             const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
+@@ -367,14 +600,14 @@ const layer = Layer.effect(
+           if (input.reply !== "always" || !existing.request.save?.length) return
+ 
+           for (const [id, item] of pending) {
+-            const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
++            const result = yield* evaluateInput({ ...item.request, agent: item.agent }, false, true).pipe(
                Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
              )
 -            if (result?.effect !== "allow") continue
@@ -4802,7 +5127,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c
              })
              yield* Deferred.succeed(item.deferred, undefined)
              pending.delete(id)
-@@ -384,5 +615,5 @@ const layer = Layer.effect(
+@@ -402,5 +635,5 @@ const layer = Layer.effect(
  export const node = makeLocationNode({
    service: Service,
    layer,
@@ -4960,10 +5285,10 @@ index cd181b686e5fe2e46f51d91fe6ef83ac7b8ed009..b7d5a45f0f15f334814c5864cd5dad23
                      })
                      const result = yield* mcp
 diff --git a/packages/core/src/tool/plugin/glob.ts b/packages/core/src/tool/plugin/glob.ts
-index 1fd7ee41ff4e49a2b84f09c1ff71b3afa808104e..4aff12f222db00869ae18b1199aa1cb00929c463 100644
+index e27d2e63ab49435198c5dc8a78d5a872d3ad0933..665590f4fc9154576807705953e2fda59e374373 100644
 --- a/packages/core/src/tool/plugin/glob.ts
 +++ b/packages/core/src/tool/plugin/glob.ts
-@@ -65,12 +65,16 @@ export const Plugin = {
+@@ -73,12 +73,16 @@ export const Plugin = {
              Effect.gen(function* () {
                const searchPath = input.path === "undefined" || input.path === "null" ? undefined : input.path
                const target = yield* access.resolve({ path: searchPath ?? ".", kind: "directory" })
@@ -4982,10 +5307,10 @@ index 1fd7ee41ff4e49a2b84f09c1ff71b3afa808104e..4aff12f222db00869ae18b1199aa1cb0
                    path: searchPath,
                    hidden: input.hidden,
 diff --git a/packages/core/src/tool/plugin/grep.ts b/packages/core/src/tool/plugin/grep.ts
-index e14269876ed9816bc2edc89bfb46a06c998ca1e8..58ab262d0c7e89ee2ce3333b4e575b6dd210e579 100644
+index 314685594195a3aab269a7886d2ab556bf00d7ee..0123fd4028d719dfc597de7f8bc03a2e50edcc2f 100644
 --- a/packages/core/src/tool/plugin/grep.ts
 +++ b/packages/core/src/tool/plugin/grep.ts
-@@ -83,12 +83,18 @@ export const Plugin = {
+@@ -91,12 +91,18 @@ export const Plugin = {
            execute: (input, context) =>
              Effect.gen(function* () {
                const target = yield* access.resolve({ path: input.path ?? "." })
@@ -5005,7 +5330,7 @@ index e14269876ed9816bc2edc89bfb46a06c998ca1e8..58ab262d0c7e89ee2ce3333b4e575b6d
                    root: ".",
                    path: input.path,
                    include: input.include,
-@@ -99,7 +105,6 @@ export const Plugin = {
+@@ -107,7 +113,6 @@ export const Plugin = {
                  ...Permission.invocation(context),
                })
                const root = target.absolute
@@ -5036,18 +5361,18 @@ index 9cf20e4a1f1201d33a816c8c7913e605d5f332be..3171e04014e6585abf5d2fb8653b8bd7
                })
                const resource = yield* mcp.readResource(input)
 diff --git a/packages/core/src/tool/plugin/patch.ts b/packages/core/src/tool/plugin/patch.ts
-index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c51925073f2295d 100644
+index e08655e3a5be684f0f3899eb2be243b7f7b3d4c0..dfed98dc58b6dedaa4460882bf1f2f86b2ba3cf3 100644
 --- a/packages/core/src/tool/plugin/patch.ts
 +++ b/packages/core/src/tool/plugin/patch.ts
-@@ -6,6 +6,7 @@ import { ToolFailure } from "@opencode/ai/effect"
- import { FileDiff } from "@opencode/schema/file-diff"
- import { Effect, Result, Schema } from "effect"
- import { Bom } from "@opencode/util/bom"
+@@ -9,6 +9,7 @@ import { Bom } from "@opencode/util/bom"
+ import { Config } from "../../config.js"
+ import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
+ import { Flag } from "../../flag.js"
 +import path from "node:path"
  import { toolFailure } from "../runtime.js"
  import { Environment } from "../../environment/index.js"
  import { Formatter } from "../../formatter.js"
-@@ -93,18 +94,28 @@ export const Plugin = {
+@@ -99,18 +100,32 @@ export const Plugin = {
                }
                const prepared: Prepared[] = []
                const updates = new Map<string, string | null>()
@@ -5073,13 +5398,26 @@ index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c519250
                for (const hunk of hunks) {
                  yield* Effect.gen(function* () {
 -                  const target = yield* resolveTarget(hunk.path)
++                  // Match the same resolved paths that determine whether a move
++                  // will actually occur below, not the spelling in the patch.
++                  const moves = hunk.type === "update" && hunk.movePath &&
++                    FileAccess.resolvePath(location.directory, hunk.movePath) !== FileAccess.resolvePath(location.directory, hunk.path)
 +                  const target = yield* resolveTarget(hunk.path, hunk.type === "delete" ? "delete"
-+                    : hunk.type === "update" ? (hunk.movePath && hunk.movePath !== hunk.path ? "delete" : "update")
++                    : hunk.type === "update" ? (moves ? "delete" : "update")
 +                    : undefined)
                    if (hunk.type === "add") {
                      const content =
                        hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`
-@@ -189,9 +200,12 @@ export const Plugin = {
+@@ -170,7 +185,7 @@ export const Plugin = {
+                     try: () => Patch.derive(hunk.path, hunk.chunks, original),
+                     catch: (error) => new ToolFailure({ message: `patch verification failed: ${errorMessage(error)}` }),
+                   })
+-                  const move = hunk.movePath ? yield* resolveTarget(hunk.movePath) : undefined
++                  const move = moves && hunk.movePath ? yield* resolveTarget(hunk.movePath) : undefined
+                   const moveTarget = move && move.absolute !== target.absolute ? move : undefined
+                   const next = Patch.joinBom(update.content, update.bom)
+                   prepared.push({
+@@ -195,9 +210,12 @@ export const Plugin = {
                  change.target,
                  ...(change.type === "update" && change.moveTarget ? [change.moveTarget] : []),
                ])
@@ -5095,21 +5433,21 @@ index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c519250
                  metadata: {
                    filepath: targets.map((target) => target.resource).join(", "),
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..4c2a0625ec5b7b67d610f62db1860a7723864f6b 100644
+index 72b51319b594ff675c350dfc4c3adc0c02339975..58c492e78e5f753426c0f560d9fb2bda7a95f446 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
-@@ -7,6 +7,7 @@ import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
- import type { Shell as ShellSchema } from "@opencode/schema/shell"
- import type { Tool } from "@opencode/schema/tool"
+@@ -9,6 +9,7 @@ import type { Tool } from "@opencode/schema/tool"
  import { Clock, Deferred, Effect, Fiber, Option, Schema, Struct } from "effect"
+ import { Config } from "../../config.js"
+ import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 +import path from "node:path"
  import { Environment } from "../../environment/index.js"
+ import { Flag } from "../../flag.js"
  import { Job } from "../../job.js"
- import { FileAccess } from "../../file-access.js"
-@@ -23,6 +24,25 @@ import { toolFailure } from "../runtime.js"
- 
+@@ -27,6 +28,25 @@ import { toolFailure } from "../runtime.js"
  export const name = "shell"
  export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
+ const CODE_MODE_TIMEOUT_MS = 10 * 60 * 1_000
 +
 +// Only simple built-in queries and literal output in system Windows PowerShell
 +// without profiles are known not to touch the filesystem. Parsing alone is not
@@ -5132,7 +5470,7 @@ index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..4c2a0625ec5b7b67d610f62db1860a77
  // How long a call the user interrupted waits for its stopped command to exit before settling with the output so far.
  const INTERRUPT_WAIT = "500 millis"
  
-@@ -286,17 +306,30 @@ export const Plugin = {
+@@ -316,17 +336,30 @@ export const Plugin = {
        invocation.cwd = target.absolute
        const timeout = invocation.timeout
        const parsed = yield* ShellParse.scan(invocation.command, invocation.shell, target.absolute)
@@ -5270,13 +5608,13 @@ index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd
 +  assert.deepEqual(result.editor.get("other").command, ["plugin-owned"])
 +})
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
-index 8d42e5b54a9c214989d808c883f87439ec6a87ff..696bf15ce58142ebdf125eb580e859f028294ec4 100644
+index d2a8f3b579066fff0d4e4922bc282e595e510494..7856f1e3372b291cb1c82da610f5fb2fdbcd2e66 100644
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -16,10 +16,56 @@ import { Session } from "@opencode/core/session"
- import { SessionTable } from "@opencode/core/session/sql"
+@@ -17,10 +17,56 @@ import { SessionTable } from "@opencode/core/session/sql"
  import { SessionStore } from "@opencode/core/session/store"
  import { ShellParse } from "@opencode/core/shell/parse"
+ import { Tool } from "@opencode/core/tool"
 +import { hasNoFilesystemEffects } from "../src/tool/plugin/shell"
  import { eq } from "drizzle-orm"
  import { location } from "./fixture/location"
@@ -5330,7 +5668,7 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..696bf15ce58142ebdf125eb580e859f0
  const current = Layer.succeed(
    Location.Service,
    Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
-@@ -98,6 +144,148 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+@@ -99,6 +145,148 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
  }
  
  describe("Permission", () => {
@@ -5479,6 +5817,61 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..696bf15ce58142ebdf125eb580e859f0
    it.effect("returns the evaluated effect and only queues prompts", () =>
      Effect.gen(function* () {
        yield* setup([{ action: "read", resource: "*", effect: "allow" }])
+@@ -336,6 +524,54 @@ describe("Permission", () => {
+     }),
+   )
+ 
++  it.effect("nested unknown-shell approval uses the parent row but remains exact to the requesting session and command", () =>
++    Effect.gen(function* () {
++      const parentSession = Session.ID.make("ses_test")
++      const childSession = Session.ID.make("ses_nested_unknown_child")
++      yield* setup([{ action: "*", resource: "*", effect: "allow" }], parentSession)
++      yield* setup([{ action: "*", resource: "*", effect: "allow" }], childSession)
++      const { db } = yield* Database.Service
++      yield* db.update(SessionTable).set({ parent_id: parentSession }).where(eq(SessionTable.id, childSession)).run().pipe(Effect.orDie)
++      const service = yield* Permission.Service
++      const source = { type: "tool" as const, messageID: "msg_test", id: "call_child" }
++      const metadata = {
++        filesystemEffects: "unknown", unknownCommand: "npm run dev",
++        unknownCwd: "/project", unknownShell: "powershell.exe",
++      }
++      const input = { sessionID: childSession, action: "shell", resources: ["npm run dev"], metadata, source }
++      yield* Effect.scoped(Effect.gen(function* () {
++        yield* service.nested(Tool.CallID.make("call_child"), Tool.CallID.make("call_parent"))
++        const first = yield* service.ask(assertion({ ...input, id: Permission.ID.create("per_nested_unknown") }))
++        expect(first.effect).toBe("ask")
++        const pending = yield* service.get(first.id)
++        expect(pending?.source).toEqual({ ...source, id: "call_parent" })
++        expect(pending?.metadata).toEqual(metadata)
++        expect(pending?.sessionID).toBe(childSession)
++        yield* service.reply({ requestID: first.id, reply: { scope: "session", policy: "Unknown=S" } })
++        expect(yield* service.get(first.id)).toBeUndefined()
++        expect((yield* service.ask(assertion({ ...input, id: Permission.ID.create("per_nested_unknown_same") }))).effect).toBe("allow")
++        for (const [id, changed] of [
++          ["per_nested_unknown_command", { metadata: { ...metadata, unknownCommand: "npm run build" } }],
++          ["per_nested_unknown_cwd", { metadata: { ...metadata, unknownCwd: "/other" } }],
++          ["per_nested_unknown_shell", { metadata: { ...metadata, unknownShell: "other.exe" } }],
++          ["per_nested_unknown_session", { sessionID: parentSession }],
++        ] as const) {
++          const result = yield* service.ask(assertion({ ...input, ...changed, id: Permission.ID.create(id) }))
++          expect(result.effect).toBe("ask")
++          expect((yield* service.get(result.id))?.source).toEqual({ ...source, id: "call_parent" })
++          yield* service.reply({ requestID: result.id, reply: "once" })
++        }
++      }))
++      const after = yield* service.ask(assertion({
++        ...input, id: Permission.ID.create("per_nested_unknown_after"),
++        metadata: { ...metadata, unknownCommand: "different" },
++      }))
++      expect(after.effect).toBe("ask")
++      expect((yield* service.get(after.id))?.source).toEqual(source)
++      yield* service.reply({ requestID: after.id, reply: "once" })
++    }),
++  )
++
+   it.effect("drops undefined metadata values so pending requests encode as JSON", () =>
+     Effect.gen(function* () {
+       yield* setup()
 diff --git a/packages/core/test/permission/service-fixture.mjs b/packages/core/test/permission/service-fixture.mjs
 new file mode 100644
 index 0000000000000000000000000000000000000000..7731b0e0819b221409c742c3e84f5fbf54782f1a
@@ -5677,10 +6070,10 @@ index 0000000000000000000000000000000000000000..7731b0e0819b221409c742c3e84f5fbf
 +}
 diff --git a/packages/core/test/permission/service.node.test.mjs b/packages/core/test/permission/service.node.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3fb96fbc4f180cc2b7e86208ee635d9bb6b59b1
+index 0000000000000000000000000000000000000000..603a33417bc6f364b56692b7d3005d2f19318343
 --- /dev/null
 +++ b/packages/core/test/permission/service.node.test.mjs
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,362 @@
 +import { test } from "node:test"
 +import assert from "node:assert/strict"
 +import { registerHooks, createRequire } from "node:module"
@@ -5732,15 +6125,15 @@ index 0000000000000000000000000000000000000000..b3fb96fbc4f180cc2b7e86208ee635d9
 +  },
 +})
 +const { Effect, Layer, Fiber, Exit } = await import("effect")
-+const { fixture } = await import("./service-fixture.mjs")
++const { fixture, PluginHooks } = await import("./service-fixture.mjs")
 +const { SessionTable } = await import("../../src/session/sql.ts")
 +const { EventSequenceTable } = await import("../../src/event/sql.ts")
 +const Permission = await import("../../src/permission.ts")
 +const { SessionEvent } = await import("@opencode/schema/session-event")
 +const state = fixture(SessionTable, EventSequenceTable)
-+const dependencies = () => Layer.mergeAll(...state.services.map(([key, value]) => Layer.succeed(key, value)))
-+const run = (body) => Effect.runPromise(Effect.scoped(body.pipe(
-+  Effect.provide(Layer.provide(Permission.node.layer, dependencies())),
++const dependencies = (testState) => Layer.mergeAll(...testState.services.map(([key, value]) => Layer.succeed(key, value)))
++const run = (body, testState = state) => Effect.runPromise(Effect.scoped(body.pipe(
++  Effect.provide(Layer.provide(Permission.node.layer, dependencies(testState))),
 +)).pipe(Effect.timeout("10 seconds")))
 +const input = (sessionID = "ses_child", operation = "read", paths = ["D:/Data/Project/deep/file"]) => ({
 +  sessionID, agent: "build", action: operation === "read" ? "read" : "edit",
@@ -5758,6 +6151,36 @@ index 0000000000000000000000000000000000000000..b3fb96fbc4f180cc2b7e86208ee635d9
 +    }
 +    yield* Effect.yieldNow
 +  }
++})
++
++test("nested UI rows are mapped exactly once during registration and policy rechecks", async () => {
++  const root = "ses_nested_rows"
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add(root)
++  const entry = isolated.services.find(([key]) => key === PluginHooks.Service)
++  const original = entry[1]
++  const rows = []
++  entry[1] = { trigger: (_domain, _name, input) => Effect.sync(() => {
++    rows.push(input.source?.id)
++    return input
++  }) }
++  try {
++    await run(Effect.gen(function* () {
++      const service = yield* Permission.Service
++      yield* service.nested("outer", "grandparent")
++      yield* service.nested("child", "outer")
++      const request = yield* pending(service, {
++        ...input(root), directories: ["D:/Data/Project/deep"],
++        source: { type: "tool", id: "child", messageID: "msg_nested" },
++      })
++      assert.equal(request.request.source.id, "outer")
++      assert.ok(rows.length >= 2, "initial evaluation and post-registration race check both run")
++      assert.deepEqual([...new Set(rows)], ["outer"])
++      yield* service.reply({ requestID: request.request.id, reply: { scope: "session", policy: "RU=S*" } })
++      yield* Fiber.join(request.fiber)
++      assert.deepEqual([...new Set(rows)], ["outer"])
++    }), isolated)
++  } finally { entry[1] = original }
 +})
 +
 +test("real Permission service: durable family CRUD, atomic invalid input, denies, unrelated roots, restart and revocation", async () => {
@@ -6142,7 +6565,7 @@ index 8951244c5bc0c513717e91476f6080e1c015817f..a0f1bf2d5d45908297408dd300a4142f
          .middleware(sessionLocationMiddleware)
          .annotateMerge(
 diff --git a/packages/schema/src/config/experimental.ts b/packages/schema/src/config/experimental.ts
-index d46710bcdcc7898d79577a25a60b573919c032b5..bb65adaddced3424ed94d7d74bf12be9d4dbeea9 100644
+index 726519cf4e44b6eff3159f2e5179d313dbd3a0f4..22edb298dc0600eaf4319e1193fad7e03ee36f3e 100644
 --- a/packages/schema/src/config/experimental.ts
 +++ b/packages/schema/src/config/experimental.ts
 @@ -7,6 +7,10 @@ import { ConfigModel } from "./model.js"

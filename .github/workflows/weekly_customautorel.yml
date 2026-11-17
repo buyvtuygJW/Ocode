@@ -107,8 +107,8 @@ jobs:
           node-version: '24'
 
       - name: Personalize isolation checks (hook budget, owned modules, shims)
-        # Hard gate: the patch set must keep the isolation contract (max 4 upstream
-        # hook hunks, only packages/cli/script/build.ts; everything else owned files)
+        # Hard gate: owned-module bootstrap has at most four build.ts hunks.
+        # Mandatory permission/title edits are verified and reported separately.
         # BEFORE any clone/build work is spent. Patches are self-contained; this step
         # needs only the committed checker, its test, and patches/ on disk.
         shell: bash
@@ -500,6 +500,7 @@ jobs:
               .personalize/context-decay.test.mjs
               .personalize/lifetime-effect.test.mjs
               .personalize/lifetime.test.mjs
+              .personalize/session-title.test.mjs
             )
             for f in "${owned_tests[@]}"; do
               if [ ! -f "$f" ]; then
@@ -512,8 +513,9 @@ jobs:
                 node --experimental-transform-types --test \
                 ../../.personalize/context-decay.test.mjs \
                 ../../.personalize/lifetime-effect.test.mjs \
-                ../../.personalize/lifetime.test.mjs); then
-              echo "ERROR: lifetime/context regressions FAILED -- refusing to build this ref"
+                ../../.personalize/lifetime.test.mjs \
+                ../../.personalize/session-title.test.mjs); then
+              echo "ERROR: lifetime/context/title regressions FAILED -- refusing to build this ref"
               return 1
             fi
             if [ "${APPLIED_RSI:-off}" = "on" ]; then
@@ -608,16 +610,19 @@ jobs:
             echo "Checked out upstream SHA: $UPSTREAM_SHA"
 
             # Isolation contract against the LIVE upstream: manifest-declared exports
-            # and every stock.X access must still resolve on this exact tree. Latest
-            # attempt only -- the fallback SHA predates refactors and is already
-            # guarded by the 3-way apply plus the shipped unit tests.
-            if [ "$label" = "latest" ]; then
-              echo "Checking personalization isolation against pristine upstream..."
-              if ! node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches --upstream .; then
-                echo "ERROR: personalization isolation check failed"
-                cd ..
-                return 12
-              fi
+            # and every stock.X access must resolve on this exact tree, including
+            # fallback refs. A historical success is not compatibility evidence.
+            echo "Checking personalization isolation against pristine upstream ($label: $UPSTREAM_SHA)..."
+            if ! node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches --upstream .; then
+              echo "ERROR: personalization isolation check failed ($label: $UPSTREAM_SHA)"
+              cd ..
+              return 12
+            fi
+            if ! PERSONALIZE_TEST_UPSTREAM="$PWD" PERSONALIZE_GIT="$(command -v git)" \
+              node --test ../personalize-src/regenerate.test.mjs; then
+              echo "ERROR: full-stack regeneration regression failed; refusing to patch or build"
+              cd ..
+              return 13
             fi
 
             git config user.name "claudedbuildbot"
@@ -1005,6 +1010,9 @@ jobs:
           cp ../.github/scripts/personalize-theme.test.cjs .github/scripts/personalize-theme.test.cjs
           cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
           cp ../.github/scripts/repair-photon-patch.test.cjs .github/scripts/repair-photon-patch.test.cjs
+          # The next scheduled run must retain the single generator and its inputs.
+          cp ../regen-personalize.ps1 regen-personalize.ps1
+          cp -a ../personalize-src .
 
           if [ ! -s "$SELF" ]; then
             echo "ERROR: $SELF missing from automation checkout; refusing to push"
