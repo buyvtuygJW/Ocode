@@ -21,7 +21,7 @@ const { createHash } = require('node:crypto');
 const NAMES = ['FinalPERSONALIZE.patch', 'FinalPersonalizeR.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeX.patch'];
 const MANDATORY = 'FinalPERSONALIZE.patch';
 const PERMISSIONS = 'HarnessPermissions.base.patch';
-const PERMISSIONS_SHA256 = 'f39f9732b8a3305c1f9f7522c847f91c998c6073b0b8b80aa8e41eb0b65893f6';
+const PERMISSIONS_SHA256 = '22e1591ee0a41105e703cb2180afd4d6801325317e0beeab0a220cde188f4178';
 const ALLOWED = 'packages/cli/script/build.ts';
 const MANIFESTS = ['manifest.json', 'R.json', 'S.json', 'X.json'];
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -190,7 +190,7 @@ function analyze(patches, upstream, permissions) {
   if (delivered.length > 0 && !additions.has('.personalize/build.mjs')) {
     throw new Error('Missing owned build shim: .personalize/build.mjs');
   }
-  if (delivered.length > 0 && hunks > 0) {
+  if (delivered.length > 0) {
     const wired = hooks.some((entry) =>
       addedLines(entry.section, entry.file).some((line) => line.includes('.personalize/build.mjs') || line.includes('PersonalizeBuild'))
     );

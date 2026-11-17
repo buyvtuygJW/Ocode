@@ -465,10 +465,10 @@ index 0000000000000000000000000000000000000000..3d6c103a8695421451d4ae88547c38a2
 +})
 diff --git a/.personalize/lifetime-effect.test.mjs b/.personalize/lifetime-effect.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d18c25fb18e844295f92794b9593f41629bdc7c5
+index 0000000000000000000000000000000000000000..9bd49fe82a7b993d3c634d1befffaf32dabe791b
 --- /dev/null
 +++ b/.personalize/lifetime-effect.test.mjs
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,312 @@
 +import assert from "node:assert/strict"
 +import fs from "node:fs"
 +import path from "node:path"
@@ -476,12 +476,18 @@ index 0000000000000000000000000000000000000000..d18c25fb18e844295f92794b9593f416
 +import { test } from "node:test"
 +import { Lifetime, defaults, duration } from "../packages/util/src/personalize-lifetime.ts"
 +
-+const { Context, Effect, Layer, Option } = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++const runtime = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++const { Context, Deferred, Effect, Fiber, Layer, Option, Schema } = runtime
 +
 +// Exercise the actual owned factories with the actual pinned Effect runtime;
 +// only the host services are test doubles. No server or child processes.
 +function load(relative, dependencies, names = ["decorate"], extra = {}) {
-+  let code = stripTypeScriptTypes(fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8"), { mode: "transform" })
++  return loadSource(fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8"), dependencies, names, extra)
++}
++
++function loadSource(source, dependencies, names, extra = {}) {
++  let code = stripTypeScriptTypes(source, { mode: "transform" })
++  code = code.replace(/^export \* as \w+ from ["'][^"']+["'];?$/gm, "")
 +  code = code.replace(/^import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["'];?$/gm,
 +    (_, fields, specifier) => `const {${fields.replace(/\bas\b/g, ":")}} = deps[${JSON.stringify(specifier)}];`)
 +  code = code.replace(/^import\s+(\w+)\s+from\s+["']([^"']+)["'];?$/gm,
@@ -497,14 +503,113 @@ index 0000000000000000000000000000000000000000..d18c25fb18e844295f92794b9593f416
 +  }
 +}
 +
++function jobLayer(service, policy) {
++  const JobService = Context.Service()("test/JobLease")
++  const ExecutionService = Context.Service()("test/ExecutionLease")
++  let forwarded
++  const { decorate } = load("packages/server/src/personalize/routes.ts", {
++    effect: runtime,
++    "@opencode/core/job": { Job: { Service: JobService, node: graph(JobService, service) } },
++    "@opencode/core/session/execution": { SessionExecution: { Service: ExecutionService, node: graph(ExecutionService, {}) } },
++    "@opencode/core/bus": { Bus: {} },
++    "@opencode/schema/session-event": { SessionEvent: {} },
++    "./idle-state": { lifetime: policy },
++  })
++  decorate({ createRoutes: (...args) => { forwarded = args } }).createRoutes({}, () => [], [])
++  return { tag: JobService, layer: forwarded[2][0].layer }
++}
++
++const localJob = new URL("../packages/core/src/job.ts", import.meta.url)
++const jobSource = fs.existsSync(localJob) ? localJob
++  : process.env.PERSONALIZE_TEST_UPSTREAM && path.join(process.env.PERSONALIZE_TEST_UPSTREAM, "packages/core/src/job.ts")
++
++test("actual Job.start joins, generations, cancellation and teardown release lifetime leases", async () => {
++  assert.ok(jobSource, "Set PERSONALIZE_TEST_UPSTREAM when testing the owned-source tree without stock job.ts")
++  const DatabaseService = Context.Service()("test/JobDatabase")
++  const { make } = loadSource(fs.readFileSync(jobSource, "utf8"), {
++    effect: runtime,
++    "drizzle-orm": {},
++    "@opencode/util/effect/app-node": { makeGlobalNode: (input) => input },
++    "./database/database.js": { Database: { Service: DatabaseService } },
++    "./job/list.js": { JobList: { read: () => Effect.succeed([]) } },
++    "./job/recovery.js": { RecoverySchema: Schema.Unknown },
++    "./job/sql.js": { JobTable: {} },
++    "./session/message.js": { SessionMessage: { ID: Schema.String } },
++    "./session/schema.js": { SessionSchema: { ID: Schema.String } },
++  }, ["make"])
++  const db = new Proxy({}, { get() { throw new Error("This regression must not perform database I/O") } })
++  const policy = new Lifetime({ hardMs: 1000, softMs: 100 }, () => 0)
++  policy.start()
++  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++    const stock = yield* make.pipe(Effect.provideService(DatabaseService, { db }))
++    const wrapped = jobLayer(stock, policy)
++    const jobs = Context.get(yield* Layer.build(wrapped.layer), wrapped.tag)
++    const finish = yield* Deferred.make()
++    let runs = 0
++    const first = { id: "same-child", type: "subagent", run: Effect.sync(() => { runs++ }).pipe(
++      Effect.andThen(Deferred.await(finish)), Effect.as("done"),
++    ) }
++    yield* jobs.start(first)
++    assert.equal(policy.jobs, 1)
++    yield* Effect.all(Array.from({ length: 8 }, () => jobs.start(first)), { concurrency: "unbounded" })
++    assert.equal(runs, 1, "joined calls must not execute their supplied run")
++    assert.equal(policy.jobs, 1, "joined calls must not acquire permanent job leases")
++    assert.equal(policy.requests, 0)
++    yield* Deferred.succeed(finish, undefined)
++    yield* stock.wait({ id: first.id })
++    assert.equal(policy.jobs, 0)
++    assert.equal(policy.next().kind, "soft", "completion restores eligibility for soft shutdown")
++    yield* jobs.start({ ...first, run: Effect.fail(new Error("new generation failed")) })
++    yield* stock.wait({ id: first.id })
++    assert.equal(policy.jobs, 0, "a failed generation releases exactly its own lease")
++    yield* jobs.start({ id: "cancel", type: "shell", run: Effect.never })
++    yield* jobs.start({ id: "survivor", type: "shell", run: Effect.never })
++    assert.equal(policy.jobs, 2)
++    yield* jobs.cancel("cancel")
++    assert.equal(policy.jobs, 1, "cancellation must not release the other job's lease")
++  })).pipe(Effect.timeout("5 seconds")))
++  assert.equal(policy.jobs, 0, "registry teardown interrupts the remaining job and releases its lease")
++  assert.equal(policy.requests, 0)
++})
++
++test("job admission is protected and releases on failure or interruption before a run starts", async () => {
++  for (const interrupt of [false, true]) {
++    const policy = new Lifetime({ hardMs: 1000, softMs: 100 }, () => 0)
++    policy.start()
++    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++      const entered = yield* Deferred.make()
++      const finish = yield* Deferred.make()
++      const service = { start: () => Deferred.succeed(entered, undefined).pipe(
++        Effect.andThen(Deferred.await(finish)),
++        Effect.andThen(Effect.fail(new Error("admission failed"))),
++      ) }
++      const wrapped = jobLayer(service, policy)
++      const jobs = Context.get(yield* Layer.build(wrapped.layer), wrapped.tag)
++      const fiber = yield* jobs.start({ id: "admission", run: Effect.die("must not run") }).pipe(Effect.forkChild)
++      yield* Deferred.await(entered)
++      assert.equal(policy.requests, 1, "a pending start must prevent premature soft shutdown")
++      assert.equal(policy.jobs, 0, "there is no execution lease before the actual run")
++      assert.equal(policy.next().kind, "hard")
++      if (interrupt) yield* Fiber.interrupt(fiber)
++      else {
++        yield* Deferred.succeed(finish, undefined)
++        yield* Fiber.join(fiber).pipe(Effect.exit)
++      }
++      assert.equal(policy.requests, 0)
++      assert.equal(policy.jobs, 0)
++      assert.equal(policy.next().kind, "soft")
++    })).pipe(Effect.timeout("5 seconds")))
++  }
++})
++
 +test("route seam forwards trailing arguments and counts real session/job lifetimes", async () => {
 +  const policy = new Lifetime(); policy.start(); policy.connect()
 +  const JobService = Context.Service()("test/Job")
 +  const ExecutionService = Context.Service()("test/Execution")
 +  const BusService = Context.Service()("test/Bus")
-+  const queued = [], active = new Set()
++  const active = new Set()
 +  let subscriber, unsubscribed = false, forwarded
-+  const job = { start: ({ run }) => Effect.sync(() => { queued.push(run); return "job-id" }) }
++  const job = { start: ({ run }) => run.pipe(Effect.as("job-id")) }
 +  const execution = { active: Effect.sync(() => active) }
 +  const events = Object.fromEntries(["Started", "Succeeded", "Failed", "Interrupted"].map((name) => [name, { type: name }]))
 +  const { decorate } = load("packages/server/src/personalize/routes.ts", {
@@ -530,13 +635,15 @@ index 0000000000000000000000000000000000000000..d18c25fb18e844295f92794b9593f416
 +  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
 +    const context = yield* Layer.build(combined)
 +    const jobs = Context.get(context, JobService)
-+    yield* jobs.start({ run: Effect.void })
-+    assert.equal(policy.jobs, 1, "queued work is already protected")
-+    yield* queued.shift()
++    yield* jobs.start({ run: Effect.sync(() => {
++      assert.equal(policy.jobs, 1, "executing work owns a lease")
++      assert.equal(policy.requests, 1, "admission is protected until start returns")
++    }) })
 +    assert.equal(policy.jobs, 0)
-+    yield* jobs.start({ run: Effect.fail(new Error("tool failed")) })
-+    yield* queued.shift().pipe(Effect.exit)
++    assert.equal(policy.requests, 0)
++    yield* jobs.start({ run: Effect.fail(new Error("tool failed")) }).pipe(Effect.exit)
 +    assert.equal(policy.jobs, 0, "failed tools release their lease")
++    assert.equal(policy.requests, 0, "a failed start releases admission")
 +    yield* subscriber({ type: "Started", data: { sessionID: "parent" } })
 +    yield* subscriber({ type: "Started", data: { sessionID: "child" } })
 +    yield* subscriber({ type: "Started", data: { sessionID: "child" } })
@@ -2053,21 +2160,20 @@ index 0000000000000000000000000000000000000000..379dc1864c068da95e7ab8b24f479369
 +and record that selector as `anchor` — the memory protocol above is unchanged.
 diff --git a/packages/core/src/session/runner/context-decay.ts b/packages/core/src/session/runner/context-decay.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a806697badd017
+index 0000000000000000000000000000000000000000..8ee7e1d3f857ef4b3dc2c28f19a734c65f7398a6
 --- /dev/null
 +++ b/packages/core/src/session/runner/context-decay.ts
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,370 @@
 +import { SessionMessage } from "../message.js"
 +
 +/**
-+ * Relevance-segmented context decay. Replaces fixed-budget compaction with a policy keyed on *which task you are on*:
-+ * the live task gets the big budget - including, especially, when it only just started - the task before it keeps a
-+ * small shared pot in case we bounce back, and everything older collapses to a retrieval ref. So a boundary cuts both
-+ * ways at once: it shrinks everything behind it and hands the fresh task a full budget.
++ * Conservative, relevance-segmented duplicate decay. Task budgets decide when
++ * duplicate text may refer to an earlier retained result in the same request.
++ * They are not hard context limits: unique evidence is never discarded without
++ * a verified recovery mechanism.
 + *
-+ * Tool output decays hard. Message text never decays; it is the reasoning thread, it is cheap, and losing it is what
-+ * makes agents repeat themselves. It is also why archived tools need no label - the chat around the call already says
-+ * what it did.
++ * Unique tool output is preserved. Message text never decays; it is the reasoning thread, it is cheap, and losing it is what
++ * makes agents repeat themselves.
 + */
 +
 +// ---------------------------------------------------------------------------------------------------- tunables
@@ -2082,9 +2188,9 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +export const TASK_DRIFT_THRESHOLD = 0.6
 +/** Share of drift owed to file paths; the remainder is vocabulary. */
 +export const PATH_WEIGHT = 0.6
-+/** Turns after which everything collapses into the single index block. */
++/** Turns after which eligible duplicates may enter the index block. */
 +export const ARCHIVE_AFTER_TURNS = 20
-+/** Head/tail retained when stubbing live-task output that overflowed. */
++/** Legacy tuning constants retained for callers. */
 +export const STUB_HEAD_CHARS = 400
 +export const STUB_TAIL_CHARS = 200
 +/** Consecutive tool calls with no reasoning between them that force a label. */
@@ -2257,8 +2363,7 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +export const taskRank = (index: number, marks: readonly number[]) => marks.filter((mark) => mark > index).length
 +
 +/**
-+ * Budget as a function of rank - the whole policy in three lines. Rank 0 is the live task and is never penalised for
-+ * being new; rank 2 and older hold no verbatim output at all, they are a ref you can pull back on demand.
++ * Budget as a function of rank. Unique output is always preserved even when this budget is exceeded.
 + */
 +export const taskBudget = (rank: number) => {
 +  if (rank === 0) return BUDGET_LIVE_TASK
@@ -2287,9 +2392,7 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +}
 +
 +/**
-+ * Everything that can change what the decayed prefix looks like, reduced to three ints. Equal key => byte-identical
-+ * output => skip the work and keep the provider cache hot. This is the loop-breaker: the expensive decision is made on
-+ * a boundary, not on every turn.
++ * Task and archive boundaries. Equal keys do not imply equal inputs: tool results may stream or be edited.
 + */
 +export interface ContextKey {
 +  /** Count of provable task boundaries seen. Monotonic. */
@@ -2320,27 +2423,11 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +    .join("\n")
 +}
 +
-+const stub = (tool: SessionMessage.AssistantTool, body: string) => {
-+  const head = body.slice(0, STUB_HEAD_CHARS)
-+  const tail = body.length > STUB_HEAD_CHARS + STUB_TAIL_CHARS ? body.slice(-STUB_TAIL_CHARS) : ""
-+  const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
-+  const handle = paths[0] ?? tool.id
-+  const note = `\n…[${tool.name} output elided — ${body.length} chars. ref ${handle} — name it and the harness reinjects it locally]…\n`
-+  return [head, note, tail].join("")
-+}
-+
-+/** An elided tool keeps outputPaths so the harness can refetch without a provider call. */
-+const elide = (tool: SessionMessage.AssistantTool, text: string): SessionMessage.AssistantTool => {
-+  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
-+  return { ...tool, state: { ...tool.state, content: [{ type: "text", text }] } } as SessionMessage.AssistantTool
-+}
-+
 +/**
-+ * Superseded/old output collapses to a bare ref - the consolidated index block carries the detail, so repeating it
-+ * per-tool would defeat the point. Content is never emptied outright: an empty tool result trips provider-side
-+ * tool_call/tool_result pairing checks.
++ * Duplicate text refers to an earlier retained result. Content is never emptied:
++ * an empty result trips provider-side tool_call/tool_result pairing checks.
 + */
-+const markerText = (ref: string) => `[archived — ref ${ref}]`
++const markerText = (ref: string) => `[Duplicate tool output; identical text is retained in earlier tool result ${JSON.stringify(ref)}.]`
 +
 +const archivedMarker = (tool: SessionMessage.AssistantTool, ref: string): SessionMessage.AssistantTool => {
 +  if (tool.state.status !== "completed" && tool.state.status !== "error") return tool
@@ -2363,7 +2450,7 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +  readonly messages: readonly SessionMessage.Info[]
 +  readonly archive: readonly ArchiveEntry[]
 +  readonly key: ContextKey
-+  /** False when the short-circuit fired and the prefix was left byte-identical. */
++  /** True when at least one duplicate was replaced. */
 +  readonly rewritten: boolean
 +}
 +
@@ -2371,23 +2458,26 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 + * Decay a projected history immediately before it is lowered to provider messages. Pure and synchronous: no filesystem,
 + * no git, no Effect, so it can sit inside `toLLMMessages` without changing its signature.
 + */
-+export const decay = (messages: readonly SessionMessage.Info[], previous?: ContextKey): DecayResult => {
++export const decay = (messages: readonly SessionMessage.Info[], _previous?: ContextKey): DecayResult => {
 +  const turns = messages.map(toTurn)
 +  const key = contextKey(turns)
-+
-+  // Loop-breaker. Nothing affecting the lowered bytes changed, so hand back the same references and let the cache hit.
-+  if (sameKey(previous, key)) return { messages, archive: [], key, rewritten: false }
 +
 +  const marks = taskBoundaries(turns)
 +  const labelled = unnarrated(turns)
 +  const archiveBefore = key.frontier
 +  const archive: ArchiveEntry[] = []
 +
-+  // Decide every tool's fate newest-first so the freshest output claims budget first, then rebuild in original order.
++  // Oldest-first keeps the lowered prefix stable when results are appended.
++  // It favors older results over fresher ones until a task/frontier boundary.
++  // Only identical single-text results can be replaced: their full text is
++  // retained in an earlier result in this very request, without filesystem access.
 +  const verdict = new Map<string, SessionMessage.AssistantTool>()
 +  const spent = new Map<number, number>()
++  const retained = new Map<string, string>()
++  const counts = new Map<string, number>()
++  for (const turn of turns) for (const tool of turn.tools) counts.set(tool.id, (counts.get(tool.id) ?? 0) + 1)
 +
-+  for (let index = turns.length - 1; index >= 0; index--) {
++  for (let index = 0; index < turns.length; index++) {
 +    const turn = turns[index]!
 +    const rank = taskRank(index, marks)
 +    const allowance = taskBudget(rank)
@@ -2397,41 +2487,27 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +      const body = contentText(tool)
 +      if (body.length === 0) continue
 +
-+      const paths = tool.state.status === "completed" ? (tool.state.outputPaths ?? []) : []
-+      const ref = paths[0] ?? tool.id
-+      const label = labelled.has(tool.id)
-+      const entry: ArchiveEntry = label ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref }
-+      const retire = () => {
-+        archive.push(entry)
-+        verdict.set(tool.id, archivedMarker(tool, ref))
-+      }
-+      // Retiring is not free: the marker replaces the body *and* the tool buys a line in the index block. For a short
-+      // output that total exceeds what it reclaims, so the body stays - cheaper on tokens and it keeps the thread whole.
-+      const retires = worthwhile(body, markerText(ref), indexLine(entry).length + 1)
-+
-+      if (archived || allowance === 0) {
-+        if (retires) retire()
-+        continue
-+      }
-+
 +      const cost = tokens(body)
 +      const used = spent.get(rank) ?? 0
-+      if (used + cost <= allowance) {
-+        spent.set(rank, used + cost)
-+        continue // keep verbatim
++      const content = tool.state.status === "completed" || tool.state.status === "error" ? tool.state.content : undefined
++      // Stock lowering can drop calls from failed assistant messages and error
++      // calls without time.ran. Only completed calls in unfailed messages are
++      // guaranteed to survive lowering as a source for a later duplicate.
++      const eligible = turn.message.type === "assistant" && turn.message.error === undefined &&
++        tool.state.status === "completed" && content?.length === 1 && content[0]?.type === "text" && counts.get(tool.id) === 1
++      const ref = eligible ? retained.get(body) : undefined
++      if (ref !== undefined && (archived || used + cost > allowance)) {
++        const entry: ArchiveEntry = labelled.has(tool.id) ? { id: tool.id, ref, name: tool.name, chars: body.length } : { id: tool.id, ref }
++        if (worthwhile(body, markerText(ref), indexLine(entry).length + 1)) {
++          archive.push(entry)
++          verdict.set(tool.id, archivedMarker(tool, ref))
++          continue
++        }
 +      }
-+
-+      // Overflow in the live task keeps a head/tail so the thread still reads; an older task is cold, so it goes to a ref.
-+      if (rank === 0) {
-+        const stubbed = stub(tool, body)
-+        if (worthwhile(body, stubbed)) verdict.set(tool.id, elide(tool, stubbed))
-+        continue // the note would outweigh the body - leave it verbatim
-+      }
-+      if (retires) retire()
++      spent.set(rank, used + cost)
++      if (eligible && !retained.has(body)) retained.set(body, tool.id)
 +    }
 +  }
-+
-+  archive.reverse() // filled newest-first; present it oldest-first like the transcript
 +
 +  const next = messages.map((message) => {
 +    if (message.type !== "assistant") return message
@@ -2441,7 +2517,7 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +    return { ...message, content } as SessionMessage.Info
 +  })
 +
-+  return { messages: next, archive, key, rewritten: true }
++  return { messages: verdict.size ? next : messages, archive, key, rewritten: verdict.size > 0 }
 +}
 +
 +/**
@@ -2453,17 +2529,17 @@ index 0000000000000000000000000000000000000000..a3eeb7c1c77cb2630de3762fc2a80669
 +  const lines = archive.map(indexLine)
 +  return [
 +    `<archived-tool-output count="${archive.length}">`,
-+    "Tool output elided. Name any ref to have the harness reinject it locally.",
++    "Duplicate text is retained in the earlier tool results listed below; no automatic retrieval is performed.",
 +    ...lines,
 +    "</archived-tool-output>",
 +  ].join("\n")
 +}
 diff --git a/packages/core/test/session-context-decay.test.ts b/packages/core/test/session-context-decay.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b027140c29
+index 0000000000000000000000000000000000000000..64a1a9b28495c7b67f087bc4cdd83f93828605e6
 --- /dev/null
 +++ b/packages/core/test/session-context-decay.test.ts
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,234 @@
 +import { expect, test } from "bun:test"
 +import { SessionMessage } from "@opencode/schema/session-message"
 +import {
@@ -2571,7 +2647,7 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +  expect((untouched!.state as SessionMessage.ToolStateError).content).toBeUndefined()
 +})
 +
-+test("archived tools keep a non-empty marker — content is never emptied or undefined", () => {
++test("unique archived tools retain their evidence, including error content", () => {
 +  const big = "x".repeat(5_000)
 +  const oldCompleted = callID()
 +  const oldErrored = callID()
@@ -2581,7 +2657,7 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +    assistant([
 +      text("reading the big files"),
 +      tool({ status: "completed", input: { filePath: "D:/tmp/a/big.ts" }, content: [text(big)] }, oldCompleted),
-+      tool({ status: "error", input: { filePath: "D:/tmp/a/gone.ts" }, error: err, content: [text(big)] }, oldErrored),
++      tool({ status: "error", input: { filePath: "D:/tmp/a/gone.ts" }, error: err, content: [text(big + "error")] }, oldErrored),
 +    ]),
 +  ]
 +  // Push the first turns behind the archive frontier: frontier = quantize(length - ARCHIVE_AFTER_TURNS) >= 2.
@@ -2589,8 +2665,8 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +  for (let i = 0; i < padding; i++) history.push(user(`filler turn ${i}`), assistant([text(`noted ${i}`)]))
 +
 +  const result = decay(history)
-+  expect(result.rewritten).toBe(true)
-+  expect(result.archive.length).toBeGreaterThanOrEqual(2)
++  expect(result.rewritten).toBe(false)
++  expect(result.archive.length).toBe(0)
 +
 +  const byID = new Map(toolsOf(result.messages).map((item) => [item.id, item]))
 +  for (const id of [oldCompleted, oldErrored]) {
@@ -2602,7 +2678,7 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +    expect(Array.isArray(state.content)).toBe(true)
 +    expect(state.content!.length).toBeGreaterThan(0)
 +    const body = compactionRead(state)
-+    expect(body).toMatch(/^\[archived — ref .+\]$/)
++    expect(body).toBe(id === oldCompleted ? big : big + "error")
 +    expect(body.length).toBeGreaterThan(0)
 +  }
 +
@@ -2613,8 +2689,7 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +
 +  // The index block mirrors the archive and stays a plain string.
 +  const block = indexBlock(result.archive)
-+  expect(block).toBeDefined()
-+  expect(block!).toContain(`count="${result.archive.length}"`)
++  expect(block).toBeUndefined()
 +  expect(indexBlock([])).toBeUndefined()
 +})
 +
@@ -2664,7 +2739,7 @@ index 0000000000000000000000000000000000000000..f6137d8a504db113e86f9eca599403b0
 +  expect(typeof compactionRead(item.state)).toBe("string")
 +})
 +
-+test("short-circuit hands back identical references, not re-read copies", () => {
++test("unchanged history without eligible duplicates retains its references", () => {
 +  const messages = [
 +    user("hello"),
 +    assistant([text("done"), tool({ status: "completed", input: {}, content: [text("ok")] })]),
@@ -2963,10 +3038,10 @@ index 0000000000000000000000000000000000000000..b96a3b86afd35e442dc48f2efa16f1c5
 +}
 diff --git a/packages/server/src/personalize/routes.ts b/packages/server/src/personalize/routes.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a422f9702b7da72e2aff3c9b4f130aee0a1650e0
+index 0000000000000000000000000000000000000000..1ba2eb45e5c0df3be6621b9c4bb1092ba2d9f9e4
 --- /dev/null
 +++ b/packages/server/src/personalize/routes.ts
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,67 @@
 +import { Context, Effect, Layer, Option } from "effect"
 +import { Job } from "@opencode/core/job"
 +import { Bus } from "@opencode/core/bus"
@@ -2979,14 +3054,22 @@ index 0000000000000000000000000000000000000000..a422f9702b7da72e2aff3c9b4f130aee
 +  const createRoutes: typeof stock.createRoutes = (options, urls, ...rest) => {
 +    const jobs = Job.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => {
 +      const service = Context.get(context, Job.Service)
-+      const start: Job.Interface["start"] = (input) => Effect.suspend(() => {
-+        const done = lifetime.work()
-+        let handedOff = false
-+        return service.start({ ...input, run: input.run.pipe(Effect.ensuring(Effect.sync(done))) }).pipe(
-+          Effect.tap(() => Effect.sync(() => { handedOff = true })),
-+          Effect.ensuring(Effect.sync(() => { if (!handedOff) done() })),
-+        )
-+      })
++      // Admission and execution are separate lifetimes: start can join an
++      // existing generation without ever evaluating the supplied run effect.
++      // Stock start forks new work immediately before returning, so admission
++      // covers the handoff and only the executed generation owns a job lease.
++      const start: Job.Interface["start"] = (input) => Effect.acquireUseRelease(
++        Effect.sync(() => lifetime.work("requests")),
++        () => service.start({
++          ...input,
++          run: Effect.acquireUseRelease(
++            Effect.sync(() => lifetime.work()),
++            () => input.run,
++            (done) => Effect.sync(done),
++          ),
++        }),
++        (done) => Effect.sync(done),
++      )
 +      return Layer.succeed(Job.Service, { ...service, start })
 +    })))
 +    const executions = SessionExecution.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) =>
@@ -3613,6 +3696,171 @@ index 0000000000000000000000000000000000000000..dda10857d45708eee4773946ee25f828
 +}
 +
 +module.exports = { repairText, repairFile, runWithRepair, relative };
+diff --git a/.personalize/context-decay.test.mjs b/.personalize/context-decay.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..49c9d43d057a2010a9e0341dad58ea50bdf74572
+--- /dev/null
++++ b/.personalize/context-decay.test.mjs
+@@ -0,0 +1,159 @@
++import assert from "node:assert/strict"
++import { existsSync, readFileSync } from "node:fs"
++import { stripTypeScriptTypes } from "node:module"
++import { AsyncLocalStorage } from "node:async_hooks"
++import path from "node:path"
++import { test } from "node:test"
++import { fileURLToPath, pathToFileURL } from "node:url"
++
++// Load the actual owned bodies, replacing only their import boundaries.
++function load(file, deps, names) {
++  let source = stripTypeScriptTypes(readFileSync(new URL(file, import.meta.url), "utf8"))
++  source = source.replace(/^import \{([^}]+)\} from ["']([^"']+)["'];?\s*$/gm,
++    (_, names, specifier) => `const {${names}} = deps[${JSON.stringify(specifier)}];`)
++    .replace(/^export /gm, "")
++  return new Function("deps", `${source}\nreturn {${names.join(",")}}`)(deps)
++}
++const decayModule = load("../packages/core/src/session/runner/context-decay.ts", { "../message.js": {} }, ["decay", "indexBlock"])
++const content = load("../packages/core/src/personalize/content.ts", {}, ["historyMessages"])
++const policy = load("../packages/core/src/personalize/decay-policy.ts", { "node:async_hooks": { AsyncLocalStorage } }, ["withDecayPolicy", "rememberDecayBypass", "bypassDecay"])
++const { decorate } = load("../packages/core/src/personalize/to-llm-message.ts", {
++  "@opencode/ai/effect": { Message: { user: (text) => ({ type: "index", text }) } },
++  "../session/runner/context-decay": decayModule,
++  "./content": content,
++  "./decay-policy": policy,
++}, ["decorate"])
++const lower = decorate({ toLLMMessages: (messages) => [...messages] }).toLLMMessages
++const tool = (id, body, extra = {}) => ({ type: "assistant", content: [{
++  type: "tool", id, name: "read", state: { status: "completed", input: {}, content: [{ type: "text", text: body }], ...extra },
++}] })
++const body = (message) => message.content[0].state.content[0].text
++const user = (text) => ({ type: "user", text })
++
++test("append stability, changed results, independent histories and bypass", () => {
++  const large = "abc".repeat(20000)
++  const first = tool("one", large), second = tool("two", large)
++  const before = lower([first])
++  const after = lower([first, second])
++  assert.equal(body(before[0]), large)
++  assert.equal(body(after[0]), large)
++  assert.match(body(after[1]), /earlier tool result "one"/)
++  assert.match(after[2].text, /no automatic retrieval/)
++  const edited = lower([first, tool("two", large + "changed")])
++  assert.equal(body(edited[1]), large + "changed")
++  const streaming = { type: "assistant", content: [{ type: "tool", id: "two", name: "read", state: { status: "streaming", input: "{" } }] }
++  assert.deepEqual(lower([first, streaming])[1], streaming)
++  assert.match(body(lower([first, second])[1]), /earlier tool result/)
++  assert.equal(body(lower([tool("two", large)])[0]), large)
++  const model = policy.rememberDecayBypass({}, true)
++  assert.equal(body(policy.withDecayPolicy(model, () => lower([first, second]))[1]), large)
++})
++
++test("frontier retires only recoverable duplicates, including with an unchanged previous key", () => {
++  const large = "z".repeat(5000)
++  const history = [tool("first", large), tool("copy", large), tool("unique", "u".repeat(90000))]
++  const before = decayModule.decay(history)
++  assert.equal(before.archive.length, 0)
++  const after = decayModule.decay([...history, ...Array.from({ length: 30 }, (_, i) => user(`filler ${i}`))], before.key)
++  assert.equal(after.archive.length, 1)
++  assert.match(body(after.messages[1]), /earlier tool result "first"/)
++  assert.equal(body(after.messages[2]), "u".repeat(90000))
++  assert.notEqual(after.key.frontier, before.key.frontier)
++  const changed = decayModule.decay([history[0], tool("copy", "changed")], before.key)
++  assert.equal(body(changed.messages[1]), "changed")
++})
++
++test("unverified paths, mixed media, errors and repeated ids are never treated as recovery", () => {
++  const large = "v".repeat(90000)
++  const mixed = tool("mixed", large)
++  mixed.content[0].state.content.push({ type: "file", uri: "data:fixture", mime: "image/png" })
++  const inputs = [
++    tool("path", large, { outputPaths: ["C:/unverified"], metadata: { outputPath: "C:/unverified", truncated: true } }),
++    mixed,
++    { type: "assistant", content: [{ type: "tool", id: "error", name: "x", state: { status: "error", input: {}, content: [{ type: "text", text: large + "error" }] } }] },
++    tool("same", large), tool("same", large),
++  ]
++  const result = decayModule.decay(inputs)
++  assert.deepEqual(result.messages, inputs)
++  assert.deepEqual(result.archive, [])
++})
++
++test("task changes reallocate budgets but never discard unique evidence", () => {
++  const large = "t".repeat(12000)
++  const inProject = (id, text, file) => tool(id, text, { input: { filePath: file } })
++  const first = inProject("first", large, "C:/alpha/work/a")
++  const duplicate = inProject("duplicate", large, "C:/alpha/work/b")
++  const initial = [first, duplicate, user("alpha task")]
++  assert.equal(decayModule.decay(initial).archive.length, 0)
++  const shifted = [...initial, inProject("other", "unique", "D:/beta/work/a"),
++    inProject("other2", "unique two", "D:/beta/work/b"), user("beta task")]
++  const result = decayModule.decay(shifted)
++  assert.ok(result.key.segment > 0)
++  assert.match(body(result.messages[1]), /earlier tool result "first"/)
++  assert.equal(body(result.messages[3]), "unique")
++})
++
++test("a result in a failed assistant turn is not used as a recovery source", () => {
++  const large = "q".repeat(90000)
++  const failed = { ...tool("discarded", large), error: { type: "unknown" } }
++  const result = decayModule.decay([failed, tool("later", large)])
++  assert.equal(body(result.messages[1]), large)
++  assert.equal(result.archive.length, 0)
++})
++
++const localLowering = new URL("../packages/core/src/session/runner/to-llm-message.ts", import.meta.url)
++const stockSource = existsSync(localLowering) ? localLowering
++  : process.env.PERSONALIZE_TEST_UPSTREAM && pathToFileURL(path.join(
++    process.env.PERSONALIZE_TEST_UPSTREAM, "packages/core/src/session/runner/to-llm-message.ts",
++  ))
++
++test("duplicate anchors survive actual upstream history lowering", async () => {
++  assert.ok(stockSource, "Set PERSONALIZE_TEST_UPSTREAM when testing owned sources without stock history lowering")
++  const { Option, Schema } = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++  // Execute the real stock selection/lowering code. Only schema and message
++  // constructor boundaries are supplied; no provider, database or network.
++  const Message = {
++    make: (message) => message,
++    text: (text) => ({ type: "text", text }),
++    tool: (part) => ({ role: "tool", content: [part] }),
++    user: (text) => ({ role: "user", content: [{ type: "text", text }] }),
++  }
++  const stock = load(stockSource, {
++    "@opencode/ai/effect": {
++      Message, Media: {}, ReasoningEfforts: [],
++      ToolCallPart: { make: (part) => ({ type: "tool-call", ...part }) },
++      ToolResultPart: { make: (part) => ({ type: "tool-result", ...part }) },
++    },
++    effect: { Option, Schema },
++    url: { fileURLToPath },
++    "../message.js": {},
++    "../history.js": { SessionHistory: { NativeWindow: Schema.Unknown } },
++    "../recent-text.js": { SessionRecentText: {} },
++  }, ["toLLMMessages"])
++  const wrapped = load("../packages/core/src/personalize/to-llm-message.ts", {
++    "@opencode/ai/effect": { Message },
++    "../session/runner/context-decay": decayModule,
++    "./content": content,
++    "./decay-policy": policy,
++  }, ["decorate"]).decorate(stock).toLLMMessages
++  const model = { providerID: "test", id: "model" }
++  const large = "original-evidence".repeat(6000)
++  const completed = (id) => {
++    const message = { ...tool(id, large), id: `message-${id}`, model, finish: "tool-calls" }
++    message.content[0].time = { ran: 0 }
++    return message
++  }
++  const first = completed("original"), second = completed("duplicate")
++  const resultParts = (messages) => messages.flatMap((message) => message.content)
++    .filter((part) => part.type === "tool-result")
++  const before = resultParts(wrapped([first], model))
++  const after = resultParts(wrapped([first, second], model))
++  assert.deepEqual(after[0], before[0], "appending a duplicate must not change the retained result")
++  assert.equal(after[0].result.value, large)
++  assert.match(after[1].result.value, /earlier tool result "original"/)
++  const failed = { ...first, error: { type: "unknown" } }
++  failed.content = first.content.map((part) => ({ ...part, executed: true }))
++  const withoutAnchor = resultParts(wrapped([failed, second], model))
++  assert.equal(withoutAnchor.length, 1, "stock drops the failed hosted call")
++  assert.equal(withoutAnchor[0].result.value, large, "the remaining result must retain the unique evidence")
++})
 diff --git a/packages/app/src/runtime/i18n/en.ts b/packages/app/src/runtime/i18n/en.ts
 index 43304addcb3b3b1e71b8a7b7210c8bb1e4e0b5af..2124e61ba52e64acc6fcf82f3c549b3e355b0067 100644
 --- a/packages/app/src/runtime/i18n/en.ts
@@ -4195,7 +4443,7 @@ index 2afb8d3b85df2f3652feaed1de4c7a4ce3268c44..3e241040c56e1b5533813e57ade29f45
          save: ["*"],
          metadata: preview ? { files: [preview] } : undefined,
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
-index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcffc422e68 100644
+index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c0302898a 100644
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
 @@ -10,13 +10,34 @@ import { Agent } from "./agent.js"
@@ -4365,7 +4613,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
      })
  
      function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
-@@ -181,12 +298,33 @@ const layer = Layer.effect(
+@@ -181,12 +298,34 @@ const layer = Layer.effect(
        return rules.filter((rule) => Wildcard.match(input.action, rule.action))
      }
  
@@ -4375,9 +4623,8 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        if (denied(input, rules)) return { effect: "deny" as const, rules }
 +      const grants = yield* sessionGrants(input.sessionID)
 +      if (!grants) return { effect: "deny" as const, rules, message: "Invalid stored conversation filesystem policy; revoke it in session permissions." }
-+      if (SessionGrant.unknownEffectsDenied(grants, input)) {
-+        const key = unknownKey(input, grants)
-+        if (!key) return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
++      const key = unknownKey(input, grants)
++      if (key) {
 +        const root = yield* family(input.sessionID)
 +        const session = yield* sessions.get(root)
 +        if (session?.permissions?.some((rule) => rule.action === UNKNOWN_ACTION && rule.resource === key && rule.effect === "allow"))
@@ -4386,6 +4633,8 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
 +          return { effect: "deny" as const, rules, message: "Unknown filesystem effects require an interactive approval." }
 +        return { effect: "ask" as const, rules, message: "Unknown effects: this command may bypass filesystem denies." }
 +      }
++      if (SessionGrant.unknownEffectsDenied(grants, input))
++        return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
 +      const decision = SessionGrant.decision(grants, input)
 +      if (decision === "deny") return {
 +        effect: "deny" as const, rules,
@@ -4401,7 +4650,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        const event = yield* hooks.trigger("permission", "evaluate", {
          sessionID: input.sessionID,
          agent: input.agent,
-@@ -197,6 +335,11 @@ const layer = Layer.effect(
+@@ -197,6 +336,11 @@ const layer = Layer.effect(
          effect,
        })
        const unattended = yield* Unattended
@@ -4413,7 +4662,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        if (event.effect !== "ask" || unattended === undefined)
          return { effect: event.effect, message: event.message, rules: all }
        const settled = [...all, ...unattended]
-@@ -215,6 +358,10 @@ const layer = Layer.effect(
+@@ -215,6 +359,10 @@ const layer = Layer.effect(
          sessionID: input.sessionID,
          action: input.action,
          resources: input.resources,
@@ -4424,7 +4673,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
          save: input.save,
          // Tools copy optional inputs straight into metadata; undefined values are not JSON and would
          // fail the HttpApi response encoder when clients list pending requests.
-@@ -241,13 +388,32 @@ const layer = Layer.effect(
+@@ -241,13 +389,32 @@ const layer = Layer.effect(
            yield* bus
              .publish(Permission.Event.Asked, request)
              .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
@@ -4459,7 +4708,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        const value = request(input, result.message)
        if (result.effect === "ask") yield* create(value, input.agent)
        return { id: value.id, effect: result.effect }
-@@ -256,7 +422,7 @@ const layer = Layer.effect(
+@@ -256,7 +423,7 @@ const layer = Layer.effect(
      const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
        Effect.gen(function* () {
          if (closed) return yield* Effect.die(new DeclinedError())
@@ -4468,13 +4717,12 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
          return yield* Effect.uninterruptibleMask((restore) =>
            Effect.gen(function* () {
              if (result.effect === "deny") {
-@@ -308,6 +474,71 @@ const layer = Layer.effect(
+@@ -308,6 +475,70 @@ const layer = Layer.effect(
          Effect.gen(function* () {
            const existing = pending.get(input.requestID)
            if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
 +          const currentGrants = (yield* sessionGrants(existing.request.sessionID)) ?? []
-+          const key = SessionGrant.unknownEffectsDenied(currentGrants, existing.request)
-+            ? unknownKey(existing.request, currentGrants) : undefined
++          const key = unknownKey(existing.request, currentGrants)
 +          if (key) {
 +            const policy = typeof input.reply === "object" && "policy" in input.reply ? input.reply.policy.trim() : undefined
 +            if (input.reply === "always" || (policy !== undefined && !/^unknown=(?:1|s)$/i.test(policy)))
@@ -4847,7 +5095,7 @@ index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c519250
                  metadata: {
                    filepath: targets.map((target) => target.resource).join(", "),
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92ac2eb20de 100644
+index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..4c2a0625ec5b7b67d610f62db1860a7723864f6b 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
 @@ -7,6 +7,7 @@ import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
@@ -4858,13 +5106,14 @@ index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92a
  import { Environment } from "../../environment/index.js"
  import { Job } from "../../job.js"
  import { FileAccess } from "../../file-access.js"
-@@ -23,6 +24,21 @@ import { toolFailure } from "../runtime.js"
+@@ -23,6 +24,25 @@ import { toolFailure } from "../runtime.js"
  
  export const name = "shell"
  export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
 +
-+// Only a literal Write-Output in system Windows PowerShell without profiles is
-+// known not to touch the filesystem. Parseable does not mean effect-free.
++// Only simple built-in queries and literal output in system Windows PowerShell
++// without profiles are known not to touch the filesystem. Parsing alone is not
++// proof: redirects, pipes, substitutions and scripts must remain unknown.
 +export function hasNoFilesystemEffects(
 +  command: string,
 +  shell: string,
@@ -4875,12 +5124,15 @@ index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92a
 +  const expected = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 +  if (path.win32.normalize(shell).toLowerCase() !== expected.toLowerCase()) return false
 +  if (/[\r\n]/.test(command)) return false
-+  return /^[ \t]*Write-Output[ \t]+'[A-Za-z0-9 ._,:!?-]*'[ \t]*$/i.test(command)
++  const output = /^[ \t]*(?:Write-Output|Write-Host|echo)(?:[ \t]+(?:[A-Za-z0-9_.:,!?/-]+|'[A-Za-z0-9 ._,:!?/-]*'|"[A-Za-z0-9 ._,:!?/-]*"))+[ \t]*$/i
++  const date = /^[ \t]*Get-Date(?:[ \t]+-Format[ \t]+(?:[A-Za-z0-9_.:/-]+|'[A-Za-z0-9 ._,:/-]+'|"[A-Za-z0-9 ._,:/-]+"))?[ \t]*$/i
++  const query = /^[ \t]*(?:Get-Location|pwd|Get-Host|Get-Culture|Get-UICulture|Get-Random)[ \t]*$/i
++  return output.test(command) || date.test(command) || query.test(command)
 +}
  // How long a call the user interrupted waits for its stopped command to exit before settling with the output so far.
  const INTERRUPT_WAIT = "500 millis"
  
-@@ -286,17 +302,30 @@ export const Plugin = {
+@@ -286,17 +306,30 @@ export const Plugin = {
        invocation.cwd = target.absolute
        const timeout = invocation.timeout
        const parsed = yield* ShellParse.scan(invocation.command, invocation.shell, target.absolute)
@@ -5018,10 +5270,10 @@ index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd
 +  assert.deepEqual(result.editor.get("other").command, ["plugin-owned"])
 +})
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
-index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b885c5d4c5d 100644
+index 8d42e5b54a9c214989d808c883f87439ec6a87ff..696bf15ce58142ebdf125eb580e859f028294ec4 100644
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -16,10 +16,32 @@ import { Session } from "@opencode/core/session"
+@@ -16,10 +16,56 @@ import { Session } from "@opencode/core/session"
  import { SessionTable } from "@opencode/core/session/sql"
  import { SessionStore } from "@opencode/core/session/store"
  import { ShellParse } from "@opencode/core/shell/parse"
@@ -5030,11 +5282,22 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b88
  import { location } from "./fixture/location"
  import { testEffect } from "./lib/effect"
  
-+test("only literal output on the system PowerShell is classified as effect-free", () => {
++test("only simple built-in queries and literal output on system PowerShell are classified as effect-free", () => {
 +  const system = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 +  const check = (command: string, shell = system, platform = "win32", root = "C:\\Windows") =>
 +    hasNoFilesystemEffects(command, shell, platform, root)
 +  expect(check("Write-Output 'shell permission test'")).toBe(true)
++  expect(check("echo hi")).toBe(true)
++  expect(check('Write-Host "hello world"')).toBe(true)
++  expect(check("Get-Location")).toBe(true)
++  expect(check("pwd")).toBe(true)
++  expect(check("Get-Host")).toBe(true)
++  expect(check("Get-Culture")).toBe(true)
++  expect(check("Get-UICulture")).toBe(true)
++  expect(check("Get-Random")).toBe(true)
++  expect(check("Get-Date")).toBe(true)
++  expect(check("Get-Date -Format yyyy-MM-dd")).toBe(true)
++  expect(check('Get-Date -Format "yyyy-MM-dd HH:mm"')).toBe(true)
 +  for (const command of [
 +    "Write-Output 'hi'; Remove-Item file",
 +    "Write-Output 'hi' > file",
@@ -5042,9 +5305,22 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b88
 +    "Write-Output 'hi'\nRemove-Item file",
 +    'Write-Output "$(Remove-Item file)"',
 +    "Write-Output $env:PATH",
++    "Get-Date; Remove-Item file",
++    "Get-Date > file",
++    "Get-Date | Remove-Item",
++    "Get-Date\nRemove-Item file",
++    'Get-Date -Format "$(Remove-Item file)"',
++    "Get-Date -Date (Get-Content file)",
++    "echo holyshxt>>DAMNVIRUS",
++    "echo hi > file",
++    "echo hi | Remove-Item",
++    "echo hi; Remove-Item file",
++    "echo $(Remove-Item file)",
++    'echo "$($env:malicious)"',
++    "Get-Location | Remove-Item",
++    "Get-Process",
 +    "npm run dev",
 +    "Remove-Item file",
-+    "echo 'hi'",
 +  ]) expect(check(command)).toBe(false)
 +  expect(check("Write-Output 'hi'", "C:\\temp\\powershell.exe")).toBe(false)
 +  expect(check("Write-Output 'hi'", system, "linux")).toBe(false)
@@ -5054,10 +5330,52 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b88
  const current = Layer.succeed(
    Location.Service,
    Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
-@@ -98,6 +120,106 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+@@ -98,6 +144,148 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
  }
  
  describe("Permission", () => {
++  it.effect("unknown shell commands ask by default even without filesystem denies", () =>
++    Effect.gen(function* () {
++      yield* setup([{ action: "*", resource: "*", effect: "allow" }])
++      const unknown = {
++        action: "shell",
++        resources: ["npm run dev"],
++        metadata: {
++          filesystemEffects: "unknown", unknownCommand: "npm run dev",
++          unknownCwd: "D:/Data/Project", unknownShell: "powershell.exe",
++        },
++      }
++      const first = yield* waitForRequest(unknown)
++      expect(first.request.message).toContain("Unknown effects:")
++      yield* first.service.reply({ requestID: first.request.id, reply: "once" })
++      yield* Fiber.join(first.fiber)
++      const redirect = yield* first.service.ask(assertion({
++        id: Permission.ID.create("per_unknown_redirect"), action: "shell", resources: ["echo holyshxt>>DAMNVIRUS"],
++        metadata: {
++          filesystemEffects: "unknown", unknownCommand: "echo holyshxt>>DAMNVIRUS",
++          unknownCwd: "D:/Data/Project", unknownShell: "powershell.exe",
++        },
++      }))
++      expect(redirect.effect).toBe("ask")
++      yield* first.service.reply({ requestID: redirect.id, reply: "reject" })
++      const second = yield* waitForRequest({ ...unknown, id: Permission.ID.create("per_unknown_default_2") })
++      yield* second.service.reply({ requestID: second.request.id, reply: { scope: "session", policy: "Unknown=S" } })
++      yield* Fiber.join(second.fiber)
++      expect((yield* second.service.ask(assertion(unknown))).effect).toBe("allow")
++      yield* setRules([
++        { action: "*", resource: "*", effect: "allow" },
++        { action: "external_directory", resource: "*", effect: "ask" },
++      ])
++      const directory = yield* waitForRequest({
++        id: Permission.ID.create("per_unknown_default_dir"), action: "external_directory",
++        operations: ["read"], paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++        directories: ["D:/Data/Project"],
++      })
++      yield* directory.service.reply({ requestID: directory.request.id, reply: { scope: "session", policy: "R=S* D=D" } })
++      yield* Fiber.join(directory.fiber)
++      expect((yield* directory.service.ask(assertion(unknown))).effect).toBe("ask")
++    }),
++  )
 +  it.effect("unknown shell approvals are explicit, command-scoped, durable and never wildcarded", () =>
 +    Effect.gen(function* () {
 +      yield* setup()

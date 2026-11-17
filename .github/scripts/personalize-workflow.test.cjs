@@ -2,9 +2,10 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
+const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const { tmpdir } = require('node:os');
 
 const workflow = readFileSync(path.join(__dirname, '../workflows/weekly_customautorel.yml'), 'utf8');
 const start = workflow.indexOf('          try_build() {');
@@ -74,4 +75,74 @@ test('successful gates retain all applied optional features', () => {
   const { output, calls } = run('success');
   assert.match(output, /RESULT 0 on\/on\/on/);
   assert.match(calls, /CALL tests[\s\S]*CALL build/);
+});
+
+const regressionStart = workflow.indexOf('          run_patch_tests() {');
+const regressionEnd = workflow.indexOf('          run_opencode_build() {', regressionStart);
+assert.ok(regressionStart >= 0 && regressionEnd > regressionStart);
+const regressions = workflow.slice(regressionStart, regressionEnd).replace(/^ {10}/gm, '');
+const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs'];
+
+function runRegressions(scenario, target = '') {
+  const parent = path.join(tmpdir(), 'opencode');
+  mkdirSync(parent, { recursive: true });
+  const directory = mkdtempSync(path.join(parent, 'regression-gate-'));
+  const files = [
+    'packages/core/test/session-context-decay.test.ts',
+    'packages/core/test/session/content-guards.test.ts',
+    'packages/core/test/session-model-request-hooks.test.ts',
+    'packages/core/test/session-title.test.ts',
+    'packages/core/test/permission.test.ts',
+    'packages/core/test/permission/session-grant.test.mjs',
+    'packages/core/test/permission/service.node.test.mjs',
+    'packages/core/test/config/mcp-selection.node.test.mjs',
+    'packages/app/src/session/requests/permission-machine.node.test.mjs',
+    ...owned.map((name) => `.personalize/${name}`),
+  ];
+  try {
+    for (const file of files) {
+      if (scenario === 'missing' && file === `.personalize/${target}`) continue;
+      const location = path.join(directory, file);
+      mkdirSync(path.dirname(location), { recursive: true });
+      writeFileSync(location, '');
+    }
+    // Only the real gate's control flow runs. Every test runner is a stub.
+    const script = `
+      set -euo pipefail
+      APPLIED_RSI=off
+      bun() { echo "CALL bun $*" >&2; return 0; }
+      node() {
+        if [[ "$1" == --input-type=module ]]; then echo file:///fixture/effect.js; return 0; fi
+        echo "CALL node $*" >&2
+        if [[ "${scenario}" == failure && "$*" == *"${target}"* ]]; then return 1; fi
+        return 0
+      }
+      git() { return 0; }
+      ${regressions}
+      if run_patch_tests; then status=0; else status=$?; fi
+      echo "RESULT $status"
+    `;
+    const result = spawnSync(bash, ['--noprofile', '--norc', '-s'], {
+      input: script, cwd: directory, encoding: 'utf8', env: process.env,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return { output: result.stdout, calls: result.stderr };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+for (const name of owned) {
+  test(`missing ${name} blocks the pre-build gate`, () => {
+    assert.match(runRegressions('missing', name).output, /RESULT 1/);
+  });
+  test(`failed ${name} blocks the pre-build gate`, () => {
+    assert.match(runRegressions('failure', name).output, /RESULT 1/);
+  });
+}
+test('the pre-build gate runs all owned regressions with Effect resolved from core', () => {
+  const result = runRegressions('success');
+  assert.match(result.output, /RESULT 0/);
+  for (const name of owned) assert.ok(result.calls.includes(`../../.personalize/${name}`));
 });

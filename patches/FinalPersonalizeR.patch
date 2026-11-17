@@ -42,9 +42,10 @@ index 000000000..33bca818e
 +}
 diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
 new file mode 100644
+index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18ebdc969d4
 --- /dev/null
 +++ b/packages/core/src/plugin/personalize.ts
-@@ -0,0 +1,1062 @@
+@@ -0,0 +1,1073 @@
 +export * as PersonalizePlugin from "./personalize.js"
 +
 +// ============================================================================
@@ -67,6 +68,7 @@ new file mode 100644
 +import { Cron, DateTime, Effect } from "effect"
 +import path from "path"
 +import { randomUUID } from "node:crypto"
++import { writeFile } from "node:fs/promises"
 +import { LanguageModel, LLMClient, Message, type RequestOptions } from "@opencode/ai/effect"
 +import { HttpClientRequest } from "effect/http"
 +import { Model } from "../model.js"
@@ -114,14 +116,25 @@ new file mode 100644
 +  if (raw === undefined || raw.trim() === "") return undefined
 +  const parsed: unknown = yield* Effect.try({
 +    try: () => JSON.parse(raw),
-+    catch: () => new Tool.Error({ message: `Invalid JSON in ${file}; file preserved. Repair it, or explicitly empty it/reset it to {}.` }),
++    catch: () => new Tool.Error({ message: `Invalid JSON in ${file}; file preserved. Repair the configuration before retrying.` }),
 +  })
 +  return record(parsed) && Object.keys(parsed).length === 0 ? undefined : parsed
 +})
 +
 +const writeJsonSafe = (fs: FSUtil.Interface, file: string, value: unknown) =>
 +  fs.ensureDir(path.dirname(file)).pipe(
-+    Effect.andThen(fs.writeJson(file, value)),
++    Effect.andThen(Effect.tryPromise({
++      try: async () => {
++        try {
++          await writeFile(file, JSON.stringify(value, null, 2) + "\n", { flag: "wx" })
++          return true
++        } catch (cause) {
++          if (record(cause) && cause.code === "EEXIST") return false
++          throw cause
++        }
++      },
++      catch: (cause) => cause,
++    })),
 +    Effect.mapError((cause) => new Tool.Error({ message: `Cannot write ${file}: ${cause}` })),
 +  )
 +
@@ -648,8 +661,7 @@ new file mode 100644
 +    })
 +
 +    const seedCouncil = Effect.fn(function* (sessionID: SessionSchema.ID) {
-+      // Recheck immediately before writing. A valid but blank members array is
-+      // intentional configuration, not permission to overwrite the file.
++      // Existing files, including empty placeholders, are never overwritten.
 +      if ((yield* readJsonSafe(fs, globalCouncilPath)) !== undefined) return { path: globalCouncilPath, seeded: false }
 +      const session = yield* sessions
 +        .get(sessionID)
@@ -657,7 +669,7 @@ new file mode 100644
 +      const available = yield* models.available()
 +      const current = session.model && available.some((model) => refToString(model) === refToString(session.model!))
 +        ? refToString(session.model) : undefined
-+      // Session/model lookup yields; recheck after it immediately before saving.
++      // Exclusive creation below is the final authority even after this read.
 +      if ((yield* readJsonSafe(fs, globalCouncilPath)) !== undefined) return { path: globalCouncilPath, seeded: false }
 +      const seed = {
 +        members: [
@@ -665,8 +677,8 @@ new file mode 100644
 +          { name: "member2", model: "" },
 +        ],
 +      }
-+      yield* writeJsonSafe(fs, globalCouncilPath, seed)
-+      return { path: globalCouncilPath, seeded: true }
++      const seeded = yield* writeJsonSafe(fs, globalCouncilPath, seed)
++      return { path: globalCouncilPath, seeded }
 +    })
 +
 +    // -------------------------------------------------------------------------
@@ -858,8 +870,8 @@ new file mode 100644
 +                Effect.mapError((cause) => new Tool.Error({ message: `Cannot seed council.json: ${cause}` })),
 +              )
 +              return text(
-+                `No active council members — ${seeded.seeded ? "seeded a template" : "preserved existing configuration"} at:\n${seeded.path}\n` +
-+                  'Add two or more "provider/model" entries, then retry. Available models can be listed via the models command.',
++                `No active council members — ${seeded.seeded ? "seeded a template" : "preserved existing configuration file; it may be empty or may have changed concurrently"} at:\n${seeded.path}\n` +
++                  'Inspect the file and add two or more "provider/model" entries, then retry. Available models can be listed via the models command.',
 +              )
 +            }
 +            // Never silently change the explicitly requested reviewer panel.
@@ -1109,12 +1121,15 @@ new file mode 100644
 +})
 diff --git a/.personalize/legacy.test.mjs b/.personalize/legacy.test.mjs
 new file mode 100644
+index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541ca0c80eb
 --- /dev/null
 +++ b/.personalize/legacy.test.mjs
-@@ -0,0 +1,1128 @@
+@@ -0,0 +1,1207 @@
 +import assert from "node:assert/strict"
-+import { readFileSync } from "node:fs"
++import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
++import { writeFile as realWriteFile, readFile as realReadFile, mkdir } from "node:fs/promises"
 +import { createRequire } from "node:module"
++import { tmpdir } from "node:os"
 +import path from "node:path"
 +import { test } from "node:test"
 +import { pathToFileURL } from "node:url"
@@ -1190,10 +1205,12 @@ new file mode 100644
 +const Message = { user: (text) => ({ role: "user", content: [{ type: "text", text }] }), system: (text) => ({ role: "system", content: [{ type: "text", text }] }) }
 +const identity = { ID: { make: (id) => id } }
 +const Agents = tag("Agents"), Registry = tag("Registry")
++let writeFile = realWriteFile
 +const legacy = load("packages/core/src/plugin/personalize.ts", {
 +  path,
 +  effect: { Cron, DateTime, Effect: { ...Effect, logInfo: (...args) => Effect.sync(() => { localLogs.push(args) }) } },
 +  "node:crypto": { randomUUID },
++  "node:fs/promises": { writeFile: (...args) => writeFile(...args) },
 +  "@opencode/ai/effect": { LanguageModel, Message, LLMClient: MemberClient },
 +  "effect/http": { HttpClientRequest },
 +  "@opencode/plugin/effect/plugin": { define },
@@ -1215,7 +1232,7 @@ new file mode 100644
 +  "../session/model-request.js": { SessionModelRequest: { baseTranscript: (input) => ({ system: ["prepared-session-system"], messages: input.messages }) } },
 +  "../model-resolver.js": { Service: MemberModels.Service },
 +  "../personalize/output-request": outputRequest,
-+}, ["Plugin", "captureTrajectory", "scoreTrajectory", "normalizeCadence", "cronMatches", "nextRun", "isDue", "councilMemberOptions", "councilMemberWire", "councilTraceOrigin", "validateBallot", "validateRoute", "validateAnswer"])
++}, ["Plugin", "writeJsonSafe", "captureTrajectory", "scoreTrajectory", "normalizeCadence", "cronMatches", "nextRun", "isDue", "councilMemberOptions", "councilMemberWire", "councilTraceOrigin", "validateBallot", "validateRoute", "validateAnswer"])
 +const { Plugin } = legacy
 +const resolverDependencies = {
 +  "../model-resolver.js": { ModelResolver: { ...MemberModels, node: modelNode } },
@@ -1249,9 +1266,25 @@ new file mode 100644
 +  const tools = new Map(), commands = new Map(), files = new Map(options.files ?? [])
 +  const reads = [], writes = [], created = [], generated = [], memberRequests = [], sessionRequests = [], stockRequests = [], prompts = [], transforms = [], preparedRequests = [], scheduled = [], scheduleCalls = []
 +  const available = (options.available ?? ["one", "two", "three"]).map((id) => ({ providerID: provider, id }))
++  const globalConfig = options.realDirectory ?? global
++  writeFile = async (file, body, opts) => {
++    assert.equal(opts.flag, "wx")
++    if (options.realDirectory) {
++      await options.beforeRealWrite?.(file)
++      return realWriteFile(file, body, opts)
++    }
++    options.beforeWrite?.(file, files)
++    if (options.failWrite) throw new Error("disk denied")
++    if (files.has(file)) throw Object.assign(new Error("exists"), { code: "EEXIST" })
++    const value = JSON.parse(body)
++    writes.push([file, value])
++    files.set(file, value)
++  }
 +  const fs = {
 +    readJson: (file) => Effect.sync(() => { reads.push(file); return files.get(file) }),
-+    readFileString: (file) => Effect.suspend(() => {
++    readFileString: (file) => options.realDirectory ? Effect.tryPromise({
++      try: () => realReadFile(file, "utf8"), catch: (error) => error,
++    }) : Effect.suspend(() => {
 +      reads.push(file)
 +      if (options.failRead) return Effect.fail(Object.assign(new Error("read denied"), { code: "EACCES" }))
 +      const value = options.read?.(file, reads.length, files) ?? files.get(file)
@@ -1259,7 +1292,9 @@ new file mode 100644
 +      return Effect.succeed(typeof value === "string" ? value : JSON.stringify(value))
 +    }),
 +    makeDirectory: () => Effect.void,
-+    ensureDir: () => Effect.void,
++    ensureDir: (dir) => options.realDirectory ? Effect.tryPromise({
++      try: () => mkdir(dir, { recursive: true }), catch: (error) => error,
++    }) : Effect.void,
 +    writeJson: (file, value) => Effect.suspend(() => {
 +      if (options.failWrite) return Effect.fail(new Error("disk denied"))
 +      writes.push([file, structuredClone(value)])
@@ -1354,7 +1389,7 @@ new file mode 100644
 +    session: { prompt: (input) => Effect.sync(() => { prompts.push(input) }) },
 +  }
 +  const provide = (effect) => effect.pipe(
-+    Effect.provideService(Global.Service, { config: global }),
++    Effect.provideService(Global.Service, { config: globalConfig }),
 +    Effect.provideService(FSUtil.Service, fs),
 +    Effect.provideService(Session.Service, sessions),
 +    Effect.provideService(Model.Service, { available: () => Effect.succeed(available) }),
@@ -1532,6 +1567,63 @@ new file mode 100644
 +  assert.equal(h.writes.length, 1)
 +  assert.equal(h.writes[0][0], globalCouncil)
 +  assert.equal(h.writes[0][1].members[0].model, members[0], "seeding copies the invoking session model but never calls it")
++})
++
++test("late config at the final tool write boundary is preserved and not called seeded", async () => {
++  const replacement = '{"members":[],"note":"late"}'
++  const h = await harness({ beforeWrite: (file, files) => files.set(file, replacement) })
++  const result = output(await h.call("council", { question: "Q" }))
++  assert.match(result, /preserved existing/)
++  assert.doesNotMatch(result, /seeded a template/)
++  assert.equal(h.files.get(globalCouncil), replacement)
++})
++
++test("exclusive council writer protects real late writes and concurrent seeds", async () => {
++  const parent = path.join(tmpdir(), "opencode")
++  mkdirSync(parent, { recursive: true })
++  const directory = mkdtempSync(path.join(parent, "council-seed-"))
++  const file = path.join(directory, "council.json")
++  const fs = { ensureDir: (dir) => Effect.tryPromise({ try: () => mkdir(dir, { recursive: true }), catch: (error) => error }) }
++  try {
++    writeFile = async (...args) => {
++      await realWriteFile(file, '{"members":[],"late":true}')
++      return realWriteFile(...args)
++    }
++    assert.equal(await Effect.runPromise(legacy.writeJsonSafe(fs, file, { members: ["seed"] })), false)
++    assert.equal(await realReadFile(file, "utf8"), '{"members":[],"late":true}')
++    rmSync(file)
++    writeFile = realWriteFile
++    const results = await Promise.all(Array.from({ length: 12 }, (_, i) =>
++      Effect.runPromise(legacy.writeJsonSafe(fs, file, { members: [i] }))))
++    assert.equal(results.filter(Boolean).length, 1)
++    const saved = JSON.parse(await realReadFile(file, "utf8"))
++    assert.equal(saved.members.length, 1)
++    for (const raw of ["", "  ", "{}", "{bad", '{"members":[]}']) {
++      await realWriteFile(file, raw)
++      assert.equal(await Effect.runPromise(legacy.writeJsonSafe(fs, file, { members: ["seed"] })), false)
++      assert.equal(await realReadFile(file, "utf8"), raw)
++    }
++  } finally {
++    writeFile = realWriteFile
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
++
++test("actual council tool preserves a real concurrent file written after its final read", async () => {
++  const parent = path.join(tmpdir(), "opencode")
++  mkdirSync(parent, { recursive: true })
++  const directory = mkdtempSync(path.join(parent, "council-tool-"))
++  const replacement = '{"members":[],"note":"late real write"}'
++  try {
++    const h = await harness({ realDirectory: directory, beforeRealWrite: (file) => realWriteFile(file, replacement) })
++    const result = output(await h.call("council", { question: "Q" }))
++    assert.match(result, /preserved existing/)
++    assert.doesNotMatch(result, /seeded a template/)
++    assert.equal(await realReadFile(path.join(directory, "council.json"), "utf8"), replacement)
++  } finally {
++    writeFile = realWriteFile
++    rmSync(directory, { recursive: true, force: true })
++  }
 +})
 +
 +test("schedule add/list/export/remove delegates to the executable session engine, not JSON records", async () => {
@@ -1875,11 +1967,11 @@ new file mode 100644
 +  })
 +}
 +for (const raw of ['', ' \r\n\t', '{}', ' { } ']) {
-+  test(`empty config may be initialized from only the current valid model: ${JSON.stringify(raw)}`, async () => {
++  test(`empty config is preserved rather than overwritten: ${JSON.stringify(raw)}`, async () => {
 +    const h = await harness({ files: [[globalCouncil, raw]] })
-+    await h.call("council", {question:"Q"})
-+    assert.deepEqual(h.files.get(globalCouncil).members.map((entry)=>entry.model), [members[0], ''])
-+    assert.equal(h.writes.length, 1)
++    assert.match(output(await h.call("council", {question:"Q"})), /preserved existing/)
++    assert.equal(h.files.get(globalCouncil), raw)
++    assert.equal(h.writes.length, 0)
 +    noCalls(h)
 +  })
 +}

@@ -580,7 +580,7 @@ index 2afb8d3b85df2f3652feaed1de4c7a4ce3268c44..3e241040c56e1b5533813e57ade29f45
          save: ["*"],
          metadata: preview ? { files: [preview] } : undefined,
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
-index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcffc422e68 100644
+index b78a674d27777f5cc71f53cf0213af679dee3bd8..0c881ce576a4223315290633042ac36c0302898a 100644
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
 @@ -10,13 +10,34 @@ import { Agent } from "./agent.js"
@@ -750,7 +750,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
      })
  
      function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
-@@ -181,12 +298,33 @@ const layer = Layer.effect(
+@@ -181,12 +298,34 @@ const layer = Layer.effect(
        return rules.filter((rule) => Wildcard.match(input.action, rule.action))
      }
  
@@ -760,9 +760,8 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        if (denied(input, rules)) return { effect: "deny" as const, rules }
 +      const grants = yield* sessionGrants(input.sessionID)
 +      if (!grants) return { effect: "deny" as const, rules, message: "Invalid stored conversation filesystem policy; revoke it in session permissions." }
-+      if (SessionGrant.unknownEffectsDenied(grants, input)) {
-+        const key = unknownKey(input, grants)
-+        if (!key) return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
++      const key = unknownKey(input, grants)
++      if (key) {
 +        const root = yield* family(input.sessionID)
 +        const session = yield* sessions.get(root)
 +        if (session?.permissions?.some((rule) => rule.action === UNKNOWN_ACTION && rule.resource === key && rule.effect === "allow"))
@@ -771,6 +770,8 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
 +          return { effect: "deny" as const, rules, message: "Unknown filesystem effects require an interactive approval." }
 +        return { effect: "ask" as const, rules, message: "Unknown effects: this command may bypass filesystem denies." }
 +      }
++      if (SessionGrant.unknownEffectsDenied(grants, input))
++        return { effect: "deny" as const, rules, message: "This tool has unknown local filesystem effects which cannot be mediated under this conversation's explicit filesystem denies." }
 +      const decision = SessionGrant.decision(grants, input)
 +      if (decision === "deny") return {
 +        effect: "deny" as const, rules,
@@ -786,7 +787,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        const event = yield* hooks.trigger("permission", "evaluate", {
          sessionID: input.sessionID,
          agent: input.agent,
-@@ -197,6 +335,11 @@ const layer = Layer.effect(
+@@ -197,6 +336,11 @@ const layer = Layer.effect(
          effect,
        })
        const unattended = yield* Unattended
@@ -798,7 +799,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        if (event.effect !== "ask" || unattended === undefined)
          return { effect: event.effect, message: event.message, rules: all }
        const settled = [...all, ...unattended]
-@@ -215,6 +358,10 @@ const layer = Layer.effect(
+@@ -215,6 +359,10 @@ const layer = Layer.effect(
          sessionID: input.sessionID,
          action: input.action,
          resources: input.resources,
@@ -809,7 +810,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
          save: input.save,
          // Tools copy optional inputs straight into metadata; undefined values are not JSON and would
          // fail the HttpApi response encoder when clients list pending requests.
-@@ -241,13 +388,32 @@ const layer = Layer.effect(
+@@ -241,13 +389,32 @@ const layer = Layer.effect(
            yield* bus
              .publish(Permission.Event.Asked, request)
              .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
@@ -844,7 +845,7 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
        const value = request(input, result.message)
        if (result.effect === "ask") yield* create(value, input.agent)
        return { id: value.id, effect: result.effect }
-@@ -256,7 +422,7 @@ const layer = Layer.effect(
+@@ -256,7 +423,7 @@ const layer = Layer.effect(
      const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
        Effect.gen(function* () {
          if (closed) return yield* Effect.die(new DeclinedError())
@@ -853,13 +854,12 @@ index b78a674d27777f5cc71f53cf0213af679dee3bd8..439bf4009df70d6310cd1113304fcdcf
          return yield* Effect.uninterruptibleMask((restore) =>
            Effect.gen(function* () {
              if (result.effect === "deny") {
-@@ -308,6 +474,71 @@ const layer = Layer.effect(
+@@ -308,6 +475,70 @@ const layer = Layer.effect(
          Effect.gen(function* () {
            const existing = pending.get(input.requestID)
            if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
 +          const currentGrants = (yield* sessionGrants(existing.request.sessionID)) ?? []
-+          const key = SessionGrant.unknownEffectsDenied(currentGrants, existing.request)
-+            ? unknownKey(existing.request, currentGrants) : undefined
++          const key = unknownKey(existing.request, currentGrants)
 +          if (key) {
 +            const policy = typeof input.reply === "object" && "policy" in input.reply ? input.reply.policy.trim() : undefined
 +            if (input.reply === "always" || (policy !== undefined && !/^unknown=(?:1|s)$/i.test(policy)))
@@ -1232,7 +1232,7 @@ index b957cfe0593ad83e55e76fe62865edd07ade0a6f..7618b9da705e3a49600a5eb32c519250
                  metadata: {
                    filepath: targets.map((target) => target.resource).join(", "),
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92ac2eb20de 100644
+index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..4c2a0625ec5b7b67d610f62db1860a7723864f6b 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
 @@ -7,6 +7,7 @@ import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
@@ -1243,13 +1243,14 @@ index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92a
  import { Environment } from "../../environment/index.js"
  import { Job } from "../../job.js"
  import { FileAccess } from "../../file-access.js"
-@@ -23,6 +24,21 @@ import { toolFailure } from "../runtime.js"
+@@ -23,6 +24,25 @@ import { toolFailure } from "../runtime.js"
  
  export const name = "shell"
  export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
 +
-+// Only a literal Write-Output in system Windows PowerShell without profiles is
-+// known not to touch the filesystem. Parseable does not mean effect-free.
++// Only simple built-in queries and literal output in system Windows PowerShell
++// without profiles are known not to touch the filesystem. Parsing alone is not
++// proof: redirects, pipes, substitutions and scripts must remain unknown.
 +export function hasNoFilesystemEffects(
 +  command: string,
 +  shell: string,
@@ -1260,12 +1261,15 @@ index 0fa456f60a6c879bf4e0a78dd7a8577206782d1c..bdce8562cc1d2a81afbb8d626787c92a
 +  const expected = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 +  if (path.win32.normalize(shell).toLowerCase() !== expected.toLowerCase()) return false
 +  if (/[\r\n]/.test(command)) return false
-+  return /^[ \t]*Write-Output[ \t]+'[A-Za-z0-9 ._,:!?-]*'[ \t]*$/i.test(command)
++  const output = /^[ \t]*(?:Write-Output|Write-Host|echo)(?:[ \t]+(?:[A-Za-z0-9_.:,!?/-]+|'[A-Za-z0-9 ._,:!?/-]*'|"[A-Za-z0-9 ._,:!?/-]*"))+[ \t]*$/i
++  const date = /^[ \t]*Get-Date(?:[ \t]+-Format[ \t]+(?:[A-Za-z0-9_.:/-]+|'[A-Za-z0-9 ._,:/-]+'|"[A-Za-z0-9 ._,:/-]+"))?[ \t]*$/i
++  const query = /^[ \t]*(?:Get-Location|pwd|Get-Host|Get-Culture|Get-UICulture|Get-Random)[ \t]*$/i
++  return output.test(command) || date.test(command) || query.test(command)
 +}
  // How long a call the user interrupted waits for its stopped command to exit before settling with the output so far.
  const INTERRUPT_WAIT = "500 millis"
  
-@@ -286,17 +302,30 @@ export const Plugin = {
+@@ -286,17 +306,30 @@ export const Plugin = {
        invocation.cwd = target.absolute
        const timeout = invocation.timeout
        const parsed = yield* ShellParse.scan(invocation.command, invocation.shell, target.absolute)
@@ -1403,10 +1407,10 @@ index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd
 +  assert.deepEqual(result.editor.get("other").command, ["plugin-owned"])
 +})
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
-index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b885c5d4c5d 100644
+index 8d42e5b54a9c214989d808c883f87439ec6a87ff..696bf15ce58142ebdf125eb580e859f028294ec4 100644
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -16,10 +16,32 @@ import { Session } from "@opencode/core/session"
+@@ -16,10 +16,56 @@ import { Session } from "@opencode/core/session"
  import { SessionTable } from "@opencode/core/session/sql"
  import { SessionStore } from "@opencode/core/session/store"
  import { ShellParse } from "@opencode/core/shell/parse"
@@ -1415,11 +1419,22 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b88
  import { location } from "./fixture/location"
  import { testEffect } from "./lib/effect"
  
-+test("only literal output on the system PowerShell is classified as effect-free", () => {
++test("only simple built-in queries and literal output on system PowerShell are classified as effect-free", () => {
 +  const system = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 +  const check = (command: string, shell = system, platform = "win32", root = "C:\\Windows") =>
 +    hasNoFilesystemEffects(command, shell, platform, root)
 +  expect(check("Write-Output 'shell permission test'")).toBe(true)
++  expect(check("echo hi")).toBe(true)
++  expect(check('Write-Host "hello world"')).toBe(true)
++  expect(check("Get-Location")).toBe(true)
++  expect(check("pwd")).toBe(true)
++  expect(check("Get-Host")).toBe(true)
++  expect(check("Get-Culture")).toBe(true)
++  expect(check("Get-UICulture")).toBe(true)
++  expect(check("Get-Random")).toBe(true)
++  expect(check("Get-Date")).toBe(true)
++  expect(check("Get-Date -Format yyyy-MM-dd")).toBe(true)
++  expect(check('Get-Date -Format "yyyy-MM-dd HH:mm"')).toBe(true)
 +  for (const command of [
 +    "Write-Output 'hi'; Remove-Item file",
 +    "Write-Output 'hi' > file",
@@ -1427,9 +1442,22 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b88
 +    "Write-Output 'hi'\nRemove-Item file",
 +    'Write-Output "$(Remove-Item file)"',
 +    "Write-Output $env:PATH",
++    "Get-Date; Remove-Item file",
++    "Get-Date > file",
++    "Get-Date | Remove-Item",
++    "Get-Date\nRemove-Item file",
++    'Get-Date -Format "$(Remove-Item file)"',
++    "Get-Date -Date (Get-Content file)",
++    "echo holyshxt>>DAMNVIRUS",
++    "echo hi > file",
++    "echo hi | Remove-Item",
++    "echo hi; Remove-Item file",
++    "echo $(Remove-Item file)",
++    'echo "$($env:malicious)"',
++    "Get-Location | Remove-Item",
++    "Get-Process",
 +    "npm run dev",
 +    "Remove-Item file",
-+    "echo 'hi'",
 +  ]) expect(check(command)).toBe(false)
 +  expect(check("Write-Output 'hi'", "C:\\temp\\powershell.exe")).toBe(false)
 +  expect(check("Write-Output 'hi'", system, "linux")).toBe(false)
@@ -1439,10 +1467,52 @@ index 8d42e5b54a9c214989d808c883f87439ec6a87ff..fa9a1ad27c0203e0721fd96d7db03b88
  const current = Layer.succeed(
    Location.Service,
    Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
-@@ -98,6 +120,106 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+@@ -98,6 +144,148 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
  }
  
  describe("Permission", () => {
++  it.effect("unknown shell commands ask by default even without filesystem denies", () =>
++    Effect.gen(function* () {
++      yield* setup([{ action: "*", resource: "*", effect: "allow" }])
++      const unknown = {
++        action: "shell",
++        resources: ["npm run dev"],
++        metadata: {
++          filesystemEffects: "unknown", unknownCommand: "npm run dev",
++          unknownCwd: "D:/Data/Project", unknownShell: "powershell.exe",
++        },
++      }
++      const first = yield* waitForRequest(unknown)
++      expect(first.request.message).toContain("Unknown effects:")
++      yield* first.service.reply({ requestID: first.request.id, reply: "once" })
++      yield* Fiber.join(first.fiber)
++      const redirect = yield* first.service.ask(assertion({
++        id: Permission.ID.create("per_unknown_redirect"), action: "shell", resources: ["echo holyshxt>>DAMNVIRUS"],
++        metadata: {
++          filesystemEffects: "unknown", unknownCommand: "echo holyshxt>>DAMNVIRUS",
++          unknownCwd: "D:/Data/Project", unknownShell: "powershell.exe",
++        },
++      }))
++      expect(redirect.effect).toBe("ask")
++      yield* first.service.reply({ requestID: redirect.id, reply: "reject" })
++      const second = yield* waitForRequest({ ...unknown, id: Permission.ID.create("per_unknown_default_2") })
++      yield* second.service.reply({ requestID: second.request.id, reply: { scope: "session", policy: "Unknown=S" } })
++      yield* Fiber.join(second.fiber)
++      expect((yield* second.service.ask(assertion(unknown))).effect).toBe("allow")
++      yield* setRules([
++        { action: "*", resource: "*", effect: "allow" },
++        { action: "external_directory", resource: "*", effect: "ask" },
++      ])
++      const directory = yield* waitForRequest({
++        id: Permission.ID.create("per_unknown_default_dir"), action: "external_directory",
++        operations: ["read"], paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++        directories: ["D:/Data/Project"],
++      })
++      yield* directory.service.reply({ requestID: directory.request.id, reply: { scope: "session", policy: "R=S* D=D" } })
++      yield* Fiber.join(directory.fiber)
++      expect((yield* directory.service.ask(assertion(unknown))).effect).toBe("ask")
++    }),
++  )
 +  it.effect("unknown shell approvals are explicit, command-scoped, durable and never wildcarded", () =>
 +    Effect.gen(function* () {
 +      yield* setup()

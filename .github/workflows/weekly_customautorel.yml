@@ -494,6 +494,28 @@ jobs:
               echo "ERROR: mandatory permission regressions FAILED -- refusing to build this ref"
               return 1
             fi
+            # Owned lifetime and evidence-retention regressions are mandatory too.
+            # Resolve Effect from its owning package, not the repository root.
+            local owned_tests=(
+              .personalize/context-decay.test.mjs
+              .personalize/lifetime-effect.test.mjs
+              .personalize/lifetime.test.mjs
+            )
+            for f in "${owned_tests[@]}"; do
+              if [ ! -f "$f" ]; then
+                echo "ERROR: mandatory owned regression missing: $f"
+                return 1
+              fi
+            done
+            if ! (cd packages/core &&
+              PERSONALIZE_EFFECT="$(node --input-type=module -e 'console.log(import.meta.resolve("effect"))')" \
+                node --experimental-transform-types --test \
+                ../../.personalize/context-decay.test.mjs \
+                ../../.personalize/lifetime-effect.test.mjs \
+                ../../.personalize/lifetime.test.mjs); then
+              echo "ERROR: lifetime/context regressions FAILED -- refusing to build this ref"
+              return 1
+            fi
             if [ "${APPLIED_RSI:-off}" = "on" ]; then
               if ! (cd packages/core && node --test ../../.personalize/subagent-capabilities.test.mjs); then
                 echo "ERROR: subagent capability regressions FAILED -- refusing to build this ref"

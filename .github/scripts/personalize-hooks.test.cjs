@@ -14,6 +14,11 @@ test('the mandatory base embeds the complete pinned permissions patch', () => {
   const patches = Object.fromEntries(names.map((name) => [name, readFileSync(path.join(dir, name), 'utf8')]));
   const permissions = readFileSync(path.join(dir, 'HarnessPermissions.base.patch'), 'utf8');
   assert.equal(analyze(patches, undefined, permissions).permissionFiles, 33);
+  const stripped = Object.fromEntries(Object.entries(patches).map(([name, patch]) => [
+    name, patch.split(/(?=^diff --git )/m).filter((section) =>
+      !section.startsWith('diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts\n')).join(''),
+  ]));
+  assert.throws(() => analyze(stripped, undefined, permissions), /does not load the owned module boundaries/);
   assert.throws(
     () => analyze({ ...patches, 'FinalPERSONALIZE.patch': patches['FinalPERSONALIZE.patch'].slice(0, -1) }, undefined, permissions),
     /permissions are missing or altered/,
@@ -83,7 +88,7 @@ test('invalid manifest JSON reports the manifest, not a raw SyntaxError', () => 
 
 test('a delivered manifest requires the build shim that loads it', () => {
   assert.throws(() => analyze({ core: manifestSection() }), /Missing owned build shim/);
-  assert.deepEqual(analyze({ core: manifestSection() + shimSection() }), { files: 0, hunks: 0, owned: 2 });
+  assert.throws(() => analyze({ core: manifestSection() + shimSection() }), /does not load the owned module boundaries/);
 });
 
 test('the allowed build hook must load the owned module boundaries', () => {
@@ -107,7 +112,7 @@ test('new-file body lines starting with "++" survive extraction and still get ch
     const broken = ownedLines('owned.ts', ['export const decorate = (stock) => ({})', '++ stock.hidden']);
     assert.throws(() => analyze({ core: manifest + broken }, directory), /non-public export: stock\.ts#hidden/);
     const good = ownedLines('owned.ts', ['export const decorate = (stock) => ({})', '++ stock.visible']);
-    assert.deepEqual(analyze({ core: manifest + good + shimSection() }, directory), { files: 0, hunks: 0, owned: 3 });
+    assert.deepEqual(analyze({ core: manifest + good + shimSection() + hookWith(ALLOWED, 'PersonalizeBuild') }, directory), { files: 1, hunks: 1, owned: 3 });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -134,7 +139,7 @@ test('context-provider destructuring exports the alias, including multiline bind
     writeFileSync(path.join(directory, 'stock.ts'), 'export const {\n  use: useClient,\n  provider: ClientProvider,\n} = context()\n');
     const fixture = (name) => owned('.personalize/manifest.json', JSON.stringify({ modules: [
       { target: 'stock.ts', factory: 'owned.ts', exports: [name] },
-    ] })) + owned('owned.ts', `export const decorate = (stock) => ({ ${name}: stock.${name} })`) + shimSection();
+    ] })) + owned('owned.ts', `export const decorate = (stock) => ({ ${name}: stock.${name} })`) + shimSection() + hookWith(ALLOWED, 'PersonalizeBuild');
     assert.doesNotThrow(() => analyze({ core: fixture('ClientProvider') }, directory));
     assert.doesNotThrow(() => analyze({ core: fixture('useClient') }, directory));
     assert.throws(() => analyze({ core: fixture('provider') }, directory), /Public export changed/);

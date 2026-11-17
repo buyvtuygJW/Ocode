@@ -24,13 +24,15 @@ async function loader(input = source.slice(0, end), specifier = 'fixture') {
     },
   } });
   let nodeModuleImports = 0;
+  const noIO = () => { throw new Error('Filesystem I/O is forbidden in the synthetic loader check'); };
   const synthetic = async (name) => {
     if (name === 'node:module') nodeModuleImports++;
     const exports = name === 'node:module' ? { createRequire: () => ({ resolve: (specifier) => {
       if (specifier === 'effect/__missing') throw Object.assign(new Error('Missing Effect module'), { code: 'MODULE_NOT_FOUND' });
       return '/fixture/effect.js';
     } }) }
-      : name === 'node:fs' ? { readFileSync: () => 'fixture TypeScript' }
+      : name === 'node:fs' ? { readFileSync: () => 'fixture TypeScript', mkdirSync: noIO, mkdtempSync: noIO, rmSync: noIO }
+      : name === 'node:fs/promises' ? { readFile: noIO, writeFile: noIO, mkdir: noIO }
       : name.startsWith('node:') ? await import(name)
       : { Context: {}, Deferred: {}, Effect: {}, JsonSchema: {}, Schema: {}, Scope: {} };
     const module = new vm.SyntheticModule(Object.keys(exports), function () {
