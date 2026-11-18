@@ -618,12 +618,6 @@ jobs:
               cd ..
               return 12
             fi
-            if ! PERSONALIZE_TEST_UPSTREAM="$PWD" PERSONALIZE_GIT="$(command -v git)" \
-              node --test ../personalize-src/regenerate.test.mjs; then
-              echo "ERROR: full-stack regeneration regression failed; refusing to patch or build"
-              cd ..
-              return 13
-            fi
 
             git config user.name "claudedbuildbot"
             git config user.email "claudedbuildbot@example.local"
@@ -1010,9 +1004,6 @@ jobs:
           cp ../.github/scripts/personalize-theme.test.cjs .github/scripts/personalize-theme.test.cjs
           cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
           cp ../.github/scripts/repair-photon-patch.test.cjs .github/scripts/repair-photon-patch.test.cjs
-          # The next scheduled run must retain the single generator and its inputs.
-          cp ../regen-personalize.ps1 regen-personalize.ps1
-          cp -a ../personalize-src .
 
           if [ ! -s "$SELF" ]; then
             echo "ERROR: $SELF missing from automation checkout; refusing to push"

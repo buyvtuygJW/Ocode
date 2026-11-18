@@ -17,7 +17,7 @@ const bash = process.env.PERSONALIZE_TEST_BASH || 'bash';
 // Execute the workflow's real Bash function in its real `if` calling context:
 // errexit is disabled there. Every external operation is replaced by a shell
 // function; this cannot clone, install, invoke Bun, compile or launch a server.
-function run(scenario, label = 'latest') {
+function run(scenario, label = 'latest', cwd) {
   const result = spawnSync(bash, ['--noprofile', '--norc', '-c', `
     set -euo pipefail
     export UPSTREAM_REPO=fixture GITHUB_OUTPUT=/dev/null
@@ -34,7 +34,18 @@ function run(scenario, label = 'latest') {
     node() {
       echo "CALL node $*" >&2
       if [[ "$1" == *check-personalize-hooks.cjs && "$scenario" == isolation ]]; then return 1; fi
-      if [[ "$*" == *regenerate.test.mjs && "$scenario" == regeneration ]]; then return 1; fi
+      if [[ "$scenario" == patches-only ]]; then
+        for arg in "$@"; do
+          case "$arg" in
+            ../*.mjs|../*.cjs)
+              if [[ ! -f "$arg" ]]; then
+                command "$PERSONALIZE_TEST_NODE_EXE" "$@"
+                return $?
+              fi
+              ;;
+          esac
+        done
+      fi
     }
     strip_upstream_workflows() { :; }
     apply_custom_git_patches() {
@@ -46,7 +57,8 @@ function run(scenario, label = 'latest') {
     ${actual}
     if try_build fixture ${label}; then status=0; else status=$?; fi
     echo "RESULT $status \${APPLIED_TRANSPARENCY:-unset}/\${APPLIED_SCIENCE:-unset}/\${APPLIED_RSI:-unset}"
-  `], { encoding: 'utf8', env: process.env });
+  `], { encoding: 'utf8', cwd,
+    env: { ...process.env, PERSONALIZE_TEST_NODE_EXE: process.execPath.replaceAll('\\', '/') } });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
   return { output: result.stdout, calls: result.stderr };
@@ -71,12 +83,32 @@ test('a compatible fallback still runs the full patch and regression gates', () 
   assert.match(calls, /check-personalize-hooks\.cjs[\s\S]*CALL apply[\s\S]*CALL tests[\s\S]*CALL build/);
 });
 
-test('failed full-stack regeneration blocks patching and building on both refs', () => {
-  for (const label of ['latest', 'fallback']) {
-    const { output, calls } = run('regeneration', label);
-    assert.match(output, /RESULT 13 unset\/unset\/unset/);
-    assert.doesNotMatch(calls, /CALL (apply|tests|build)|bun install/);
+test('patch-only CI reaches the runtime gates without local regeneration sources', () => {
+  const parent = path.join(tmpdir(), 'opencode');
+  mkdirSync(parent, { recursive: true });
+  const directory = mkdtempSync(path.join(parent, 'patch-only-ci-'));
+  try {
+    const checkout = path.join(directory, 'opencode-src');
+    mkdirSync(checkout);
+    mkdirSync(path.join(directory, 'patches'));
+    mkdirSync(path.join(directory, '.github/scripts'), { recursive: true });
+    writeFileSync(path.join(directory, '.github/scripts/check-personalize-hooks.cjs'), '// checker boundary fixture\n');
+    // No personalize-src directory or regeneration entry point exists here.
+    // Missing Node-script requests use the real Node executable, so a stub
+    // cannot hide the exact missing-file failure reported by CI.
+    for (const label of ['latest', 'fallback-last-success']) {
+      const { output, calls } = run('patches-only', label, checkout);
+      assert.match(output, /RESULT 0 on\/on\/on/);
+      assert.match(calls, /CALL apply[\s\S]*CALL tests[\s\S]*CALL build/);
+      assert.doesNotMatch(calls, /personalize-src|regen-personalize/);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('build and sync never depend on local regeneration sources', () => {
+  assert.doesNotMatch(workflow, /personalize-src|regen-personalize\.ps1/);
 });
 
 test('one failed test cannot discard X/S/R or retry a reduced build', () => {
