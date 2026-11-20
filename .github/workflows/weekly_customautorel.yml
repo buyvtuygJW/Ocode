@@ -444,6 +444,7 @@ jobs:
               packages/core/test/session-model-request-hooks.test.ts
               packages/core/test/session-title.test.ts
               packages/core/test/permission.test.ts
+              packages/core/test/permission/personalize.integration.test.ts
             )
             # This test is owned by optional FinalPersonalizeR, not the core patch.
             # Require it when R is applied; do not require it after dropping R.
@@ -501,6 +502,8 @@ jobs:
               .personalize/lifetime-effect.test.mjs
               .personalize/lifetime.test.mjs
               .personalize/session-title.test.mjs
+              .personalize/permission-contract.test.mjs
+              .personalize/single-executable.test.mjs
             )
             for f in "${owned_tests[@]}"; do
               if [ ! -f "$f" ]; then
@@ -514,7 +517,9 @@ jobs:
                 ../../.personalize/context-decay.test.mjs \
                 ../../.personalize/lifetime-effect.test.mjs \
                 ../../.personalize/lifetime.test.mjs \
-                ../../.personalize/session-title.test.mjs); then
+                ../../.personalize/session-title.test.mjs \
+                ../../.personalize/permission-contract.test.mjs \
+                ../../.personalize/single-executable.test.mjs); then
               echo "ERROR: lifetime/context/title regressions FAILED -- refusing to build this ref"
               return 1
             fi

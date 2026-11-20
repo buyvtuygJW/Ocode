@@ -135,7 +135,10 @@ const regressionStart = workflow.indexOf('          run_patch_tests() {');
 const regressionEnd = workflow.indexOf('          run_opencode_build() {', regressionStart);
 assert.ok(regressionStart >= 0 && regressionEnd > regressionStart);
 const regressions = workflow.slice(regressionStart, regressionEnd).replace(/^ {10}/gm, '');
-const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs'];
+const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs',
+  'permission-contract.test.mjs', 'single-executable.test.mjs'];
+const permissionRegressions = ['packages/core/test/permission/personalize.integration.test.ts',
+  'packages/core/test/permission/service.node.test.mjs'];
 
 function runRegressions(scenario, target = '') {
   const parent = path.join(tmpdir(), 'opencode');
@@ -147,6 +150,7 @@ function runRegressions(scenario, target = '') {
     'packages/core/test/session-model-request-hooks.test.ts',
     'packages/core/test/session-title.test.ts',
     'packages/core/test/permission.test.ts',
+    'packages/core/test/permission/personalize.integration.test.ts',
     'packages/core/test/permission/session-grant.test.mjs',
     'packages/core/test/permission/service.node.test.mjs',
     'packages/core/test/config/mcp-selection.node.test.mjs',
@@ -155,7 +159,7 @@ function runRegressions(scenario, target = '') {
   ];
   try {
     for (const file of files) {
-      if (scenario === 'missing' && file === `.personalize/${target}`) continue;
+      if (scenario === 'missing' && file === (target.includes('/') ? target : `.personalize/${target}`)) continue;
       const location = path.join(directory, file);
       mkdirSync(path.dirname(location), { recursive: true });
       writeFileSync(location, '');
@@ -164,11 +168,15 @@ function runRegressions(scenario, target = '') {
     const script = `
       set -euo pipefail
       APPLIED_RSI=off
-      bun() { echo "CALL bun $*" >&2; return 0; }
+      bun() {
+        echo "CALL bun $*" >&2
+        if [[ "${scenario}" == failure && "$*" == *"${path.basename(target)}"* ]]; then return 1; fi
+        return 0
+      }
       node() {
         if [[ "$1" == --input-type=module ]]; then echo file:///fixture/effect.js; return 0; fi
         echo "CALL node $*" >&2
-        if [[ "${scenario}" == failure && "$*" == *"${target}"* ]]; then return 1; fi
+        if [[ "${scenario}" == failure && "$*" == *"${path.basename(target)}"* ]]; then return 1; fi
         return 0
       }
       git() { return 0; }
@@ -187,7 +195,7 @@ function runRegressions(scenario, target = '') {
   }
 }
 
-for (const name of owned) {
+for (const name of [...owned, ...permissionRegressions]) {
   test(`missing ${name} blocks the pre-build gate`, () => {
     assert.match(runRegressions('missing', name).output, /RESULT 1/);
   });
@@ -199,4 +207,6 @@ test('the pre-build gate runs all owned regressions with Effect resolved from co
   const result = runRegressions('success');
   assert.match(result.output, /RESULT 0/);
   for (const name of owned) assert.ok(result.calls.includes(`../../.personalize/${name}`));
+  assert.ok(result.calls.includes('test/permission/personalize.integration.test.ts'));
+  assert.ok(result.calls.includes('packages/core/test/permission/service.node.test.mjs'));
 });

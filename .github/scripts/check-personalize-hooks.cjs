@@ -1,7 +1,11 @@
 'use strict';
 
 // Enforces the personalization isolation contract on the generated patch set:
-//   * at most FOUR upstream hook hunks, all inside packages/cli/script/build.ts;
+//   * at most THREE upstream integration points across the COMPLETE release:
+//     every edit hunk (including permissions, titles and tests) plus every
+//     distinct upstream module replaced/decorated by a delivered manifest;
+//   * outside the pinned permission/title segments, only the CLI bootstrap may
+//     edit an upstream file;
 //   * everything else ships as OWNED new files (no renames, no binary sections,
 //     no path traversal, no collisions with upstream files);
 //   * every manifest entry's owned modules are actually delivered by the patches;
@@ -11,8 +15,8 @@
 //   * with --upstream: declared exports and every `stock.X` access in a factory
 //     still resolve to public exports of the LIVE upstream module.
 //
-// This FOUR-hunk budget covers the owned-module bootstrap ONLY. Mandatory
-// permission and title edits are separate, explicitly reported coupling.
+// analyze() verifies segment integrity and bootstrap wiring; it is NOT a release
+// approval. enforceReleaseBudget() must see the unstripped patch set, with titles.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -101,6 +105,7 @@ function addedLines(section, file) {
 
 function analyze(patches, upstream, permissions, review = {}) {
   let permissionFiles = 0;
+  const permissionAdditions = new Set();
   if (permissions !== undefined) {
     const required = String(permissions).replaceAll('\r\n', '\n');
     const hash = createHash('sha256').update(required).digest('hex');
@@ -114,6 +119,7 @@ function analyze(patches, upstream, permissions, review = {}) {
       const file = safePath(PERMISSIONS, diffPath(PERMISSIONS, section));
       if (seen.has(file)) throw new Error(`Duplicate permission file: ${file}`);
       seen.add(file);
+      if (section.includes('\n--- /dev/null\n')) permissionAdditions.add(file);
       if (upstream) {
         const exists = fs.existsSync(path.join(upstream, file));
         if (section.includes('\n--- /dev/null\n') && exists) throw new Error(`Permission file collision with upstream: ${file}`);
@@ -121,7 +127,9 @@ function analyze(patches, upstream, permissions, review = {}) {
       }
     }
     permissionFiles = seen.size;
-    if (permissionFiles !== 33) throw new Error(`Expected 33 mandatory permission files; found ${permissionFiles}`);
+    const expectedFiles = review.permissionFileCount ?? 33;
+    if (!Number.isSafeInteger(expectedFiles) || expectedFiles < 0) throw new Error('Invalid reviewed permission file count');
+    if (permissionFiles !== expectedFiles) throw new Error(`Expected ${expectedFiles} mandatory permission files; found ${permissionFiles}`);
     patches = { ...patches, [MANDATORY]: base.slice(0, -required.length) };
   }
   const hooks = [];
@@ -133,6 +141,7 @@ function analyze(patches, upstream, permissions, review = {}) {
       .filter((s) => s.startsWith('diff --git '))) {
       const file = safePath(name, diffPath(name, section));
       if (section.includes('\n--- /dev/null\n')) {
+        if (permissionAdditions.has(file)) throw new Error(`Duplicate owned file across mandatory permissions: ${file}`);
         if (additions.has(file)) throw new Error(`Duplicate owned file: ${file}`);
         if (upstream && fs.existsSync(path.join(upstream, file))) {
           throw new Error(`Owned-file collision with upstream: ${file}`);
@@ -146,7 +155,7 @@ function analyze(patches, upstream, permissions, review = {}) {
     }
   }
   const hunks = hooks.reduce((sum, entry) => sum + entry.hunks, 0);
-  if (hunks > 4) throw new Error(`Maximum four upstream hook points; found ${hunks}`);
+  if (hunks > 3) throw new Error(`Maximum three upstream bootstrap hook points; found ${hunks}`);
 
   const delivered = MANIFESTS.filter((name) => additions.has(`.personalize/${name}`));
   for (const name of delivered) {
@@ -215,6 +224,38 @@ function footprint(patches) {
   return { files: modified.size, hunks };
 }
 
+function enforceReleaseBudget(patches) {
+  const total = footprint(patches);
+  const bindings = moduleBoundaries(patches);
+  if (total.hunks + bindings.length > 3 || total.files > 3) {
+    throw new Error(
+      `Release rejected: maximum 3 upstream edit points/injection points across all patches; found ${total.files} existing files, ${total.hunks} hunks, ${bindings.length} public-module injection targets. ` +
+      'Permissions, titles and upstream tests are not exempt. Refactor the integration; do not force conflicts or hide edits in owned replacements.'
+    );
+  }
+  return total;
+}
+
+function moduleBoundaries(patches) {
+  const targets = new Set();
+  for (const [name, text] of Object.entries(patches)) {
+    for (const section of String(text).replaceAll('\r\n', '\n').split(/(?=^diff --git )/m)) {
+      if (!section.startsWith('diff --git ')) continue;
+      const file = safePath(name, diffPath(name, section));
+      if (!MANIFESTS.some((manifest) => file === `.personalize/${manifest}`)) continue;
+      // Non-owned manifests cannot be safely reconstructed from a diff alone.
+      if (!section.includes('\n--- /dev/null\n')) throw new Error(`Manifest must be an owned addition: ${file}`);
+      const manifest = JSON.parse(ownedBody(name, file, section));
+      if (!Array.isArray(manifest?.modules)) throw new Error(`${file} must contain a modules array`);
+      for (const entry of manifest.modules) {
+        if (typeof entry?.target !== 'string') throw new Error(`${file} entry without a target`);
+        targets.add(safePath(file, entry.target));
+      }
+    }
+  }
+  return [...targets].sort();
+}
+
 function verifyTitle(text, upstream, expected = TITLE_SHA256) {
   const normalized = String(text).replaceAll('\r\n', '\n');
   if (createHash('sha256').update(normalized).digest('hex') !== expected)
@@ -255,11 +296,15 @@ if (require.main === module) {
   const titlePath = path.join(directory, 'SessionTitleNaming.patch');
   if (!fs.existsSync(titlePath)) throw new Error(`Missing mandatory title patch: ${titlePath}`);
   verifyTitle(fs.readFileSync(titlePath, 'utf8'), upstream);
-  const total = footprint({ ...patches, 'SessionTitleNaming.patch': fs.readFileSync(titlePath, 'utf8') });
+  const release = { ...patches, 'SessionTitleNaming.patch': fs.readFileSync(titlePath, 'utf8') };
+  const total = footprint(release);
   console.log(
-    `Owned-module bootstrap budget PASS: ${result.hunks}/4 hunks across ${result.files} upstream file; ${result.owned} owned files; ${result.permissionFiles} mandatory permission files verified separately.`
+    `Segment integrity checked: ${result.owned} owned files; ${result.permissionFiles} mandatory permission files. Bootstrap alone uses ${result.hunks} hunks; this is not a release-budget approval.`
   );
-  console.log(`FULL release upstream footprint (including permissions and titles): ${total.files} existing files, ${total.hunks} hunks. This is not a four-hook permission implementation.`);
+  console.log(`FULL release upstream footprint (including permissions, titles and upstream tests): ${total.files} existing files, ${total.hunks} hunks.`);
+  console.log(`Public-module injection targets: ${moduleBoundaries(release).length}; these also consume the three-point budget.`);
+  enforceReleaseBudget(release);
+  console.log(`Release integration budget PASS: ${total.hunks + moduleBoundaries(release).length}/3 edit/injection points.`);
 }
 
-module.exports = { analyze, footprint, verifyTitle };
+module.exports = { analyze, footprint, moduleBoundaries, enforceReleaseBudget, verifyTitle };
