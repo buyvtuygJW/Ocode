@@ -42,10 +42,10 @@ index 000000000..33bca818e
 +}
 diff --git a/packages/core/src/plugin/personalize.ts b/packages/core/src/plugin/personalize.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18ebdc969d4
+index 0000000000000000000000000000000000000000..5e5589ec371f0065e5ff027b80df81ffb6e7dc4f
 --- /dev/null
 +++ b/packages/core/src/plugin/personalize.ts
-@@ -0,0 +1,1073 @@
+@@ -0,0 +1,1020 @@
 +export * as PersonalizePlugin from "./personalize.js"
 +
 +// ============================================================================
@@ -73,7 +73,8 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +import { HttpClientRequest } from "effect/http"
 +import { Model } from "../model.js"
 +import { Session } from "../session.js"
-+import { Schedule } from "../schedule.js"
++import { Automation } from "../automation.js"
++import { Permission } from "../permission.js"
 +import { SessionContext } from "../session/context.js"
 +import { Instance } from "../instance/service.js"
 +import { Database } from "../database/database.js"
@@ -246,7 +247,7 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +
 +const DESC_SCHEDULE =
 +  "Manage executable schedules for the current session using the shared schedule engine. " +
-+  "Requires experimental.schedules=true and a running server; due prompts may invoke the model/tools. " +
++  "Requires experimental.automations=true and a running server; due prompts may invoke the model/tools. " +
 +  "Actions: add (name + cadence + prompt), list, remove (name or id), export. " +
 +  "Legacy scheduled_tasks.json records are export-only until explicitly recreated.\n"
 +
@@ -256,40 +257,11 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +  "export. Cadence accepts 5-field cron (m h dom mon dow) or shorthand: @hourly, @daily, @weekly, " +
 +  "every <N> minutes/hours. Relay actual engine status/errors; never claim execution merely from a stored record.\n"
 +
-+type ScheduleEntry = {
-+  name: string
-+  cadence: string
-+  prompt: string
-+  created: string
-+  last?: string
-+}
-+
 +type ScheduleInput = {
 +  action?: "add" | "list" | "remove" | "export"
 +  name?: string
 +  cadence?: string
 +  prompt?: string
-+}
-+
-+const matchField = (field: string, value: number, max: number): boolean => {
-+  if (field === "*") return true
-+  return field.split(",").some((part) => {
-+    const step = part.split("/")
-+    const range = step[0] ?? "*"
-+    const every = step[1] === undefined ? 1 : Number(step[1])
-+    if (!Number.isFinite(every) || every <= 0) return false
-+    let lo = 0
-+    let hi = max
-+    if (range !== "*") {
-+      const bounds = range.split("-")
-+      const from = Number(bounds[0])
-+      const to = bounds[1] === undefined ? from : Number(bounds[1])
-+      if (!Number.isFinite(from) || !Number.isFinite(to)) return false
-+      lo = from
-+      hi = to
-+    }
-+    return value >= lo && value <= hi && (value - lo) % every === 0
-+  })
 +}
 +
 +const normalizeCadence = (cadence: string): string | undefined => {
@@ -307,32 +279,6 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +  const fields = value.split(/\s+/)
 +  if (fields.length !== 5) return undefined
 +  try { Cron.parseUnsafe(fields.join(" ")); return fields.join(" ") } catch { return undefined }
-+}
-+
-+const cronMatches = (cron: string, date: Date): boolean => {
-+  const [minute, hour, dom, month, dow] = cron.split(" ")
-+  return (
-+    matchField(minute ?? "*", date.getMinutes(), 59) &&
-+    matchField(hour ?? "*", date.getHours(), 23) &&
-+    matchField(dom ?? "*", date.getDate(), 31) &&
-+    matchField(month ?? "*", date.getMonth() + 1, 12) &&
-+    matchField(dow ?? "*", date.getDay(), 6)
-+  )
-+}
-+
-+const nextRun = (cron: string, from: Date): Date | undefined => {
-+  const interval = cron.match(/^every (\d+) (minutes|hours)$/)
-+  if (interval) {
-+    const next = new Date(from.getTime() + Number(interval[1]) * (interval[2] === "hours" ? 3_600_000 : 60_000))
-+    return Number.isFinite(next.getTime()) ? next : undefined
-+  }
-+  try { return Cron.next(Cron.parseUnsafe(cron), from) } catch { return undefined }
-+}
-+
-+const isDue = (entry: ScheduleEntry, now: Date): boolean => {
-+  const since = new Date(entry.last ?? entry.created)
-+  const upcoming = nextRun(entry.cadence, since)
-+  return upcoming !== undefined && upcoming.getTime() <= now.getTime()
 +}
 +
 +// ----------------------------------------------------------------------------
@@ -559,7 +505,7 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +    const memberClient = yield* LLMClient.Service
 +    const instances = yield* Instance.Service
 +    const database = yield* Database.Service
-+    const schedules = yield* Schedule.Service
++    const schedules = yield* Automation.Service
 +    const agents = yield* Agent.Service
 +    const registry = yield* Service
 +    const projectDirectory = ctx.location.directory
@@ -582,7 +528,7 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +      return yield* Effect.gen(function* () {
 +        const context = yield* SessionContext.Service
 +        const selection = yield* context.select(sessionID)
-+        const model = yield* context.resolveModel(selection.session)
++        const model = yield* context.resolveModel(selection.session, { kind: "primary", agent: selection.agent.id })
 +        const history = yield* SessionHistory.preview(database.db, selection.session.id, selection.instructions, model.ref)
 +        const transcript = SessionModelRequest.baseTranscript({
 +          agent: selection.agent.info, model, tools: selection.tools, initial: history.initial, messages: history.messages,
@@ -770,16 +716,17 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +                const cron = normalizeCadence(input.cadence)
 +                if (cron === undefined)
 +                  return yield* new Tool.Error({ message: `Unparseable cadence: "${input.cadence}"` })
-+                if (!(yield* schedules.enabled(context.sessionID)))
-+                  return yield* new Tool.Error({ message: "Schedule execution is disabled: enable experimental.schedules for this session's location before adding jobs." })
++                const session = yield* sessions.get(context.sessionID)
++                if (!(yield* schedules.enabled(session.location.directory)))
++                  return yield* new Tool.Error({ message: "Schedule execution is disabled: enable experimental.automations for this session's location before adding jobs." })
 +                if (tasks.some((task) => task.name === input.name))
 +                  return yield* new Tool.Error({ message: `Schedule "${input.name}" already exists; remove it explicitly before replacing it.` })
 +                const interval = cron.match(/^every (\d+) (minutes|hours)$/)
 +                const task = yield* schedules.create({
 +                  sessionID: context.sessionID, name: input.name,
-+                  when: interval ? { type: "every", every: `${interval[1]} ${interval[2]}` } : { type: "cron", cron },
++                  trigger: interval ? { type: "every", every: `${interval[1]} ${interval[2]}` } : { type: "cron", cron },
 +                  action: { type: "prompt", prompt: input.prompt },
-+                })
++                }, Permission.invocation(context))
 +                return text(`Scheduled "${task.name}" [${task.id}] (${cron}). Status: ${task.status}; next: ${task.nextDueAt ? DateTime.formatIso(task.nextDueAt) : "none"}. Runs through the server schedule engine.`)
 +              }
 +              case "remove": {
@@ -1121,10 +1068,10 @@ index 0000000000000000000000000000000000000000..7bf860149ec61a2a4c1b600d7b68d18e
 +})
 diff --git a/.personalize/legacy.test.mjs b/.personalize/legacy.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541ca0c80eb
+index 0000000000000000000000000000000000000000..e846a108bb9230ea990a07f2147d6666774f2899
 --- /dev/null
 +++ b/.personalize/legacy.test.mjs
-@@ -0,0 +1,1207 @@
+@@ -0,0 +1,1223 @@
 +import assert from "node:assert/strict"
 +import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 +import { writeFile as realWriteFile, readFile as realReadFile, mkdir } from "node:fs/promises"
@@ -1191,7 +1138,10 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +const MemberModels = tag("MemberModels"), MemberClient = tag("MemberClient")
 +const Instance = { ...tag("Instance"), node: { name: "fixture-instance" } }
 +const Database = { ...tag("Database"), node: { name: "fixture-database" } }
-+const SessionContext = tag("SessionContext"), Schedule = tag("Schedule")
++const SessionContext = tag("SessionContext"), Automation = tag("Automation")
++const Permission = { invocation: ({ sessionID, agent, messageID, id }) => ({
++  sessionID, agent, source: { type: "tool", messageID, id },
++}) }
 +const modelNode = { name: "fixture-model-resolver" }
 +const localLogs = []
 +const outputPolicy = load("packages/core/src/personalize/output-policy.ts", {}, ["capBody", "outputCap", "outputEffort"])
@@ -1224,7 +1174,8 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +  "../agent.js": { Agent: Agents },
 +  "../tool.js": { Service: Registry.Service },
 +  "../personalize/subagent-capabilities.js": { registerSubagentCapabilities() {} },
-+  "../schedule.js": { Schedule },
++  "../automation.js": { Automation },
++  "../permission.js": { Permission },
 +  "../instance/service.js": { Instance },
 +  "../database/database.js": { Database },
 +  "../session/context.js": { SessionContext },
@@ -1232,7 +1183,7 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +  "../session/model-request.js": { SessionModelRequest: { baseTranscript: (input) => ({ system: ["prepared-session-system"], messages: input.messages }) } },
 +  "../model-resolver.js": { Service: MemberModels.Service },
 +  "../personalize/output-request": outputRequest,
-+}, ["Plugin", "writeJsonSafe", "captureTrajectory", "scoreTrajectory", "normalizeCadence", "cronMatches", "nextRun", "isDue", "councilMemberOptions", "councilMemberWire", "councilTraceOrigin", "validateBallot", "validateRoute", "validateAnswer"])
++}, ["Plugin", "writeJsonSafe", "captureTrajectory", "scoreTrajectory", "normalizeCadence", "councilMemberOptions", "councilMemberWire", "councilTraceOrigin", "validateBallot", "validateRoute", "validateAnswer"])
 +const { Plugin } = legacy
 +const resolverDependencies = {
 +  "../model-resolver.js": { ModelResolver: { ...MemberModels, node: modelNode } },
@@ -1311,7 +1262,7 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +    get: (id) => Effect.suspend(() => {
 +      options.onGet?.(files)
 +      return options.failGet ? Effect.fail(new Error("session missing"))
-+        : Effect.succeed({ id, title: "Fixture session", model: { providerID: provider, id: "one" } })
++        : Effect.succeed({ id, title: "Fixture session", location: { directory: project }, model: { providerID: provider, id: "one" } })
 +    }),
 +    messages: (input) => Effect.suspend(() => {
 +      assert.deepEqual(input, { sessionID: context.sessionID })
@@ -1353,16 +1304,26 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +  const sessionContext = {
 +    history: { initial: [], messages: [Message.user("preserved history")], instructionUpdate: "preserved instruction update" },
 +    select: (id) => Effect.succeed({ session: { id, model: { providerID: provider, id: "one" } }, instructions: {}, agent: { id: "build", info: {} }, tools: [] }),
-+    resolveModel: (session) => memberModels.resolve(session.model),
++    resolveModel: (session, purpose) => {
++      assert.deepEqual(purpose, { kind: "primary", agent: "build" })
++      return memberModels.resolve(session.model)
++    },
 +    request: { generate: (input) => Effect.sync(() => {
 +      preparedRequests.push(input)
 +      return { request: { ...input.model.model.options, model: input.model.model, system: input.system, messages: input.messages, tools: [], ...options.preparedOptions }, options: options.transportOptions }
 +    }) },
 +  }
 +  const schedules = {
-+    enabled: () => Effect.succeed(options.scheduleEnabled !== false),
++    enabled: (directory) => {
++      assert.equal(directory, project)
++      return Effect.succeed(options.scheduleEnabled !== false)
++    },
 +    list: ({sessionID}) => Effect.sync(() => scheduled.filter((task) => task.sessionID === sessionID)),
-+    create: (input) => Effect.suspend(() => {
++    create: (input, invocation) => Effect.suspend(() => {
++      assert.deepEqual(invocation, {
++        sessionID: "parent-session", agent: "build", source: { type: "tool", messageID: "message-1", id: "call-1" },
++      })
++      if (options.denySchedulePermission) return Effect.fail(new Error("automation permission denied"))
 +      if (options.failSchedule) return Effect.fail(new Error("schedule database denied"))
 +      scheduleCalls.push(input)
 +      const entry = { ...input, id: `schedule-${scheduled.length + 1}`, status: "active", runCount: 0, nextDueAt: DateTime.makeUnsafe(Date.now()+60000) }
@@ -1397,7 +1358,7 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +    Effect.provideService(MemberClient.Service, memberClient),
 +    Effect.provideService(Instance.Service, { provide: () => (effect) => Effect.provideService(effect, SessionContext.Service, sessionContext) }),
 +    Effect.provideService(Database.Service, { db: {} }),
-+    Effect.provideService(Schedule.Service, schedules),
++    Effect.provideService(Automation.Service, schedules),
 +    Effect.provideService(Agents.Service, {}),
 +    Effect.provideService(Registry.Service, {}),
 +  )
@@ -1630,7 +1591,7 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +  const h = await harness()
 +  assert.match(output(await h.call("schedule_task", { action: "add", name: "review", cadence: "@daily", prompt: "review files" })), /Scheduled/)
 +  const first = h.scheduled[0]
-+  assert.deepEqual(first.when, { type: "cron", cron: "0 9 * * *" })
++  assert.deepEqual(first.trigger, { type: "cron", cron: "0 9 * * *" })
 +  assert.deepEqual(first.action, { type: "prompt", prompt: "review files" })
 +  assert.equal(first.sessionID, context.sessionID)
 +  assert.equal(h.writes.length, 0)
@@ -1661,17 +1622,11 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +  noCalls(h)
 +})
 +
-+test("scheduler normalizes aliases and evaluates next runs against a fixed local clock", () => {
++test("scheduler normalizes aliases for the automation engine", () => {
 +  assert.equal(legacy.normalizeCadence("@daily"), "0 9 * * *")
 +  assert.equal(legacy.normalizeCadence("every 15 minutes"), "every 15 minutes")
 +  assert.equal(legacy.normalizeCadence("every 2 hours"), "every 2 hours")
 +  assert.equal(legacy.normalizeCadence("not a cadence"), undefined)
-+  const clock = new Date(2026, 0, 5, 12, 0, 40)
-+  const next = legacy.nextRun("*/15 * * * *", clock)
-+  assert.equal(next.toISOString(), new Date(2026, 0, 5, 12, 15).toISOString())
-+  const entry = { cadence: "*/15 * * * *", created: clock.toISOString() }
-+  assert.equal(legacy.isDue(entry, new Date(next.getTime() - 1)), false)
-+  assert.equal(legacy.isDue(entry, next), true)
 +})
 +
 +const successfulHistory = [
@@ -2120,18 +2075,26 @@ index 0000000000000000000000000000000000000000..abe056208521020e3085dc77e4b94541
 +  assert.equal(h.writes.length,0)
 +})
 +test('real Cron rejects invalid fields; interval cadence retains 90 minutes and seven hours',async()=>{
-+  for(const invalid of ['bad bad bad bad bad','99 * * * *','every 0 minutes']) assert.equal(legacy.normalizeCadence(invalid),undefined)
-+  const now=new Date('2026-01-01T00:00:00Z')
-+  assert.equal(legacy.nextRun(legacy.normalizeCadence('every 90 minutes'),now).getTime()-now.getTime(),90*60000)
-+  assert.equal(legacy.nextRun(legacy.normalizeCadence('every 7 hours'),now).getTime()-now.getTime(),7*3600000)
 +  const h=await harness()
++  for(const invalid of ['bad bad bad bad bad','99 * * * *','every 0 minutes']) {
++    assert.equal(legacy.normalizeCadence(invalid),undefined)
++    await assert.rejects(h.call('schedule_task',{action:'add',name:'bad',cadence:invalid,prompt:'work'}),/Unparseable/)
++  }
++  assert.equal(h.scheduleCalls.length,0)
 +  await h.call('schedule_task',{action:'add',name:'interval',cadence:'every 90 minutes',prompt:'do work'})
-+  assert.deepEqual(h.scheduleCalls[0].when,{type:'every',every:'90 minutes'})
++  await h.call('schedule_task',{action:'add',name:'long interval',cadence:'every 7 hours',prompt:'do work'})
++  assert.deepEqual(h.scheduleCalls[0].trigger,{type:'every',every:'90 minutes'})
++  assert.deepEqual(h.scheduleCalls[1].trigger,{type:'every',every:'7 hours'})
 +})
 +test('disabled execution reports the required flag instead of creating a fake schedule',async()=>{
 +  const h=await harness({scheduleEnabled:false})
-+  await assert.rejects(h.call('schedule_task',{action:'add',name:'job',cadence:'@daily',prompt:'work'}),/experimental.schedules/)
++  await assert.rejects(h.call('schedule_task',{action:'add',name:'job',cadence:'@daily',prompt:'work'}),/experimental.automations/)
 +  assert.equal(h.scheduleCalls.length+h.writes.length,0)
++})
++test('automation permission rejection prevents schedule creation',async()=>{
++  const h=await harness({denySchedulePermission:true})
++  await assert.rejects(h.call('schedule_task',{action:'add',name:'job',cadence:'@daily',prompt:'work'}),/automation permission denied/)
++  assert.equal(h.scheduled.length,0)
 +})
 +test('legacy JSON schedules are export-only and are not silently activated',async()=>{
 +  const old={tasks:[{name:'old',cadence:'* * * * *',prompt:'old work'}]}

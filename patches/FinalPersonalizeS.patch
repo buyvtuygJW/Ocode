@@ -1,22 +1,26 @@
 diff --git a/.personalize/S.json b/.personalize/S.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..df6f6ea6dec872c68e598a423537b4532d5b0d75
+index 0000000000000000000000000000000000000000..486e3994f838b0801d8517c75fe5221e576badb4
 --- /dev/null
 +++ b/.personalize/S.json
 @@ -0,0 +1,5 @@
 +{
 +  "modules": [
-+    { "target": "packages/core/src/plugin/agent.ts", "factory": "packages/core/src/personalize/science.ts", "exports": ["Plugin"] }
++    { "target": "packages/core/src/plugin/internal.ts", "factory": "packages/core/src/personalize/science.ts", "exports": ["list"] }
 +  ]
 +}
 diff --git a/packages/core/src/personalize/science.ts b/packages/core/src/personalize/science.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1aa0631b3b7a30a8bd6a7953ddcdaf40668e3dff
+index 0000000000000000000000000000000000000000..6e2caccf2958f565855ea8b53168b34a053b85bb
 --- /dev/null
 +++ b/packages/core/src/personalize/science.ts
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,167 @@
++export * as PersonalizeScience from "./science"
++
 +import { Effect } from "effect"
++import { define } from "@opencode/plugin/effect/plugin"
 +import { Agent } from "@opencode/schema/agent"
++import { registerAfter } from "./plugin-registration"
 +import PROMPT_RESEARCH from "../plugin/prompt/research.txt"
 +import PROMPT_BIOLOGY from "../plugin/prompt/biology.txt"
 +import PROMPT_PHYSICS from "../plugin/prompt/physics.txt"
@@ -26,9 +30,9 @@ index 0000000000000000000000000000000000000000..1aa0631b3b7a30a8bd6a7953ddcdaf40
 +import PROMPT_CRITIQUE from "../plugin/prompt/critique.txt"
 +import PROMPT_PHYSICS_CRITIQUE from "../plugin/prompt/physics-critique.txt"
 +import PROMPT_REVIEWER from "../plugin/prompt/reviewer.txt"
-+export function decorate(stock: typeof import("../plugin/agent")) {
-+  return { Plugin: { ...stock.Plugin, effect: Effect.fn(function* (ctx: Parameters<typeof stock.Plugin.effect>[0]) {
-+    yield* stock.Plugin.effect(ctx)
++export const Plugin = define({
++  id: "personalize.science",
++  effect: Effect.fn(function* (ctx) {
 +    yield* ctx.agent.transform((editor) => {
 +
 +      // --- OpenScience research agents (optional patch: FinalPersonalizeS) ---
@@ -169,7 +173,14 @@ index 0000000000000000000000000000000000000000..1aa0631b3b7a30a8bd6a7953ddcdaf40
 +        )
 +      })
 +    })
-+  }) } }
++  }),
++})
++
++export function decorate(stock: typeof import("../plugin/internal")) {
++  const list: typeof stock.list = (...args) => stock.list(...args).pipe(
++    Effect.map((registry) => registerAfter(registry, "opencode.agent", Plugin)),
++  )
++  return { list }
 +}
 diff --git a/packages/core/src/plugin/prompt/biology.txt b/packages/core/src/plugin/prompt/biology.txt
 new file mode 100644
@@ -3224,3 +3235,49 @@ index 0000000000000000000000000000000000000000..2293caddc348a1ccd89116089d4b2c43
 +Write the ENTIRE document without stopping to ask "Would you like me to continue?"
 +Never offer abbreviated versions. Token usage is unlimited — complete from start to finish.
 +</system-reminder>
+diff --git a/packages/core/test/personalize-science-registration.test.ts b/packages/core/test/personalize-science-registration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fef78bbe5bf62c90415ceff9cbdb48ac555da78c
+--- /dev/null
++++ b/packages/core/test/personalize-science-registration.test.ts
+@@ -0,0 +1,40 @@
++import { expect } from "bun:test"
++import { Effect } from "effect"
++import { Agent } from "../src/agent"
++import { Plugin } from "../src/plugin"
++import { PersonalizeScience } from "../src/personalize/science"
++import { registerAfter } from "../src/personalize/plugin-registration"
++import { testEffect } from "./lib/effect"
++import { PluginTestLayer } from "./plugin/fixture"
++
++const it = testEffect(PluginTestLayer)
++it.effect("science agents use the real plugin host and preserve later user transforms", () =>
++  Effect.gen(function* () {
++    const plugins = yield* Plugin.Service
++    const agents = yield* Agent.Service
++    yield* plugins.awaitActivation
++    const registry = registerAfter({
++      pre: [{ id: "opencode.agent", revision: "internal", source: { type: "builtin" as const }, effect: () => Effect.void }],
++      post: [],
++    }, "opencode.agent", PersonalizeScience.Plugin)
++    yield* plugins.activate([...registry.pre, {
++      id: "test.user-agent-config",
++      revision: "1",
++      effect: (ctx) => ctx.agent.transform((editor) => editor.update(Agent.ID.make("research"), (agent) => {
++        agent.description = "User configured research"
++      })).pipe(Effect.asVoid),
++    }])
++    const expected = ["research", "biology", "physics", "ml", "write", "literature-review", "critique", "physics-critique", "reviewer"]
++    for (const id of expected) {
++      const agent = yield* agents.get(Agent.ID.make(id))
++      expect(agent).toBeDefined()
++      expect(agent?.system?.length).toBeGreaterThan(0)
++    }
++    expect((yield* agents.get(Agent.ID.make("research")))?.description).toBe("User configured research")
++    const critique = yield* agents.get(Agent.ID.make("critique"))
++    expect(critique?.permissions).toContainEqual({ action: "*", resource: "*", effect: "deny" })
++    expect(critique?.permissions.some((rule) => rule.action === "shell" && rule.effect === "allow")).toBe(false)
++    yield* plugins.activate([])
++    for (const id of expected) expect(yield* agents.get(Agent.ID.make(id))).toBeUndefined()
++  }),
++)

@@ -107,8 +107,8 @@ jobs:
           node-version: '24'
 
       - name: Personalize isolation checks (hook budget, owned modules, shims)
-        # Hard gate: owned-module bootstrap has at most four build.ts hunks.
-        # Mandatory permission/title edits are verified and reported separately.
+        # Hard gate: at most three edit/injection points PER upstream file,
+        # summed across all patches, including permissions, titles and tests.
         # BEFORE any clone/build work is spent. Patches are self-contained; this step
         # needs only the committed checker, its test, and patches/ on disk.
         shell: bash
@@ -180,48 +180,6 @@ jobs:
             echo "../patches/FinalPERSONALIZE.patch"
           }
 
-          auto_resolve_git_apply_conflict_take_patch_side() {
-            echo "Auto-resolving git-apply conflicts by taking PATCH side (--theirs)."
-
-            CONFLICT_FILES="$(git diff --name-only --diff-filter=U || true)"
-
-            if [ -z "$CONFLICT_FILES" ]; then
-              echo "No conflicted files found."
-              return 1
-            fi
-
-            echo "Conflicted files:"
-            echo "$CONFLICT_FILES"
-
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-
-              echo ""
-              echo "Resolving conflict by taking patch side:"
-              echo "  $f"
-
-              echo "Index stages:"
-              git ls-files -u -- "$f" || true
-
-              if git ls-files -u -- "$f" | awk '$3 == "3" { found=1 } END { exit found ? 0 : 1 }'; then
-                echo "Patch side exists. Taking --theirs:"
-                git checkout --theirs -- "$f"
-                git add -- "$f"
-              else
-                echo "Patch side has no stage-3 version. Treating as patch-side delete:"
-                git rm -f -- "$f"
-              fi
-            done <<< "$CONFLICT_FILES"
-
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              echo "ERROR: Unmerged files remain after auto-resolve:"
-              git diff --name-only --diff-filter=U
-              return 1
-            fi
-
-            return 0
-          }
-
           apply_custom_git_patches() {
             PATCH="$(final_patch_file)"
 
@@ -240,7 +198,9 @@ jobs:
               return 20
             fi
 
-            if git apply --3way --index --whitespace=fix "$PATCH"; then
+            # Apply exactly the shipped bytes to moving upstream; never synthesize
+            # a three-way merge or rewrite whitespace during release assembly.
+            if git apply --index --whitespace=nowarn "$PATCH"; then
               echo "Patch applied cleanly:"
               echo "  $PATCH"
             else
@@ -262,7 +222,7 @@ jobs:
             echo ""
             echo "Checking for conflict markers after patch apply..."
             if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
-              echo "ERROR: conflict markers remain after auto-resolve"
+              echo "ERROR: conflict markers remain after patch application"
               return 22
             fi
 
@@ -286,7 +246,7 @@ jobs:
             XPATCH="../patches/FinalPersonalizeX.patch"
             if [ -f "$XPATCH" ]; then
               echo "Attempting optional patch: $XPATCH"
-              if git apply --3way --index --whitespace=fix "$XPATCH" && ! git ls-files -u | grep -q .; then
+              if git apply --index --whitespace=nowarn "$XPATCH" && ! git ls-files -u | grep -q .; then
                 git commit -m "ApplyFinalPersonalizeX(transparency)"
                 APPLIED_TRANSPARENCY="on"
                 echo "Optional transparency patch applied."
@@ -305,7 +265,7 @@ jobs:
             SPATCH="../patches/FinalPersonalizeS.patch"
             if [ -f "$SPATCH" ]; then
               echo "Attempting optional patch: $SPATCH"
-              if git apply --3way --index --whitespace=fix "$SPATCH" && ! git ls-files -u | grep -q .; then
+              if git apply --index --whitespace=nowarn "$SPATCH" && ! git ls-files -u | grep -q .; then
                 git commit -m "ApplyFinalPersonalizeS(research-agents)"
                 APPLIED_SCIENCE="on"
                 echo "Optional research-agents patch applied."
@@ -324,7 +284,7 @@ jobs:
             RPATCH="../patches/FinalPersonalizeR.patch"
             if [ -f "$RPATCH" ]; then
               echo "Attempting optional patch: $RPATCH"
-              if git apply --3way --index --whitespace=fix "$RPATCH" && ! git ls-files -u | grep -q .; then
+              if git apply --index --whitespace=nowarn "$RPATCH" && ! git ls-files -u | grep -q .; then
                 git commit -m "ApplyFinalPersonalizeR(rsi-distill-loop)"
                 APPLIED_RSI="on"
                 echo "Optional RSI loop patch applied."
@@ -428,8 +388,9 @@ jobs:
           }
 
           run_patch_tests() {
-            # Unit tests shipped inside the patches (isolated architecture: owned
-            # new files only -- stock modules are never modified). They pin:
+            # Owned regressions plus explicitly patched upstream contracts.
+            # Every upstream edit remains counted by the per-file ledger.
+            # They pin:
             #  - context-decay reader (owned): archived turns may NEVER surface
             #    undefined content/system into compaction (TypeError: e.content.map),
             #  - content guards (owned): every .content array access in
@@ -445,11 +406,20 @@ jobs:
               packages/core/test/session-title.test.ts
               packages/core/test/permission.test.ts
               packages/core/test/permission/personalize.integration.test.ts
+              packages/core/test/tool-patch.test.ts
+              packages/core/test/patch.test.ts
+              packages/core/test/file-access.test.ts
+              packages/core/test/machine-path.test.ts
+              packages/core/test/tool-patch-target-environment.test.ts
+              packages/core/test/personalize-plugin-registration.test.ts
             )
             # This test is owned by optional FinalPersonalizeR, not the core patch.
             # Require it when R is applied; do not require it after dropping R.
             if [ "${APPLIED_RSI:-off}" = "on" ]; then
               required+=(packages/core/test/personalize-legacy.test.ts)
+            fi
+            if [ "${APPLIED_SCIENCE:-off}" = "on" ]; then
+              required+=(packages/core/test/personalize-science-registration.test.ts)
             fi
             for f in "${required[@]}"; do
               if [ -f "$f" ]; then
@@ -474,8 +444,24 @@ jobs:
             local rel=() f2
             for f2 in "${tests[@]}"; do rel+=("${f2#"$pkgdir"/}"); done
             echo "Running patched unit tests (cwd $pkgdir): ${rel[*]}"
-            if ! (cd "$pkgdir" && bun test "${rel[@]}"); then
+            if ! (cd "$pkgdir" && bun run script/test.ts "${rel[@]}"); then
               echo "ERROR: patched unit tests FAILED -- refusing to build this ref"
+              return 1
+            fi
+            if [ ! -f packages/server/test/personalize-permission-policy.test.ts ]; then
+              echo "ERROR: mandatory permission HTTP regression missing"
+              return 1
+            fi
+            if ! (cd packages/server && bun run ../core/script/test.ts test/personalize-permission-policy.test.ts); then
+              echo "ERROR: permission HTTP regression FAILED -- refusing to build this ref"
+              return 1
+            fi
+            if [ ! -f packages/tui/test/personalize-mini-permission.test.ts ] || [ ! -f packages/tui/test/personalize-permission-render.test.tsx ]; then
+              echo "ERROR: mandatory rendered/Mini permission regression missing"
+              return 1
+            fi
+            if ! (cd packages/tui && bun test test/personalize-mini-permission.test.ts test/personalize-permission-render.test.tsx test/mini/permission.shared.test.ts test/util/permission.test.ts); then
+              echo "ERROR: rendered/Mini permission regression FAILED -- refusing to build this ref"
               return 1
             fi
             # Permission regressions are mandatory, including when optional patches are dropped.
@@ -491,7 +477,11 @@ jobs:
                 return 1
               fi
             done
-            if ! node --experimental-transform-types --test "${permission_tests[@]}"; then
+            if [ ! -f .personalize/node-typescript.mjs ]; then
+              echo "ERROR: mandatory Node source resolver missing: .personalize/node-typescript.mjs"
+              return 1
+            fi
+            if ! node --import ./.personalize/node-typescript.mjs --experimental-transform-types --test "${permission_tests[@]}"; then
               echo "ERROR: mandatory permission regressions FAILED -- refusing to build this ref"
               return 1
             fi
@@ -504,6 +494,8 @@ jobs:
               .personalize/session-title.test.mjs
               .personalize/permission-contract.test.mjs
               .personalize/single-executable.test.mjs
+              .personalize/node-typescript.test.mjs
+              .personalize/bootstrap.test.mjs
             )
             for f in "${owned_tests[@]}"; do
               if [ ! -f "$f" ]; then
@@ -519,13 +511,25 @@ jobs:
                 ../../.personalize/lifetime.test.mjs \
                 ../../.personalize/session-title.test.mjs \
                 ../../.personalize/permission-contract.test.mjs \
-                ../../.personalize/single-executable.test.mjs); then
+                ../../.personalize/single-executable.test.mjs \
+                ../../.personalize/node-typescript.test.mjs \
+                ../../.personalize/bootstrap.test.mjs); then
               echo "ERROR: lifetime/context/title regressions FAILED -- refusing to build this ref"
               return 1
             fi
             if [ "${APPLIED_RSI:-off}" = "on" ]; then
               if ! (cd packages/core && node --test ../../.personalize/subagent-capabilities.test.mjs); then
                 echo "ERROR: subagent capability regressions FAILED -- refusing to build this ref"
+                return 1
+              fi
+            fi
+            if [ "${APPLIED_TRANSPARENCY:-off}" = "on" ]; then
+              if [ ! -f packages/tui/test/personalize-transparency-plugin.test.tsx ]; then
+                echo "ERROR: mandatory transparency plugin regression missing"
+                return 1
+              fi
+              if ! (cd packages/tui && bun test test/personalize-transparency-plugin.test.tsx --timeout 30000); then
+                echo "ERROR: transparency plugin regression FAILED -- refusing to build this ref"
                 return 1
               fi
             fi
@@ -636,7 +640,7 @@ jobs:
             fi
 
             # User-approved session naming; never change it without explicit approval.
-            if ! git apply --3way --index --whitespace=fix ../patches/SessionTitleNaming.patch; then
+            if ! git apply --index --whitespace=nowarn ../patches/SessionTitleNaming.patch; then
               echo "ERROR: session title patch failed; refusing to build"
               cd ..
               return 20

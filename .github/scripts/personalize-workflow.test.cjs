@@ -111,6 +111,75 @@ test('build and sync never depend on local regeneration sources', () => {
   assert.doesNotMatch(workflow, /personalize-src|regen-personalize\.ps1/);
 });
 
+test('all five release applications preserve shipped bytes without merge-based conflict handling', () => {
+  const applications = workflow.split('\n').filter((line) => /\bgit apply\b/.test(line));
+  assert.equal(applications.length, 5);
+  for (const line of applications) assert.match(line, /git apply --index --whitespace=nowarn /);
+  assert.doesNotMatch(workflow, /--3way|--theirs|--ours|--whitespace=fix/);
+  assert.match(workflow, /UPSTREAM_REF: \$\{\{ github\.event\.inputs\.upstream_ref \|\| 'production' \}\}/);
+});
+
+test('real workflow rejects drift that Git three-way application would silently merge', () => {
+  const parent = path.join(tmpdir(), 'opencode');
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(path.join(parent, 'strict-patch-'));
+  const tree = path.join(root, 'opencode-src');
+  const git = process.env.PERSONALIZE_GIT || 'git';
+  mkdirSync(tree);
+  mkdirSync(path.join(root, 'patches'));
+  const runGit = (...args) => {
+    const result = spawnSync(git, ['-c', 'core.autocrlf=false', '-c', 'user.name=Fixture',
+      '-c', 'user.email=fixture@example.invalid', ...args], { cwd: tree, encoding: 'utf8' });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  try {
+    runGit('init', '--quiet');
+    const lines = Array.from({ length: 40 }, (_, index) => `line ${index + 1}\n`);
+    const file = path.join(tree, 'source.txt');
+    writeFileSync(file, lines.join(''));
+    runGit('add', '--all');
+    runGit('commit', '--quiet', '-m', 'fixture base');
+    const patched = [...lines];
+    patched[11] = 'patched line 12\n';
+    writeFileSync(file, patched.join(''));
+    const patch = path.join(root, 'patches/FinalPERSONALIZE.patch');
+    writeFileSync(patch, runGit('diff', '--full-index'));
+    const drift = [...lines];
+    drift[8] = 'upstream changed line 9\n';
+    writeFileSync(file, drift.join(''));
+    runGit('add', '--all');
+    runGit('commit', '--quiet', '-m', 'fixture upstream drift');
+    runGit('apply', '--3way', '--index', patch);
+    assert.match(readFileSync(file, 'utf8'), /patched line 12/);
+    runGit('reset', '--hard', 'HEAD');
+    const start = workflow.indexOf('          apply_custom_git_patches() {');
+    const end = workflow.indexOf('          strip_upstream_workflows() {', start);
+    assert.ok(start >= 0 && end > start);
+    const fn = workflow.slice(start, end).replace(/^ {10}/gm, '');
+    const result = spawnSync(bash, ['--noprofile', '--norc', '-s'], {
+      cwd: tree, encoding: 'utf8',
+      env: { ...process.env, PERSONALIZE_TEST_GIT: git.replaceAll('\\', '/') },
+      input: `set -euo pipefail
+        node() { return 0; }
+        git() { "$PERSONALIZE_TEST_GIT" -c core.autocrlf=false "$@"; }
+        final_patch_file() { echo ../patches/FinalPERSONALIZE.patch; }
+        ${fn}
+        if apply_custom_git_patches; then echo RESULT:0; else echo RESULT:$?; fi
+      `,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /RESULT:20/);
+    assert.equal(readFileSync(file, 'utf8'), drift.join(''));
+    assert.equal(runGit('ls-files', '-u'), '');
+    assert.equal(runGit('diff', '--cached'), '');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('one failed test cannot discard X/S/R or retry a reduced build', () => {
   const { output, calls } = run('tests');
   assert.match(output, /RESULT 40 on\/on\/on/);
@@ -136,11 +205,15 @@ const regressionEnd = workflow.indexOf('          run_opencode_build() {', regre
 assert.ok(regressionStart >= 0 && regressionEnd > regressionStart);
 const regressions = workflow.slice(regressionStart, regressionEnd).replace(/^ {10}/gm, '');
 const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs',
-  'permission-contract.test.mjs', 'single-executable.test.mjs'];
+  'permission-contract.test.mjs', 'single-executable.test.mjs', 'node-typescript.test.mjs', 'bootstrap.test.mjs'];
 const permissionRegressions = ['packages/core/test/permission/personalize.integration.test.ts',
-  'packages/core/test/permission/service.node.test.mjs'];
+  'packages/core/test/permission/service.node.test.mjs', 'packages/server/test/personalize-permission-policy.test.ts',
+  'packages/tui/test/personalize-mini-permission.test.ts', 'packages/tui/test/personalize-permission-render.test.tsx',
+  'packages/core/test/tool-patch.test.ts', 'packages/core/test/patch.test.ts',
+  'packages/core/test/file-access.test.ts', 'packages/core/test/machine-path.test.ts',
+  'packages/core/test/tool-patch-target-environment.test.ts'];
 
-function runRegressions(scenario, target = '') {
+function runRegressions(scenario, target = '', science = 'off', transparency = 'off') {
   const parent = path.join(tmpdir(), 'opencode');
   mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(path.join(parent, 'regression-gate-'));
@@ -151,10 +224,24 @@ function runRegressions(scenario, target = '') {
     'packages/core/test/session-title.test.ts',
     'packages/core/test/permission.test.ts',
     'packages/core/test/permission/personalize.integration.test.ts',
+    'packages/core/test/tool-patch.test.ts',
+    'packages/core/test/patch.test.ts',
+    'packages/core/test/file-access.test.ts',
+    'packages/core/test/machine-path.test.ts',
+    'packages/core/test/tool-patch-target-environment.test.ts',
+    'packages/core/test/personalize-plugin-registration.test.ts',
+    'packages/core/test/personalize-science-registration.test.ts',
+    'packages/tui/test/personalize-transparency-plugin.test.tsx',
+    'packages/tui/test/personalize-mini-permission.test.ts',
+    'packages/tui/test/personalize-permission-render.test.tsx',
+    'packages/tui/test/mini/permission.shared.test.ts',
+    'packages/tui/test/util/permission.test.ts',
     'packages/core/test/permission/session-grant.test.mjs',
     'packages/core/test/permission/service.node.test.mjs',
+    'packages/server/test/personalize-permission-policy.test.ts',
     'packages/core/test/config/mcp-selection.node.test.mjs',
     'packages/app/src/session/requests/permission-machine.node.test.mjs',
+    '.personalize/node-typescript.mjs',
     ...owned.map((name) => `.personalize/${name}`),
   ];
   try {
@@ -168,6 +255,8 @@ function runRegressions(scenario, target = '') {
     const script = `
       set -euo pipefail
       APPLIED_RSI=off
+      APPLIED_SCIENCE=${science}
+      APPLIED_TRANSPARENCY=${transparency}
       bun() {
         echo "CALL bun $*" >&2
         if [[ "${scenario}" == failure && "$*" == *"${path.basename(target)}"* ]]; then return 1; fi
@@ -209,4 +298,41 @@ test('the pre-build gate runs all owned regressions with Effect resolved from co
   for (const name of owned) assert.ok(result.calls.includes(`../../.personalize/${name}`));
   assert.ok(result.calls.includes('test/permission/personalize.integration.test.ts'));
   assert.ok(result.calls.includes('packages/core/test/permission/service.node.test.mjs'));
+  assert.match(result.calls, /CALL bun run script\/test\.ts /);
+  assert.ok(result.calls.includes('test/personalize-plugin-registration.test.ts'));
+  assert.match(result.calls, /CALL node --import \.\/\.personalize\/node-typescript\.mjs --experimental-transform-types --test /);
+});
+
+test('missing Node source resolver blocks the mandatory permission regressions', () => {
+  assert.match(runRegressions('missing', '.personalize/node-typescript.mjs').output, /RESULT 1/);
+});
+
+for (const scenario of ['missing', 'failure']) {
+  test(`${scenario} native plugin registration regression blocks the pre-build gate`, () => {
+    assert.match(runRegressions(scenario, 'packages/core/test/personalize-plugin-registration.test.ts').output, /RESULT 1/);
+  });
+  test(`${scenario} science registration regression blocks when S was applied`, () => {
+    assert.match(runRegressions(scenario, 'packages/core/test/personalize-science-registration.test.ts', 'on').output, /RESULT 1/);
+  });
+  test(`${scenario} transparency registration regression blocks when X was applied`, () => {
+    assert.match(runRegressions(scenario, 'packages/tui/test/personalize-transparency-plugin.test.tsx', 'off', 'on').output, /RESULT 1/);
+  });
+}
+
+test('science registration tests run only with their delivered optional plugin', () => {
+  const off = runRegressions('missing', 'packages/core/test/personalize-science-registration.test.ts');
+  assert.match(off.output, /RESULT 0/);
+  assert.doesNotMatch(off.calls, /personalize-science-registration/);
+  const on = runRegressions('success', '', 'on');
+  assert.match(on.output, /RESULT 0/);
+  assert.match(on.calls, /personalize-science-registration/);
+});
+
+test('transparency registration tests run only with their delivered optional plugin', () => {
+  const off = runRegressions('missing', 'packages/tui/test/personalize-transparency-plugin.test.tsx');
+  assert.match(off.output, /RESULT 0/);
+  assert.doesNotMatch(off.calls, /personalize-transparency-plugin/);
+  const on = runRegressions('success', '', 'off', 'on');
+  assert.match(on.output, /RESULT 0/);
+  assert.match(on.calls, /CALL bun test test\/personalize-transparency-plugin\.test\.tsx --timeout 30000/);
 });

@@ -1,6 +1,6 @@
 diff --git a/.personalize/X.json b/.personalize/X.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b67f588c350cf1b3355d573386e1fa62ced966a
+index 0000000000000000000000000000000000000000..e1de0148b2d79d74e7a69f6e788f4a3a52d45fe5
 --- /dev/null
 +++ b/.personalize/X.json
 @@ -0,0 +1,8 @@
@@ -8,7 +8,7 @@ index 0000000000000000000000000000000000000000..8b67f588c350cf1b3355d573386e1fa6
 +  "modules": [
 +    { "target": "packages/tui/src/config/keybind.ts", "factory": "packages/tui/src/personalize/keybind.ts", "exports": ["Definitions", "Descriptions", "KeybindOverrides", "parse", "unknownKeys"] },
 +    { "target": "packages/tui/src/context/theme.tsx", "factory": "packages/tui/src/personalize/theme.ts", "exports": ["useThemes", "useTheme"] },
-+    { "target": "packages/tui/src/context/keymap.tsx", "factory": "packages/tui/src/personalize/keymap.ts", "exports": ["Keymap"] },
++    { "target": "packages/tui/src/plugin/builtins.ts", "factory": "packages/tui/src/personalize/keymap.ts", "exports": ["builtins"] },
 +    { "target": "packages/tui/src/ui/dialog-select.tsx", "factory": "packages/tui/src/personalize/dialog-select.ts", "exports": ["DialogSelect"] }
 +  ]
 +}
@@ -70,28 +70,41 @@ index 0000000000000000000000000000000000000000..06fb194f15bc64f5941c16e51e993b21
 +}
 diff --git a/packages/tui/src/personalize/keymap.ts b/packages/tui/src/personalize/keymap.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8be4e343725a9e9b3f6cba3855376064428d8a8
+index 0000000000000000000000000000000000000000..fd7d251c386cd5017e711a66fbe1a4bbd06c016c
 --- /dev/null
 +++ b/packages/tui/src/personalize/keymap.ts
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,32 @@
++import { Plugin } from "@opencode/plugin/tui"
 +import { useThemes } from "../context/theme"
 +
-+export function decorate(stock: typeof import("../context/keymap")) {
-+  const createLayer: typeof stock.Keymap.createLayer = (input) => {
-+    // The app registers its global command-palette layer inside both providers.
-+    // No edits to its private command list or component body are necessary.
-+    let theme: ReturnType<typeof useThemes> & { toggleTransparent?: () => void }
-+    try { theme = useThemes() } catch { return stock.Keymap.createLayer(input) }
-+    return stock.Keymap.createLayer(() => {
-+      const layer = input()
-+      if (layer.mode !== "global" || !layer.commands?.some((item) => item.id === stock.COMMAND_PALETTE_COMMAND)) return layer
-+      return { ...layer, commands: [...layer.commands, {
-+        id: "theme.transparent", title: "Toggle transparency", group: "System", palette: true,
-+        run: () => theme.toggleTransparent?.(),
-+      }], bindings: [...(layer.bindings ?? []), "theme.transparent"] }
++export function registerTransparency(context: Plugin.Context, toggle: () => void) {
++  context.keymap.layer(() => ({
++    mode: "global",
++    commands: [{
++      id: "theme.transparent", title: "Toggle transparency", group: "System", palette: true, run: toggle,
++    }],
++    // Use the configured binding, including "none"; no inline fallback may
++    // reactivate a key the user disabled.
++    bindings: ["theme.transparent"],
++  }))
++}
++
++const plugin = Plugin.define({
++  id: "opencode.personalize.transparency",
++  setup(context) {
++    context.ui.slot({
++      append: "app",
++      render() {
++        const theme = useThemes() as ReturnType<typeof useThemes> & { toggleTransparent: () => void }
++        registerTransparency(context, () => theme.toggleTransparent())
++        return null
++      },
 +    })
-+  }
-+  return { Keymap: { ...stock.Keymap, createLayer } }
++  },
++})
++
++export function decorate(stock: typeof import("../plugin/builtins")) {
++  return { builtins: [...stock.builtins, plugin] }
 +}
 diff --git a/packages/tui/src/personalize/theme.ts b/packages/tui/src/personalize/theme.ts
 new file mode 100644
@@ -159,3 +172,75 @@ index 0000000000000000000000000000000000000000..a495820f7e553d4e815f0e65b70fd59c
 +  }
 +  return { useThemes, useTheme }
 +}
+diff --git a/packages/tui/test/personalize-transparency-plugin.test.tsx b/packages/tui/test/personalize-transparency-plugin.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6c20dc4f2ac921cd8325bfb8abddbd647356829
+--- /dev/null
++++ b/packages/tui/test/personalize-transparency-plugin.test.tsx
+@@ -0,0 +1,66 @@
++import { InputRenderable } from "@opentui/core"
++import { expect, test } from "bun:test"
++import { takeDraft } from "../src/component/prompt/draft-stash"
++import { TuiKeybind } from "../src/config/keybind"
++import { decorate } from "../src/personalize/keybind"
++import { createAppFixture } from "./fixture/app"
++import { tmpdir } from "./fixture/fixture"
++
++test("transparency command uses native plugin keyboard/palette registration and unloads", async () => {
++  takeDraft(undefined)
++  const providerDefault = TuiKeybind.Definitions["model.dialog.provider"].default
++  // Apply the separate, still-counted keybind data customization. The stock
++  // keymap implementation and plugin host are not replaced.
++  decorate(TuiKeybind)
++  try {
++    await using plugin = await tmpdir()
++    const registration = new URL("../src/personalize/keymap.ts", import.meta.url).href
++    await Bun.write(`${plugin.path}/tui.ts`, `
++      import { registerTransparency } from ${JSON.stringify(registration)}
++      export default {
++        id: "fixture.transparency",
++        setup(context) {
++          let count = 0
++          registerTransparency(context, () => context.ui.toast.show({
++            message: "Transparency toggled " + ++count, variant: "info", duration: 60000,
++          }))
++          context.ui.toast.show({ message: "Transparency ready", variant: "info" })
++        },
++      }
++    `)
++    await using setup = await createAppFixture({ config: { animations: false, plugins: [plugin.path] } })
++    await setup.ready
++    await setup.waitForFrame((frame) => frame.includes("Transparency ready"))
++    setup.mockInput.pressKey("t", { meta: true })
++    await setup.waitForFrame((frame) => frame.includes("Transparency toggled 1"))
++
++    const search = async () => {
++      setup.mockInput.pressKey("p", { ctrl: true })
++      await setup.waitForFrame((frame) => frame.includes("Commands"))
++      await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof InputRenderable)
++      await setup.mockInput.typeText("Toggle transparency")
++    }
++    await search()
++    await setup.waitForFrame((frame) => frame.includes("Toggle transparency"))
++    setup.mockInput.pressEnter()
++    await setup.waitForFrame((frame) => frame.includes("Transparency toggled 2"))
++
++    await setup.mockInput.typeText("/plugins")
++    setup.mockInput.pressEnter()
++    await setup.waitForFrame((frame) => frame.includes("fixture.transparency"))
++    await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof InputRenderable)
++    await setup.mockInput.typeText("fixture.transparency")
++    await setup.waitForFrame((frame) => frame.includes("disable"))
++    setup.mockInput.pressEnter()
++    await setup.waitForFrame((frame) => frame.includes("inactive"))
++    setup.mockInput.pressEscape()
++    setup.mockInput.pressKey("t", { meta: true })
++    await search()
++    await setup.waitForFrame((frame) => frame.includes("No results found"))
++    expect(setup.captureCharFrame()).not.toContain("Transparency toggled 3")
++  } finally {
++    Reflect.deleteProperty(TuiKeybind.Definitions, "theme.transparent")
++    Reflect.deleteProperty(TuiKeybind.Descriptions, "theme.transparent")
++    TuiKeybind.Definitions["model.dialog.provider"].default = providerDefault
++  }
++}, 30000)

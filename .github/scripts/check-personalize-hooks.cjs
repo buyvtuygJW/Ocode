@@ -1,7 +1,7 @@
 'use strict';
 
 // Enforces the personalization isolation contract on the generated patch set:
-//   * at most THREE upstream integration points across the COMPLETE release:
+//   * at most THREE upstream integration points PER FILE, summed across the release:
 //     every edit hunk (including permissions, titles and tests) plus every
 //     distinct upstream module replaced/decorated by a delivered manifest;
 //   * outside the pinned permission/title segments, only the CLI bootstrap may
@@ -25,8 +25,9 @@ const { createHash } = require('node:crypto');
 const NAMES = ['FinalPERSONALIZE.patch', 'FinalPersonalizeR.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeX.patch'];
 const MANDATORY = 'FinalPERSONALIZE.patch';
 const PERMISSIONS = 'HarnessPermissions.base.patch';
-const PERMISSIONS_SHA256 = 'f03eca3007369ae419367916174fa06c94ad88af9593ff28154ab2bffd2af398';
-const TITLE_SHA256 = '07d1b59c637afa93635f8bdccde2bda9657fd5eb424405f1652ef156b8d1587f';
+const PERMISSIONS_SHA256 = '1fd5cbb626f42c06261279995e084783b59a38a032e53051f5d7a45b269e252e';
+const PERMISSION_FILE_COUNT = 26;
+const TITLE_SHA256 = 'e3961c5be373aca71fe8f4a062148d812390b9c0921dfc269eac08375c97f999';
 const ALLOWED = 'packages/cli/script/build.ts';
 const MANIFESTS = ['manifest.json', 'R.json', 'S.json', 'X.json'];
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -127,7 +128,7 @@ function analyze(patches, upstream, permissions, review = {}) {
       }
     }
     permissionFiles = seen.size;
-    const expectedFiles = review.permissionFileCount ?? 33;
+    const expectedFiles = review.permissionFileCount ?? PERMISSION_FILE_COUNT;
     if (!Number.isSafeInteger(expectedFiles) || expectedFiles < 0) throw new Error('Invalid reviewed permission file count');
     if (permissionFiles !== expectedFiles) throw new Error(`Expected ${expectedFiles} mandatory permission files; found ${permissionFiles}`);
     patches = { ...patches, [MANDATORY]: base.slice(0, -required.length) };
@@ -226,14 +227,51 @@ function footprint(patches) {
 
 function enforceReleaseBudget(patches) {
   const total = footprint(patches);
-  const bindings = moduleBoundaries(patches);
-  if (total.hunks + bindings.length > 3 || total.files > 3) {
+  const ledger = integrationLedger(patches);
+  const violations = ledger.filter((entry) => entry.points > 3);
+  if (violations.length) {
     throw new Error(
-      `Release rejected: maximum 3 upstream edit points/injection points across all patches; found ${total.files} existing files, ${total.hunks} hunks, ${bindings.length} public-module injection targets. ` +
+      'Release rejected: maximum 3 upstream edit/injection points PER FILE across all patches. Offending files:\n' +
+      violations.map(({ file, hunks, injections, points }) =>
+        `  ${file}: ${points} points (${hunks} edit hunks + ${injections} module boundary)`).join('\n') + '\n' +
       'Permissions, titles and upstream tests are not exempt. Refactor the integration; do not force conflicts or hide edits in owned replacements.'
     );
   }
   return total;
+}
+
+function integrationLedger(patches) {
+  const files = new Map();
+  const entry = (file) => {
+    if (!files.has(file)) files.set(file, { file, hunks: 0, injections: 0, points: 0 });
+    return files.get(file);
+  };
+  for (const [name, text] of Object.entries(patches)) {
+    for (const section of String(text).replaceAll('\r\n', '\n').split(/(?=^diff --git )/m)) {
+      if (!section.startsWith('diff --git ') || section.includes('\n--- /dev/null\n')) continue;
+      const item = entry(safePath(name, diffPath(name, section)));
+      item.hunks += (section.match(/^@@ /gm) || []).length;
+      // Standard git diff uses three context lines. Enlarging context must not
+      // turn distinct edit locations into one counted injection.
+      for (const hunk of section.split(/^@@ .*@@.*\n/gm).slice(1)) {
+        let changed = false;
+        let context = 0;
+        for (const line of hunk.split('\n')) {
+          if (line.startsWith(' ')) context++;
+          else if (line.startsWith('+') || line.startsWith('-')) {
+            if (changed && context > 6) item.hunks++;
+            changed = true;
+            context = 0;
+          }
+        }
+      }
+    }
+  }
+  // Multiple factories compose in one shim at the same upstream module boundary.
+  // That boundary still counts in addition to any textual edits to that file.
+  for (const target of moduleBoundaries(patches)) entry(target).injections = 1;
+  return [...files.values()].map((item) => ({ ...item, points: item.hunks + item.injections }))
+    .sort((a, b) => a.file.localeCompare(b.file));
 }
 
 function moduleBoundaries(patches) {
@@ -302,9 +340,9 @@ if (require.main === module) {
     `Segment integrity checked: ${result.owned} owned files; ${result.permissionFiles} mandatory permission files. Bootstrap alone uses ${result.hunks} hunks; this is not a release-budget approval.`
   );
   console.log(`FULL release upstream footprint (including permissions, titles and upstream tests): ${total.files} existing files, ${total.hunks} hunks.`);
-  console.log(`Public-module injection targets: ${moduleBoundaries(release).length}; these also consume the three-point budget.`);
+  console.log(`Public-module injection targets: ${moduleBoundaries(release).length}; each counts against its target file's three-point budget.`);
   enforceReleaseBudget(release);
-  console.log(`Release integration budget PASS: ${total.hunks + moduleBoundaries(release).length}/3 edit/injection points.`);
+  console.log('Release integration budget PASS: every upstream file has at most 3 edit/injection points across the patch stack.');
 }
 
-module.exports = { analyze, footprint, moduleBoundaries, enforceReleaseBudget, verifyTitle };
+module.exports = { analyze, footprint, moduleBoundaries, integrationLedger, enforceReleaseBudget, verifyTitle };

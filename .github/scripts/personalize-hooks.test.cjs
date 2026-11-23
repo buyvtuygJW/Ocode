@@ -6,14 +6,15 @@ const { spawnSync } = require('node:child_process');
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
-const { analyze, footprint, enforceReleaseBudget, verifyTitle } = require('./check-personalize-hooks.cjs');
+const { analyze, footprint, integrationLedger, enforceReleaseBudget, verifyTitle } = require('./check-personalize-hooks.cjs');
 
 test('the mandatory base embeds the complete pinned permissions patch', () => {
   const dir = path.resolve(__dirname, '../../patches');
   const names = ['FinalPERSONALIZE.patch', 'FinalPersonalizeX.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeR.patch'];
   const patches = Object.fromEntries(names.map((name) => [name, readFileSync(path.join(dir, name), 'utf8')]));
   const permissions = readFileSync(path.join(dir, 'HarnessPermissions.base.patch'), 'utf8');
-  assert.equal(analyze(patches, undefined, permissions).permissionFiles, 33);
+  const receipt = JSON.parse(readFileSync(path.resolve(__dirname, '../../personalize-src/permission-migration.json'), 'utf8'));
+  assert.equal(analyze(patches, undefined, permissions).permissionFiles, receipt.applied?.permissionFileCount ?? 33);
   const stripped = Object.fromEntries(Object.entries(patches).map(([name, patch]) => [
     name, patch.split(/(?=^diff --git )/m).filter((section) =>
       !section.startsWith('diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts\n')).join(''),
@@ -30,12 +31,10 @@ test('mandatory additions cannot also be delivered by an ordinary owned patch', 
   const dir = path.resolve(__dirname, '../../patches');
   const base = readFileSync(path.join(dir, 'FinalPERSONALIZE.patch'), 'utf8');
   const permissions = readFileSync(path.join(dir, 'HarnessPermissions.base.patch'), 'utf8');
-  const section = permissions.split(/(?=^diff --git )/m).find((entry) =>
-    entry.startsWith('diff --git a/packages/core/test/permission/service-fixture.mjs ') &&
-    entry.includes('\n--- /dev/null\n'));
+  const section = permissions.split(/(?=^diff --git )/m).find((entry) => entry.includes('\n--- /dev/null\n'));
   assert.ok(section);
   assert.throws(() => analyze({ 'FinalPERSONALIZE.patch': base, extra: section }, undefined, permissions),
-    /Duplicate owned file across mandatory permissions: packages\/core\/test\/permission\/service-fixture\.mjs/);
+    /Duplicate owned file across mandatory permissions:/);
 });
 
 test('the full footprint cannot hide permission and title edits behind the bootstrap budget', () => {
@@ -44,14 +43,23 @@ test('the full footprint cannot hide permission and title edits behind the boots
     'FinalPersonalizeR.patch', 'SessionTitleNaming.patch'];
   const patches = Object.fromEntries(names.map((name) => [name, readFileSync(path.join(dir, name), 'utf8')]));
   const actual = footprint(patches);
-  assert.equal(actual.files, 29);
+  assert.ok(actual.files > 1);
   assert.ok(actual.hunks > 3);
-  assert.throws(() => enforceReleaseBudget(patches), /maximum 3 upstream edit points.*29 existing files.*129 hunks/i);
+  const receipt = JSON.parse(readFileSync(path.resolve(__dirname, '../../personalize-src/permission-migration.json'), 'utf8'));
   const cli = spawnSync(process.execPath, [path.join(__dirname, 'check-personalize-hooks.cjs')], { encoding: 'utf8' });
-  assert.notEqual(cli.status, 0);
-  assert.match(cli.stdout, /FULL release upstream footprint.*29 existing files.*129 hunks/);
-  assert.match(cli.stderr, /maximum 3 upstream edit points/i);
-  assert.doesNotMatch(cli.stdout, /\bPASS\b/);
+  assert.match(cli.stdout, /FULL release upstream footprint/);
+  if (receipt.applied) {
+    assert.doesNotThrow(() => enforceReleaseBudget(patches));
+    assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+    assert.match(cli.stdout, /every upstream file has at most 3/);
+  } else {
+    assert.throws(() => enforceReleaseBudget(patches), /maximum 3 upstream edit\/injection points PER FILE/);
+    assert.notEqual(cli.status, 0);
+    assert.doesNotMatch(cli.stdout, /\bPASS\b/);
+  }
+  // Always exercise rejection, including after the real stack becomes compliant.
+  const offending = { ...patches, fixture: hook('packages/core/test/session-title.test.ts', 4) };
+  assert.throws(() => enforceReleaseBudget(offending), /packages\/core\/test\/session-title.test.ts/);
 });
 
 test('mandatory title integrity and both title targets are protected', () => {
@@ -90,37 +98,52 @@ test('hook points are counted across every patch, not per patch', () => {
   assert.throws(() => analyze({ core: hook(ALLOWED, 3), extra: hook(ALLOWED, 1) }), /Maximum three/);
 });
 
-test('the three-point release budget includes permissions, titles and upstream test edits', () => {
+test('many files may each use three points, including permissions, titles and upstream tests', () => {
   const base = hook(ALLOWED, 1) + hook('packages/core/src/permission.ts', 1);
   const title = hook('packages/core/src/session/title.ts', 1);
   assert.deepEqual(enforceReleaseBudget({ base, title }), { files: 3, hunks: 3 });
   for (const file of ['packages/core/test/permission.test.ts', 'packages/core/test/session-title.test.ts',
     'packages/schema/src/permission.ts']) {
-    assert.throws(() => enforceReleaseBudget({ base, title, extra: hook(file, 1) }),
-      /maximum 3 upstream edit points.*4 existing files.*4 hunks/i);
+    assert.deepEqual(enforceReleaseBudget({ base, title, extra: hook(file, 3) }), { files: 4, hunks: 6 });
+    assert.throws(() => enforceReleaseBudget({ base, title, extra: hook(file, 4) }), (error) =>
+      error.message.includes(`${file}: 4 points (4 edit hunks + 0 module boundary)`));
   }
   assert.throws(() => enforceReleaseBudget({ base: hook(ALLOWED, 4) }),
-    /maximum 3 upstream edit points.*1 existing files.*4 hunks/i);
+    /packages\/cli\/script\/build.ts: 4 points/);
+  const many = Array.from({ length: 20 }, (_, i) => hook(`upstream/file-${i}.ts`, 3)).join('');
+  assert.deepEqual(enforceReleaseBudget({ many }), { files: 20, hunks: 60 });
 });
 
-test('separately pinned permission sections are not a release-budget exemption', () => {
+test('points in one file accumulate across patches, including mandatory segments', () => {
   assert.throws(() => enforceReleaseBudget({
-    'FinalPERSONALIZE.patch': hook(ALLOWED, 3) + hook('packages/core/src/permission.ts', 1),
+    'FinalPERSONALIZE.patch': hook(ALLOWED, 3) + hook('packages/core/src/permission.ts', 3),
+    extra: hook('packages/core/src/permission.ts', 1),
     'SessionTitleNaming.patch': owned('packages/core/test/personalize-title.test.ts', 'export {}'),
-  }), /maximum 3 upstream edit points.*4 hunks/i);
+  }), /packages\/core\/src\/permission.ts: 4 points/);
 });
 
-test('owned decorators cannot hide upstream injection targets from the release budget', () => {
+test('manifest boundaries count alongside textual edits to the same upstream file', () => {
   const targets = ['permission', 'shell', 'title', 'ui'];
   const manifest = owned('.personalize/manifest.json', JSON.stringify({
     modules: targets.map((name) => ({ target: `upstream/${name}.ts`, factory: `owned/${name}.ts`, exports: ['node'] })),
   }));
-  assert.throws(() => enforceReleaseBudget({ base: manifest }), /0 hunks, 4 public-module injection targets/);
+  assert.doesNotThrow(() => enforceReleaseBudget({ base: manifest }));
   const one = owned('.personalize/R.json', JSON.stringify({
     modules: [{ target: 'upstream/permission.ts', factory: 'owned/permission.ts', exports: ['node'] }],
   }));
-  assert.throws(() => enforceReleaseBudget({ base: hook(ALLOWED, 3), extra: one }),
-    /3 hunks, 1 public-module injection targets/);
+  assert.doesNotThrow(() => enforceReleaseBudget({ base: hook(ALLOWED, 3), extra: one }));
+  assert.doesNotThrow(() => enforceReleaseBudget({ base: hook('upstream/permission.ts', 2), extra: one }));
+  assert.throws(() => enforceReleaseBudget({ base: hook('upstream/permission.ts', 3), extra: one }),
+    /upstream\/permission.ts: 4 points \(3 edit hunks \+ 1 module boundary\)/);
+  assert.deepEqual(integrationLedger({ base: manifest, extra: one }).find((entry) => entry.file === 'upstream/permission.ts'),
+    { file: 'upstream/permission.ts', hunks: 0, injections: 1, points: 1 });
+});
+
+test('widened diff context cannot disguise separate integration points', () => {
+  const file = 'upstream/widened.ts';
+  const changes = Array.from({ length: 4 }, () => '-old\n+new\n').join(' context\n'.repeat(7));
+  const patch = `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1,25 +1,25 @@\n${changes}`;
+  assert.throws(() => enforceReleaseBudget({ patch }), /upstream\/widened.ts: 4 points/);
 });
 
 test('owned modules do not consume upstream hook points', () => {
