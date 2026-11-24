@@ -8,11 +8,70 @@ const path = require('node:path');
 const { tmpdir } = require('node:os');
 
 const workflow = readFileSync(path.join(__dirname, '../workflows/weekly_customautorel.yml'), 'utf8');
-const start = workflow.indexOf('          try_build() {');
-const end = workflow.indexOf('          LATEST_REF=', start);
-assert.ok(start >= 0 && end > start, 'try_build must be present in workflow');
-const actual = workflow.slice(start, end).replace(/^ {10}/gm, '');
+const buildFile = path.join(__dirname, 'build-personalize.sh');
+const buildScript = readFileSync(buildFile, 'utf8');
+const buildEnv = { ...process.env, PERSONALIZE_BUILD_SCRIPT: buildFile.replaceAll('\\', '/') };
 const bash = process.env.PERSONALIZE_TEST_BASH || 'bash';
+
+test('build script is external, synced, and receives the fallback ref through env', () => {
+  assert.match(workflow, /LAST_SUCCESS: \$\{\{ steps\.load_state\.outputs\.last_success \}\}/);
+  assert.match(workflow, /run: bash \.github\/scripts\/build-personalize\.sh\s/);
+  assert.match(workflow, /cp \.\.\/\.github\/scripts\/build-personalize\.sh \.github\/scripts\/build-personalize\.sh/);
+  assert.doesNotMatch(buildScript, /\$\{\{/);
+  const result = spawnSync(bash, ['--noprofile', '--norc', '-n', buildFile], { encoding: 'utf8' });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('inline script scalars leave room below the Actions 21000-character expression limit', () => {
+  const lines = workflow.split(/\r?\n/);
+  let checked = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const header = /^( +)(?:run|script): [|>][-+]?\s*$/.exec(lines[i]);
+    if (!header) continue;
+    const body = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() && lines[j].search(/\S/) <= header[1].length) break;
+      body.push(lines[j].slice(header[1].length + 2));
+    }
+    // Mixed expressions become format(...) calls. Allow for doubled quotes/
+    // braces and expression arguments, not just the raw YAML scalar length.
+    const text = body.join('\n');
+    const upperBound = text.length * 2 + 256 + (text.match(/\$\{\{/g)?.length ?? 0) * 64;
+    assert.ok(upperBound < 21000, `inline script at line ${i + 1} must move to a file`);
+    checked++;
+  }
+  assert.ok(checked > 0, 'must inspect the workflow scripts');
+});
+
+for (const scenario of ['latest', 'missing-receipt', 'stale-receipt', 'fallback', 'fallback-fails']) {
+  test(`external entry point preserves ${scenario} control flow`, () => {
+    const result = spawnSync(bash, ['--noprofile', '--norc', '-s'], {
+      encoding: 'utf8', env: buildEnv,
+      input: `
+        source "$PERSONALIZE_BUILD_SCRIPT"
+        UPSTREAM_REF=production
+        LAST_SUCCESS=${scenario === 'missing-receipt' ? "''" : 'previous-sha'}
+        try_build() {
+          echo "BUILD $1 $2" >&2
+          if [[ "$2" == latest ]]; then [[ "${scenario}" == latest ]]; return; fi
+          [[ "${scenario}" != fallback-fails ]]
+        }
+        node() { echo "VERIFY $*" >&2; [[ "${scenario}" != stale-receipt ]]; }
+        bun() { echo 1.4.4; }
+        main
+      `,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, ['latest', 'fallback'].includes(scenario) ? 0 : 1, result.stderr);
+    assert.match(result.stderr, /BUILD production latest/);
+    if (['latest', 'missing-receipt', 'stale-receipt'].includes(scenario))
+      assert.doesNotMatch(result.stderr, /BUILD previous-sha/);
+    else
+      assert.match(result.stderr, /VERIFY .*release-combination\.cjs verify[\s\S]*BUILD previous-sha fallback-last-success/);
+    if (['latest', 'missing-receipt'].includes(scenario)) assert.doesNotMatch(result.stderr, /VERIFY/);
+  });
+}
 
 // Execute the workflow's real Bash function in its real `if` calling context:
 // errexit is disabled there. Every external operation is replaced by a shell
@@ -20,6 +79,7 @@ const bash = process.env.PERSONALIZE_TEST_BASH || 'bash';
 function run(scenario, label = 'latest', cwd) {
   const result = spawnSync(bash, ['--noprofile', '--norc', '-c', `
     set -euo pipefail
+    source "$PERSONALIZE_BUILD_SCRIPT"
     export UPSTREAM_REPO=fixture GITHUB_OUTPUT=/dev/null
     scenario=${scenario}
     cd() { :; }
@@ -54,11 +114,10 @@ function run(scenario, label = 'latest', cwd) {
     }
     run_patch_tests() { echo 'CALL tests' >&2; [[ "$scenario" != tests ]]; }
     run_opencode_build() { echo 'CALL build' >&2; [[ "$scenario" != build ]]; }
-    ${actual}
     if try_build fixture ${label}; then status=0; else status=$?; fi
     echo "RESULT $status \${APPLIED_TRANSPARENCY:-unset}/\${APPLIED_SCIENCE:-unset}/\${APPLIED_RSI:-unset}"
   `], { encoding: 'utf8', cwd,
-    env: { ...process.env, PERSONALIZE_TEST_NODE_EXE: process.execPath.replaceAll('\\', '/') } });
+    env: { ...buildEnv, PERSONALIZE_TEST_NODE_EXE: process.execPath.replaceAll('\\', '/') } });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
   return { output: result.stdout, calls: result.stderr };
@@ -108,7 +167,7 @@ test('patch-only CI reaches the runtime gates without local regeneration sources
 });
 
 test('build and sync never depend on local regeneration sources', () => {
-  assert.doesNotMatch(workflow, /personalize-src|regen-personalize\.ps1/);
+  assert.doesNotMatch(workflow + buildScript, /personalize-src|regen-personalize\.ps1/);
 });
 
 test('patch-only isolation runs the real checker tests without a local migration receipt', () => {
@@ -147,10 +206,10 @@ test('patch-only isolation runs the real checker tests without a local migration
 });
 
 test('all five release applications preserve shipped bytes without merge-based conflict handling', () => {
-  const applications = workflow.split('\n').filter((line) => /\bgit apply\b/.test(line));
+  const applications = buildScript.split('\n').filter((line) => /\bgit apply\b/.test(line));
   assert.equal(applications.length, 5);
   for (const line of applications) assert.match(line, /git apply --index --whitespace=nowarn /);
-  assert.doesNotMatch(workflow, /--3way|--theirs|--ours|--whitespace=fix/);
+  assert.doesNotMatch(workflow + buildScript, /--3way|--theirs|--ours|--whitespace=fix/);
   assert.match(workflow, /UPSTREAM_REF: \$\{\{ github\.event\.inputs\.upstream_ref \|\| 'production' \}\}/);
 });
 
@@ -189,18 +248,13 @@ test('real workflow rejects drift that Git three-way application would silently 
     runGit('apply', '--3way', '--index', patch);
     assert.match(readFileSync(file, 'utf8'), /patched line 12/);
     runGit('reset', '--hard', 'HEAD');
-    const start = workflow.indexOf('          apply_custom_git_patches() {');
-    const end = workflow.indexOf('          strip_upstream_workflows() {', start);
-    assert.ok(start >= 0 && end > start);
-    const fn = workflow.slice(start, end).replace(/^ {10}/gm, '');
     const result = spawnSync(bash, ['--noprofile', '--norc', '-s'], {
       cwd: tree, encoding: 'utf8',
-      env: { ...process.env, PERSONALIZE_TEST_GIT: git.replaceAll('\\', '/') },
+      env: { ...buildEnv, PERSONALIZE_TEST_GIT: git.replaceAll('\\', '/') },
       input: `set -euo pipefail
+        source "$PERSONALIZE_BUILD_SCRIPT"
         node() { return 0; }
         git() { command "$PERSONALIZE_TEST_GIT" -c core.autocrlf=false "$@"; }
-        final_patch_file() { echo ../patches/FinalPERSONALIZE.patch; }
-        ${fn}
         if apply_custom_git_patches; then echo RESULT:0; else echo RESULT:$?; fi
       `,
     });
@@ -235,10 +289,6 @@ test('successful gates retain all applied optional features', () => {
   assert.match(calls, /CALL tests[\s\S]*CALL build/);
 });
 
-const regressionStart = workflow.indexOf('          run_patch_tests() {');
-const regressionEnd = workflow.indexOf('          run_opencode_build() {', regressionStart);
-assert.ok(regressionStart >= 0 && regressionEnd > regressionStart);
-const regressions = workflow.slice(regressionStart, regressionEnd).replace(/^ {10}/gm, '');
 const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs',
   'permission-contract.test.mjs', 'single-executable.test.mjs', 'node-typescript.test.mjs', 'bootstrap.test.mjs',
   'storage-diagnostic.test.mjs', 'connection-backoff.test.mjs'];
@@ -292,6 +342,7 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
     // Only the real gate's control flow runs. Every test runner is a stub.
     const script = `
       set -euo pipefail
+      source "$PERSONALIZE_BUILD_SCRIPT"
       APPLIED_RSI=off
       APPLIED_SCIENCE=${science}
       APPLIED_TRANSPARENCY=${transparency}
@@ -307,12 +358,11 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
         return 0
       }
       git() { return 0; }
-      ${regressions}
       if run_patch_tests; then status=0; else status=$?; fi
       echo "RESULT $status"
     `;
     const result = spawnSync(bash, ['--noprofile', '--norc', '-s'], {
-      input: script, cwd: directory, encoding: 'utf8', env: process.env,
+      input: script, cwd: directory, encoding: 'utf8', env: buildEnv,
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
