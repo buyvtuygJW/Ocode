@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const { tmpdir } = require('node:os');
@@ -111,6 +111,41 @@ test('build and sync never depend on local regeneration sources', () => {
   assert.doesNotMatch(workflow, /personalize-src|regen-personalize\.ps1/);
 });
 
+test('patch-only isolation runs the real checker tests without a local migration receipt', () => {
+  const parent = path.join(tmpdir(), 'opencode');
+  mkdirSync(parent, { recursive: true });
+  const directory = mkdtempSync(path.join(parent, 'patch-only-isolation-'));
+  try {
+    const scripts = path.join(directory, '.github/scripts');
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(path.join(directory, 'patches'));
+    for (const name of ['check-personalize-hooks.cjs', 'personalize-hooks.test.cjs'])
+      cpSync(path.join(__dirname, name), path.join(scripts, name));
+    for (const name of ['FinalPERSONALIZE.patch', 'FinalPersonalizeX.patch', 'FinalPersonalizeS.patch',
+      'FinalPersonalizeR.patch', 'SessionTitleNaming.patch', 'HarnessPermissions.base.patch'])
+      cpSync(path.join(__dirname, '../../patches', name), path.join(directory, 'patches', name));
+    assert.equal(existsSync(path.join(directory, 'personalize-src')), false);
+    // Real subprocesses, not the build-control-flow stubs: local source files
+    // must not hide a missing dependency in either the tests or the checker.
+    // A nested Node runner must not inherit the parent's child-runner protocol.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('NODE_TEST_')));
+    for (const args of [
+      ['--test', '.github/scripts/personalize-hooks.test.cjs'],
+      ['.github/scripts/check-personalize-hooks.cjs'],
+    ]) {
+      const result = spawnSync(process.execPath, args, { cwd: directory, encoding: 'utf8', env });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      if (args[0] === '--test')
+        assert.match(result.stdout, /the mandatory base embeds the complete pinned permissions patch/);
+      else
+        assert.match(result.stdout, /Release integration budget PASS/);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('all five release applications preserve shipped bytes without merge-based conflict handling', () => {
   const applications = workflow.split('\n').filter((line) => /\bgit apply\b/.test(line));
   assert.equal(applications.length, 5);
@@ -163,7 +198,7 @@ test('real workflow rejects drift that Git three-way application would silently 
       env: { ...process.env, PERSONALIZE_TEST_GIT: git.replaceAll('\\', '/') },
       input: `set -euo pipefail
         node() { return 0; }
-        git() { "$PERSONALIZE_TEST_GIT" -c core.autocrlf=false "$@"; }
+        git() { command "$PERSONALIZE_TEST_GIT" -c core.autocrlf=false "$@"; }
         final_patch_file() { echo ../patches/FinalPERSONALIZE.patch; }
         ${fn}
         if apply_custom_git_patches; then echo RESULT:0; else echo RESULT:$?; fi
@@ -205,7 +240,8 @@ const regressionEnd = workflow.indexOf('          run_opencode_build() {', regre
 assert.ok(regressionStart >= 0 && regressionEnd > regressionStart);
 const regressions = workflow.slice(regressionStart, regressionEnd).replace(/^ {10}/gm, '');
 const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs',
-  'permission-contract.test.mjs', 'single-executable.test.mjs', 'node-typescript.test.mjs', 'bootstrap.test.mjs'];
+  'permission-contract.test.mjs', 'single-executable.test.mjs', 'node-typescript.test.mjs', 'bootstrap.test.mjs',
+  'storage-diagnostic.test.mjs', 'connection-backoff.test.mjs'];
 const permissionRegressions = ['packages/core/test/permission/personalize.integration.test.ts',
   'packages/core/test/permission/service.node.test.mjs', 'packages/server/test/personalize-permission-policy.test.ts',
   'packages/tui/test/personalize-mini-permission.test.ts', 'packages/tui/test/personalize-permission-render.test.tsx',
@@ -218,6 +254,7 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
   mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(path.join(parent, 'regression-gate-'));
   const files = [
+    'packages/cli/tsconfig.json',
     'packages/core/test/session-context-decay.test.ts',
     'packages/core/test/session/content-guards.test.ts',
     'packages/core/test/session-model-request-hooks.test.ts',
@@ -230,6 +267,7 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
     'packages/core/test/machine-path.test.ts',
     'packages/core/test/tool-patch-target-environment.test.ts',
     'packages/core/test/personalize-plugin-registration.test.ts',
+    'packages/core/test/personalize-repository-cache.test.ts',
     'packages/core/test/personalize-science-registration.test.ts',
     'packages/tui/test/personalize-transparency-plugin.test.tsx',
     'packages/tui/test/personalize-mini-permission.test.ts',
@@ -295,12 +333,21 @@ for (const name of [...owned, ...permissionRegressions]) {
 test('the pre-build gate runs all owned regressions with Effect resolved from core', () => {
   const result = runRegressions('success');
   assert.match(result.output, /RESULT 0/);
+  assert.match(result.calls, /CALL bun run typecheck:tsc/);
   for (const name of owned) assert.ok(result.calls.includes(`../../.personalize/${name}`));
   assert.ok(result.calls.includes('test/permission/personalize.integration.test.ts'));
   assert.ok(result.calls.includes('packages/core/test/permission/service.node.test.mjs'));
   assert.match(result.calls, /CALL bun run script\/test\.ts /);
   assert.ok(result.calls.includes('test/personalize-plugin-registration.test.ts'));
+  assert.ok(result.calls.includes('test/personalize-repository-cache.test.ts'));
   assert.match(result.calls, /CALL node --import \.\/\.personalize\/node-typescript\.mjs --experimental-transform-types --test /);
+});
+
+test('a failed CLI/build-adapter typecheck blocks the pre-build gate', () => {
+  const result = runRegressions('failure', 'typecheck:tsc');
+  assert.match(result.output, /RESULT 1/);
+  assert.match(result.calls, /CALL bun run typecheck:tsc/);
+  assert.doesNotMatch(result.calls, /CALL bun run script\/test\.ts/);
 });
 
 test('missing Node source resolver blocks the mandatory permission regressions', () => {
@@ -308,6 +355,9 @@ test('missing Node source resolver blocks the mandatory permission regressions',
 });
 
 for (const scenario of ['missing', 'failure']) {
+  test(`${scenario} repository-cache regression blocks the pre-build gate`, () => {
+    assert.match(runRegressions(scenario, 'packages/core/test/personalize-repository-cache.test.ts').output, /RESULT 1/);
+  });
   test(`${scenario} native plugin registration regression blocks the pre-build gate`, () => {
     assert.match(runRegressions(scenario, 'packages/core/test/personalize-plugin-registration.test.ts').output, /RESULT 1/);
   });

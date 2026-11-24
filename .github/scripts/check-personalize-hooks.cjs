@@ -345,4 +345,4 @@ if (require.main === module) {
   console.log('Release integration budget PASS: every upstream file has at most 3 edit/injection points across the patch stack.');
 }
 
-module.exports = { analyze, footprint, moduleBoundaries, integrationLedger, enforceReleaseBudget, verifyTitle };
+module.exports = { analyze, footprint, moduleBoundaries, integrationLedger, enforceReleaseBudget, verifyTitle, PERMISSION_FILE_COUNT };

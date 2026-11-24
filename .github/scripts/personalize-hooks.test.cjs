@@ -6,15 +6,15 @@ const { spawnSync } = require('node:child_process');
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
-const { analyze, footprint, integrationLedger, enforceReleaseBudget, verifyTitle } = require('./check-personalize-hooks.cjs');
+const { analyze, footprint, integrationLedger, enforceReleaseBudget, verifyTitle, PERMISSION_FILE_COUNT } = require('./check-personalize-hooks.cjs');
 
 test('the mandatory base embeds the complete pinned permissions patch', () => {
   const dir = path.resolve(__dirname, '../../patches');
   const names = ['FinalPERSONALIZE.patch', 'FinalPersonalizeX.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeR.patch'];
   const patches = Object.fromEntries(names.map((name) => [name, readFileSync(path.join(dir, name), 'utf8')]));
   const permissions = readFileSync(path.join(dir, 'HarnessPermissions.base.patch'), 'utf8');
-  const receipt = JSON.parse(readFileSync(path.resolve(__dirname, '../../personalize-src/permission-migration.json'), 'utf8'));
-  assert.equal(analyze(patches, undefined, permissions).permissionFiles, receipt.applied?.permissionFileCount ?? 33);
+  // CI ships the pinned checker and patches, not the local generator's receipt.
+  assert.equal(analyze(patches, undefined, permissions).permissionFiles, PERMISSION_FILE_COUNT);
   const stripped = Object.fromEntries(Object.entries(patches).map(([name, patch]) => [
     name, patch.split(/(?=^diff --git )/m).filter((section) =>
       !section.startsWith('diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts\n')).join(''),
@@ -45,18 +45,12 @@ test('the full footprint cannot hide permission and title edits behind the boots
   const actual = footprint(patches);
   assert.ok(actual.files > 1);
   assert.ok(actual.hunks > 3);
-  const receipt = JSON.parse(readFileSync(path.resolve(__dirname, '../../personalize-src/permission-migration.json'), 'utf8'));
   const cli = spawnSync(process.execPath, [path.join(__dirname, 'check-personalize-hooks.cjs')], { encoding: 'utf8' });
+  assert.ifError(cli.error);
   assert.match(cli.stdout, /FULL release upstream footprint/);
-  if (receipt.applied) {
-    assert.doesNotThrow(() => enforceReleaseBudget(patches));
-    assert.equal(cli.status, 0, cli.stdout + cli.stderr);
-    assert.match(cli.stdout, /every upstream file has at most 3/);
-  } else {
-    assert.throws(() => enforceReleaseBudget(patches), /maximum 3 upstream edit\/injection points PER FILE/);
-    assert.notEqual(cli.status, 0);
-    assert.doesNotMatch(cli.stdout, /\bPASS\b/);
-  }
+  assert.doesNotThrow(() => enforceReleaseBudget(patches));
+  assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+  assert.match(cli.stdout, /every upstream file has at most 3/);
   // Always exercise rejection, including after the real stack becomes compliant.
   const offending = { ...patches, fixture: hook('packages/core/test/session-title.test.ts', 4) };
   assert.throws(() => enforceReleaseBudget(offending), /packages\/core\/test\/session-title.test.ts/);

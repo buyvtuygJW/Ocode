@@ -388,6 +388,12 @@ jobs:
           }
 
           run_patch_tests() {
+            # Bun transpiles build adapters without checking their declarations.
+            # Compile the real caller so a stale owned .d.mts cannot ship unnoticed.
+            if ! (cd packages/cli && bun run typecheck:tsc); then
+              echo "ERROR: CLI/build-adapter typecheck FAILED -- refusing to build this ref"
+              return 1
+            fi
             # Owned regressions plus explicitly patched upstream contracts.
             # Every upstream edit remains counted by the per-file ledger.
             # They pin:
@@ -412,6 +418,7 @@ jobs:
               packages/core/test/machine-path.test.ts
               packages/core/test/tool-patch-target-environment.test.ts
               packages/core/test/personalize-plugin-registration.test.ts
+              packages/core/test/personalize-repository-cache.test.ts
             )
             # This test is owned by optional FinalPersonalizeR, not the core patch.
             # Require it when R is applied; do not require it after dropping R.
@@ -496,6 +503,8 @@ jobs:
               .personalize/single-executable.test.mjs
               .personalize/node-typescript.test.mjs
               .personalize/bootstrap.test.mjs
+              .personalize/storage-diagnostic.test.mjs
+              .personalize/connection-backoff.test.mjs
             )
             for f in "${owned_tests[@]}"; do
               if [ ! -f "$f" ]; then
@@ -513,7 +522,9 @@ jobs:
                 ../../.personalize/permission-contract.test.mjs \
                 ../../.personalize/single-executable.test.mjs \
                 ../../.personalize/node-typescript.test.mjs \
-                ../../.personalize/bootstrap.test.mjs); then
+                ../../.personalize/bootstrap.test.mjs \
+                ../../.personalize/storage-diagnostic.test.mjs \
+                ../../.personalize/connection-backoff.test.mjs); then
               echo "ERROR: lifetime/context/title regressions FAILED -- refusing to build this ref"
               return 1
             fi

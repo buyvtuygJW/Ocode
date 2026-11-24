@@ -1,16 +1,22 @@
 diff --git a/.personalize/build.d.mts b/.personalize/build.d.mts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc05d0d68a8c3f46c027cfb7b190a25b2fbcb487
+index 0000000000000000000000000000000000000000..ddb41024a0d9e47a91f9f5cc203a567cbe213bef
 --- /dev/null
 +++ b/.personalize/build.d.mts
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,13 @@
 +import type { BunPlugin } from "bun"
 +
 +export function normalizeChannel(value: unknown): string
 +export function personalizationPlugins(plugins: BunPlugin[], options?: {
 +  root?: string
 +}): BunPlugin[]
-+export const PersonalizeBuild: { plugins: typeof personalizationPlugins }
++export function build(options: Parameters<typeof Bun.build>[0], personalization?: {
++  root?: string
++}): ReturnType<typeof Bun.build>
++export const PersonalizeBuild: {
++  plugins: typeof personalizationPlugins
++  build: typeof build
++}
 diff --git a/.personalize/build.mjs b/.personalize/build.mjs
 new file mode 100644
 index 0000000000000000000000000000000000000000..64409e78123cb6d4b1102028a35fe5332dbf14f3
@@ -1025,10 +1031,10 @@ index 0000000000000000000000000000000000000000..d3da95e10bd09fbd15b8986406a03e20
 +})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..92305427e290ef620630ba0470193691722a0cc5
+index 0000000000000000000000000000000000000000..f9e7d8d4806bb379eff0c812e6253d9f587fbe1c
 --- /dev/null
 +++ b/.personalize/manifest.json
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,28 @@
 +{
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
@@ -1039,6 +1045,7 @@ index 0000000000000000000000000000000000000000..92305427e290ef620630ba0470193691
 +    { "target": "packages/core/src/plugin/internal.ts", "factory": "packages/core/src/personalize/skill.ts", "exports": ["list"] },
 +    { "target": "packages/core/src/plugin/hooks.ts", "factory": "packages/core/src/personalize/hooks.ts", "exports": ["node"] },
 +    { "target": "packages/core/src/model-resolver.ts", "factory": "packages/core/src/personalize/model-resolver.ts", "exports": ["node"] },
++    { "target": "packages/core/src/repository-cache.ts", "factory": "packages/core/src/personalize/repository-cache.ts", "exports": ["node"] },
 +    { "target": "packages/core/src/session.ts", "factory": "packages/core/src/personalize/session-create.ts", "exports": ["node"] },
 +    { "target": "packages/core/src/session/model-request.ts", "factory": "packages/core/src/personalize/model-request.ts", "exports": ["baseTranscript", "unsupportedParts", "boundImages", "node"] },
 +    { "target": "packages/core/src/session/runner/step.ts", "factory": "packages/core/src/personalize/step.ts", "exports": ["make"] },
@@ -1052,6 +1059,7 @@ index 0000000000000000000000000000000000000000..92305427e290ef620630ba0470193691
 +    { "target": "packages/tui/src/plugin/builtins.ts", "factory": "packages/tui/src/personalize/lifetime.ts", "exports": ["builtins"] },
 +    { "target": "packages/tui/src/context/client.tsx", "factory": "packages/tui/src/personalize/client.ts", "exports": ["ClientProvider"] },
 +    { "target": "packages/client/src/service-probe.ts", "factory": "packages/client/src/personalize/service-probe.ts", "exports": ["decide", "probeResult"] },
++    { "target": "packages/client/src/solid/connection.ts", "factory": "packages/client/src/personalize/connection.ts", "exports": ["createClientConnection"] },
 +    { "target": "packages/tui/src/logo.ts", "factory": "packages/tui/src/personalize/logo.ts", "exports": ["logo"] }
 +  ]
 +}
@@ -1428,16 +1436,17 @@ index 0000000000000000000000000000000000000000..8a1e00858111426db1377040d7e232d8
 +}
 diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..70ae69432c60f3b248782eab31136874894ea02f
+index 0000000000000000000000000000000000000000..2f9182faec519d18cfcefc6e20b8b604f03b1383
 --- /dev/null
 +++ b/packages/core/src/personalize/database.ts
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,48 @@
 +import path from "node:path"
 +import { Cause, Effect, Exit, Layer, Scope } from "effect"
 +import { Global } from "@opencode/util/global"
 +import { Flock } from "@opencode/util/flock"
 +import { makeGlobalNode } from "@opencode/util/effect/app-node"
 +import { sqliteBusy, updateBoot } from "@opencode/util/personalize-boot"
++import { storageDiagnostic } from "@opencode/util/personalize-storage-diagnostic"
 +import { guardSessionSchema } from "./schema-guard"
 +
 +export function decorate(stock: typeof import("../database/database")) {
@@ -1461,7 +1470,12 @@ index 0000000000000000000000000000000000000000..70ae69432c60f3b248782eab31136874
 +              return exit.value
 +            }
 +            yield* Scope.close(scope, exit)
-+            if (attempt >= 6 || !sqliteBusy(Cause.pretty(exit.cause))) return yield* Effect.failCause(exit.cause)
++            if (attempt >= 6 || !sqliteBusy(Cause.pretty(exit.cause))) {
++              yield* Effect.logError("database bootstrap failed", {
++                databasePath: file, attempt: attempt + 1, ...storageDiagnostic(exit.cause),
++              })
++              return yield* Effect.failCause(exit.cause)
++            }
 +            yield* updateBoot("retry")
 +            yield* Effect.sleep((attempt + 1) * 200)
 +          }
@@ -3422,14 +3436,14 @@ index 0000000000000000000000000000000000000000..d599cc7ea1f8c5c2f38c35f6c2e1e2a4
 +}
 diff --git a/packages/util/src/personalize-lifetime-store.ts b/packages/util/src/personalize-lifetime-store.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..364aaed02572b3537188efaf6997c27c5fe078e7
+index 0000000000000000000000000000000000000000..6ab4393111eb48f0320af42bc50bcc413c898ee2
 --- /dev/null
 +++ b/packages/util/src/personalize-lifetime-store.ts
 @@ -0,0 +1,52 @@
 +import fs from "node:fs"
 +import path from "node:path"
-+import { Global } from "./global"
-+import { defaults, type Settings, type Stop } from "./personalize-lifetime"
++import { Global } from "./global.js"
++import { defaults, type Settings, type Stop } from "./personalize-lifetime.js"
 +
 +// Small settings/sleep files beside the existing service registration. These
 +// are data only: no service, scheduler, autostart, polling, or process creation.
@@ -3610,11 +3624,11 @@ index 0000000000000000000000000000000000000000..9c028b081902a5a4b504535de0f64187
 +}
 diff --git a/packages/util/src/personalize-observability.ts b/packages/util/src/personalize-observability.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..aab581801cea150ba26cc34085f10325bd9506c7
+index 0000000000000000000000000000000000000000..718858ccea1ebcf0c3cda42e1aa3d329049fd690
 --- /dev/null
 +++ b/packages/util/src/personalize-observability.ts
 @@ -0,0 +1,4 @@
-+export function decorate(stock: typeof import("./observability")) {
++export function decorate(stock: typeof import("./observability.js")) {
 +  const layer: typeof stock.layer = (options = {}) => stock.layer({ ...options, endpoint: undefined, headers: undefined })
 +  return { layer }
 +}
@@ -9743,6 +9757,392 @@ index 0000000000000000000000000000000000000000..7a3434e3cb0520266237953baa16adec
 +      view.pending[0]!.resolve()
 +    } finally { view.close() }
 +  })
++}
+diff --git a/.personalize/connection-backoff.test.mjs b/.personalize/connection-backoff.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a49391155ab247348b1b589d3d1a2a1ff9662c1
+--- /dev/null
++++ b/.personalize/connection-backoff.test.mjs
+@@ -0,0 +1,56 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { decorate } from "../packages/client/src/personalize/connection.ts"
++
++const bootError = () => new Error("Background service failed to start")
++const turns = async () => { await Promise.resolve(); await Promise.resolve() }
++
++test("failed service retries back off, cap at 30 seconds, reset on success and preserve errors", async (t) => {
++  t.mock.timers.enable({ apis: ["setTimeout"] })
++  let forwarded, calls = 0, error = bootError()
++  const stock = { createClientConnection: (_api, options) => { forwarded = options; return "connection" } }
++  const wrapped = decorate(stock)
++  const api = {}
++  assert.equal(wrapped.createClientConnection(api, {
++    onEvent() {}, reconnect: async () => { calls++; if (error) throw error; return api },
++  }), "connection")
++  const signal = new AbortController().signal
++  await assert.rejects(forwarded.reconnect(signal), (value) => value === error)
++  for (const delay of [2000, 4000, 8000, 16000, 30000, 30000]) {
++    const before = calls
++    const pending = assert.rejects(forwarded.reconnect(signal), (value) => value === error)
++    t.mock.timers.tick(delay - 1)
++    await turns()
++    assert.equal(calls, before)
++    t.mock.timers.tick(1)
++    await pending
++    assert.equal(calls, before + 1)
++  }
++  error = undefined
++  const pending = forwarded.reconnect(signal)
++  t.mock.timers.tick(30000)
++  assert.equal(await pending, api)
++  const before = calls
++  assert.equal(await forwarded.reconnect(signal), api)
++  assert.equal(calls, before + 1)
++})
++
++test("cancellation interrupts the cooldown without another resolver call; unrelated errors do not back off", async (t) => {
++  t.mock.timers.enable({ apis: ["setTimeout"] })
++  let forwarded, calls = 0, error = bootError()
++  decorate({ createClientConnection: (_api, options) => { forwarded = options } }).createClientConnection({}, {
++    onEvent() {}, reconnect: async () => { calls++; throw error },
++  })
++  await assert.rejects(forwarded.reconnect(new AbortController().signal), /failed to start/)
++  const abort = new AbortController()
++  const pending = assert.rejects(forwarded.reconnect(abort.signal), /cancelled/)
++  abort.abort(new Error("cancelled"))
++  await pending
++  assert.equal(calls, 1)
++  error = new Error("ordinary transient network failure")
++  const next = assert.rejects(forwarded.reconnect(new AbortController().signal), (value) => value === error)
++  t.mock.timers.tick(2000)
++  await next
++  await assert.rejects(forwarded.reconnect(new AbortController().signal), (value) => value === error)
++  assert.equal(calls, 3)
++})
+diff --git a/.personalize/storage-diagnostic.test.mjs b/.personalize/storage-diagnostic.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8271aa1c081c9b1b05602367ebfb5dae450bba10
+--- /dev/null
++++ b/.personalize/storage-diagnostic.test.mjs
+@@ -0,0 +1,22 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { storageDiagnostic } from "../packages/util/src/personalize-storage-diagnostic.ts"
++
++test("nested fatal SQL errors retain extended I/O codes without leaking arbitrary error data", () => {
++  const sqlite = Object.assign(new Error("sensitive SQL must not be logged"), { name: "SQLiteError", errno: 778, code: "SQLITE_IOERR_WRITE" })
++  const cause = { reasons: [{ defect: { reason: { message: "Failed to configure database", cause: sqlite } } }] }
++  assert.deepEqual(storageDiagnostic(cause), {
++    phase: "configure", sqliteCode: "SQLITE_IOERR_WRITE", sqliteExtendedCode: 778, sqlitePrimaryCode: 10,
++  })
++  assert.equal(JSON.stringify(storageDiagnostic(cause)).includes("sensitive"), false)
++})
++
++test("missing native codes stay unknown, including cyclic causes", () => {
++  const cause = { reason: { message: "Failed to open database" } }
++  cause.reason.cause = cause
++  assert.deepEqual(storageDiagnostic(cause), {
++    phase: "open", sqliteCode: undefined, sqliteExtendedCode: undefined, sqlitePrimaryCode: undefined,
++  })
++  assert.equal(storageDiagnostic({ name: "SQLiteError", errno: -1 }).sqliteExtendedCode, undefined)
++  assert.equal(storageDiagnostic({ name: "SQLiteError", errno: "778" }).sqliteExtendedCode, undefined)
++})
+diff --git a/packages/client/src/personalize/connection.ts b/packages/client/src/personalize/connection.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa2ff6127b693937aaba6e2235de306bcf0cfc04
+--- /dev/null
++++ b/packages/client/src/personalize/connection.ts
+@@ -0,0 +1,38 @@
++// A failed registered server is not repaired by one health/event request per
++// second. Keep automatic recovery observable, but cap this specific retry loop.
++const failedBoot = (error: unknown) => error instanceof Error && error.message === "Background service failed to start"
++
++function wait(ms: number, signal: AbortSignal) {
++  return new Promise<void>((resolve, reject) => {
++    if (signal.aborted) { reject(signal.reason); return }
++    const cancel = () => { clearTimeout(timer); reject(signal.reason) }
++    const timer = setTimeout(() => { signal.removeEventListener("abort", cancel); resolve() }, ms)
++    signal.addEventListener("abort", cancel, { once: true })
++  })
++}
++
++export function decorate(stock: typeof import("../solid/connection")) {
++  const createClientConnection: typeof stock.createClientConnection = (api, options) => {
++    if (!options.reconnect) return stock.createClientConnection(api, options)
++    const reconnect = options.reconnect
++    let failures = 0
++    return stock.createClientConnection(api, {
++      ...options,
++      reconnect: async (signal) => {
++        if (failures) await wait(Math.min(30_000, 2_000 * 2 ** Math.min(failures - 1, 4)), signal)
++        try {
++          const next = await reconnect(signal)
++          failures = 0
++          return next
++        } catch (error) {
++          failures = failedBoot(error) ? Math.min(failures + 1, 5) : 0
++          if (failures === 1) options.log?.info?.("Background service boot failed; slowing retries. Inspect the server log.", {
++            retryDelayMs: 2_000,
++          })
++          throw error
++        }
++      },
++    })
++  }
++  return { createClientConnection }
++}
+diff --git a/packages/core/src/personalize/repository-cache.ts b/packages/core/src/personalize/repository-cache.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..be5c0f5c24af4d260ba71f8a521bee8bfceb3ff2
+--- /dev/null
++++ b/packages/core/src/personalize/repository-cache.ts
+@@ -0,0 +1,74 @@
++import path from "node:path"
++import { Context, Effect, Layer, Option } from "effect"
++import { systemError } from "effect/PlatformError"
++import { FSUtil } from "@opencode/util/fs-util"
++import { Global } from "@opencode/util/global"
++import { Git } from "../git"
++import { Repository } from "../repository"
++import { AbsolutePath } from "../schema"
++
++class Removal extends Context.Service<Removal, {
++  path: string
++  reference: Repository.RemoteReference
++}>()("@personalize/CacheRemoval") {}
++
++export function repositoryHome(fallback: string, override = process.env.OPENCODE_REPOS_HOME) {
++  if (override === undefined) return fallback
++  if (!path.isAbsolute(override)) throw new Error("OPENCODE_REPOS_HOME must be an absolute directory")
++  return path.resolve(override)
++}
++
++export function decorate(stock: typeof import("../repository-cache")) {
++  const node = stock.node.mapLayer((layer) => Layer.unwrap(Effect.gen(function* () {
++    const fs = yield* FSUtil.Service
++    const git = yield* Git.Service
++    const global = yield* Global.Service
++    const repos = repositoryHome(global.repos)
++    const reject = (target: string, description: string, cause?: unknown) => systemError({
++      _tag: "Unknown", module: "FileSystem", method: "remove",
++      pathOrDescriptor: target, description: `Cache preserved: ${description}`, cause,
++    })
++    const remove: FSUtil.Interface["remove"] = (target, options) => Effect.gen(function* () {
++      const expected = yield* Effect.serviceOption(Removal)
++      if (Option.isNone(expected) || path.resolve(target) !== path.resolve(expected.value.path))
++        return yield* Effect.fail(reject(target, "missing cache-removal scope"))
++      // This runs INSIDE the stock cache flock, immediately before deletion.
++      // Use strict directory reads: access errors must never mean "no .git".
++      const names = yield* fs.readDirectory(target)
++      if (names.includes(".git")) {
++        const existing = yield* git.repo.discover(AbsolutePath.make(target))
++        if (!existing) return yield* Effect.fail(reject(target,
++          "Git could not inspect this existing checkout. Check Git trust and filesystem permissions; it is not stale."))
++        const worktree = yield* fs.resolve(target)
++        if (existing.worktree !== worktree)
++          return yield* Effect.fail(reject(target, "Git discovered a different worktree"))
++        const origin = yield* git.remote.get(existing).pipe(
++          Effect.mapError((cause) => reject(target, "Git could not read the checkout's origin", cause)),
++        )
++        const parsed = origin ? Repository.parse(origin) : undefined
++        if (parsed && Repository.same(parsed, expected.value.reference))
++          return yield* Effect.fail(reject(target, "checkout matches the requested origin; earlier inspection failed"))
++      }
++      // Confirmed wrong-origin checkouts and non-Git stale directories keep the
++      // stock replacement behavior. Never add broad Git trust exceptions.
++      return yield* fs.remove(target, options)
++    })
++    return layer.pipe(
++      Layer.provide([
++        Layer.succeed(FSUtil.Service, { ...fs, remove }),
++        Layer.succeed(Global.Service, { ...global, repos }),
++      ]),
++      Layer.flatMap((context) => {
++        const cache = Context.get(context, stock.Service)
++        return Layer.succeed(stock.Service, stock.Service.of({
++          ...cache,
++          ensure: (input) => cache.ensure(input).pipe(Effect.provideService(Removal, {
++            path: Repository.cachePath(repos, input.reference, input.branch),
++            reference: Repository.parse(input.reference.remote) ?? input.reference,
++          })),
++        }))
++      }),
++    )
++  })) as typeof layer)
++  return { node }
++}
+diff --git a/packages/core/test/personalize-repository-cache.test.ts b/packages/core/test/personalize-repository-cache.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..37223b12c7bde18e42d744c78187b0c677358b82
+--- /dev/null
++++ b/packages/core/test/personalize-repository-cache.test.ts
+@@ -0,0 +1,130 @@
++import { expect, test } from "bun:test"
++import fs from "node:fs/promises"
++import path from "node:path"
++import { Context, Effect, Layer } from "effect"
++import { Global } from "@opencode/util/global"
++import { LayerNode } from "@opencode/util/effect/layer-node"
++import { AppNodeBuilder } from "../src/effect/app-node-builder"
++import { Git } from "../src/git"
++import { KV } from "../src/kv"
++import { Repository } from "../src/repository"
++import { RepositoryCache } from "../src/repository-cache"
++import { AbsolutePath } from "../src/schema"
++import { decorate, repositoryHome } from "../src/personalize/repository-cache"
++import { tmpdir } from "./fixture/tmpdir"
++
++const reference = Repository.parseRemote("owner/repo")
++type Mode = "unreadable" | "transient" | "origin-error" | "wrong-origin" | "missing"
++
++function harness(root: string, mode: Mode, guarded = true) {
++  let discovers = 0, clones = 0
++  const git = Git.node.mapLayer((layer) => layer.pipe(Layer.flatMap((context) => {
++    const original = Context.get(context, Git.Service)
++    const repo = (directory: string) => new Git.Repository({
++      worktree: AbsolutePath.make(directory),
++      gitDirectory: AbsolutePath.make(path.join(directory, ".git")),
++      commonDirectory: AbsolutePath.make(path.join(directory, ".git")),
++    })
++    return Layer.succeed(Git.Service, {
++      ...original,
++      repo: {
++        ...original.repo,
++        discover: (directory) => Effect.sync(() => {
++          discovers++
++          return mode === "unreadable" || mode === "missing" || (mode === "transient" && discovers === 1)
++            ? undefined : repo(directory)
++        }),
++        clone: (input) => Effect.promise(async () => {
++          clones++
++          await fs.mkdir(path.join(input.directory, ".git"), { recursive: true })
++          return repo(input.directory)
++        }),
++      },
++      remote: { get: () => mode === "origin-error"
++        ? Effect.fail(new Git.CommandError({ args: ["remote", "get-url", "origin"], exitCode: 128 }))
++        : Effect.succeed(mode === "wrong-origin" ? "https://github.com/other/repo.git" : reference.remote) },
++      history: { ...original.history, head: () => Effect.undefined, branch: () => Effect.undefined },
++    })
++  })))
++  const node = guarded ? decorate(RepositoryCache).node : RepositoryCache.node
++  const global = Global.make({ data: path.join(root, "data"), state: path.join(root, "state"), repos: path.join(root, "repos") })
++  return {
++    counts: () => ({ discovers, clones }), global,
++    layer: AppNodeBuilder.build(LayerNode.group([node, Global.node]), [
++      Global.node.replace(Layer.succeed(Global.Service, global)),
++      Git.node.replace(git),
++      KV.node.replace(Layer.succeed(KV.Service, {
++        get: () => Effect.undefined, set: () => Effect.void, remove: () => Effect.void,
++        scan: () => Effect.succeed({ entries: [] }),
++      })),
++    ]),
++  }
++}
++
++async function attempt(root: string, mode: Mode, guarded = true, metadata = true) {
++  const localPath = Repository.cachePath(path.join(root, "repos"), reference)
++  await fs.mkdir(metadata ? path.join(localPath, ".git") : localPath, { recursive: true })
++  await fs.writeFile(path.join(localPath, "keep.txt"), "existing user cache content")
++  const runtime = harness(root, mode, guarded)
++  const result = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++    const cache = yield* RepositoryCache.Service
++    return yield* Effect.result(cache.ensure({ reference }))
++  }).pipe(Effect.provide(runtime.layer))))
++  const preserved = await fs.readFile(path.join(localPath, "keep.txt"), "utf8").then(() => true, () => false)
++  return { result, preserved, ...runtime.counts() }
++}
++
++test("real stock cache deletes on empty discovery; the decorator preserves it without cloning", async () => {
++  await using fixture = await tmpdir("cache-discovery-")
++  const before = await attempt(path.join(fixture.path, "before"), "unreadable", false)
++  expect(before.preserved).toBe(false)
++  expect(before.clones).toBe(1)
++  const after = await attempt(path.join(fixture.path, "after"), "unreadable")
++  expect(after.preserved).toBe(true)
++  expect(after.clones).toBe(0)
++  expect(after.result._tag).toBe("Failure")
++  if (after.result._tag === "Failure") expect(after.result.failure.message).toContain("Git could not inspect")
++}, 30_000)
++
++for (const mode of ["transient", "origin-error"] as const) {
++  test(`cache preserves existing checkout after ${mode}`, async () => {
++    await using fixture = await tmpdir("cache-inspection-")
++    const result = await attempt(fixture.path, mode)
++    expect(result.preserved).toBe(true)
++    expect(result.clones).toBe(0)
++    expect(result.result._tag).toBe("Failure")
++  }, 30_000)
++}
++
++test("confirmed wrong-origin and non-Git stale caches retain stock replacement", async () => {
++  await using fixture = await tmpdir("cache-stale-")
++  for (const [mode, metadata] of [["wrong-origin", true], ["missing", false]] as const) {
++    const result = await attempt(path.join(fixture.path, mode), mode, true, metadata)
++    expect(result.preserved).toBe(false)
++    expect(result.clones).toBe(1)
++    expect(result.result._tag).toBe("Success")
++  }
++}, 30_000)
++
++test("dedicated cache override changes materialization, not the global data directory", async () => {
++  await using fixture = await tmpdir("cache-home-")
++  const original = process.env.OPENCODE_REPOS_HOME
++  const override = path.join(fixture.path, "dedicated-repos")
++  process.env.OPENCODE_REPOS_HOME = override
++  try {
++    const runtime = harness(fixture.path, "missing")
++    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++      const cache = yield* RepositoryCache.Service
++      const global = yield* Global.Service
++      const result = yield* cache.ensure({ reference })
++      expect(result.localPath).toBe(Repository.cachePath(override, reference))
++      expect(global.data).toBe(runtime.global.data)
++      expect(global.repos).toBe(runtime.global.repos)
++    }).pipe(Effect.provide(runtime.layer))))
++    expect(repositoryHome("fallback", override)).toBe(override)
++    expect(() => repositoryHome("fallback", "relative/cache")).toThrow("absolute")
++  } finally {
++    if (original === undefined) delete process.env.OPENCODE_REPOS_HOME
++    else process.env.OPENCODE_REPOS_HOME = original
++  }
++}, 30_000)
+diff --git a/packages/util/src/personalize-storage-diagnostic.ts b/packages/util/src/personalize-storage-diagnostic.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b9251037fc390bf2d7de614324fd388c3258688
+--- /dev/null
++++ b/packages/util/src/personalize-storage-diagnostic.ts
+@@ -0,0 +1,30 @@
++// Keep structured SQLite codes without serializing SQL, parameters, or the
++// arbitrary surrounding cause graph. Effect SqlError wraps the native error.
++export function storageDiagnostic(input: unknown) {
++  const seen = new Set<object>()
++  let phase: "open" | "configure" | "bootstrap" = "bootstrap"
++  let native: { name?: string; code?: unknown; errno?: unknown } | undefined
++  const visit = (value: unknown) => {
++    if (!value || typeof value !== "object" || seen.has(value)) return
++    seen.add(value)
++    const record = value as Record<string, unknown>
++    if (record.message === "Failed to open database") phase = "open"
++    if (record.message === "Failed to configure database") phase = "configure"
++    if (record.name === "SQLiteError" || (typeof record.code === "string" && /^SQLITE_[A-Z_]+$/.test(record.code)))
++      native = record
++    for (const key of ["cause", "reason", "reasons", "error", "defect", "left", "right"]) {
++      const item = record[key]
++      if (Array.isArray(item)) item.forEach(visit)
++      else visit(item)
++    }
++  }
++  visit(input)
++  const extended = typeof native?.errno === "number" && Number.isSafeInteger(native.errno) && native.errno >= 0
++    ? native.errno : undefined
++  return {
++    phase,
++    sqliteCode: typeof native?.code === "string" && /^SQLITE_[A-Z_]+$/.test(native.code) ? native.code : undefined,
++    sqliteExtendedCode: extended,
++    sqlitePrimaryCode: extended === undefined ? undefined : extended & 0xff,
++  }
 +}
 diff --git a/packages/app/src/session/requests/permission-machine.node.test.mjs b/packages/app/src/session/requests/permission-machine.node.test.mjs
 new file mode 100644
