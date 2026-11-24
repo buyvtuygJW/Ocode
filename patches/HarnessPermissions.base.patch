@@ -126,10 +126,10 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..4adfe26e1671d374986f0a68aab22737
        }
      >
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
-index ca22be017bbafe6ff295b00a031c3ff208d5d206..40020763bf00db0341eb0e79adb5734b952589bb 100644
+index 2918c5865630bfca19efdec96870276b522ed073..9420c76473dc9eaea1e014537b3f0b09ea77faff 100644
 --- a/packages/client/src/promise/generated/types.ts
 +++ b/packages/client/src/promise/generated/types.ts
-@@ -304,7 +304,34 @@ export type CommandInfo = { name: string; description?: string }
+@@ -306,7 +306,34 @@ export type CommandInfo = { name: string; description?: string }
  
  export type RpcOutput = { output?: any }
  
@@ -165,7 +165,7 @@ index ca22be017bbafe6ff295b00a031c3ff208d5d206..40020763bf00db0341eb0e79adb5734b
  
  export type PtyID = string
  
-@@ -2658,6 +2685,7 @@ export type ConfigEntry =
+@@ -2661,6 +2688,7 @@ export type ConfigEntry =
            }
          }
          experimental?: {
@@ -173,7 +173,7 @@ index ca22be017bbafe6ff295b00a031c3ff208d5d206..40020763bf00db0341eb0e79adb5734b
            portable_shell_scanner?: boolean
            codemode_vm?: boolean
            all_flags?: boolean
-@@ -4452,8 +4480,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
+@@ -4458,8 +4486,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
  export type PermissionReplyInput = {
    readonly sessionID: string
    readonly requestID: string
@@ -245,70 +245,41 @@ index 8806276f3527ba23970938caffea4586a6e3266b..96a0ca529a8c8f9b679fb4c463ff093d
      }
    })
 diff --git a/packages/core/src/file-access.ts b/packages/core/src/file-access.ts
-index 75122e80da2f787744df03335ce835b83ac7f8eb..939266337e7d65cc8fb6ee02dd5086cc86fb5dad 100644
+index 391bc69da9eaa42a37d4f5be996d406e90612796..527107d76b964ff7962d7f8c66eeaf5cd3708c58 100644
 --- a/packages/core/src/file-access.ts
 +++ b/packages/core/src/file-access.ts
 @@ -4,6 +4,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
  import { FSUtil } from "@opencode/util/fs-util"
  import { Global } from "@opencode/util/global"
  import { Array, Context, Effect, Layer, Schema } from "effect"
-+import { makeFileAccessPermissions } from "./personalize/filesystem-permission.js"
++import { externalMetadata, filesystemReadMetadata } from "./personalize/filesystem-permission.js"
  import path from "path"
+ import { Environments } from "./environment/environments.js"
  import { Environment } from "./environment/index.js"
- import { Flag } from "./flag.js"
-@@ -240,51 +241,7 @@ const layer = Layer.effect(
-       } satisfies Target
-     })
- 
--    const authorizeExternal = Effect.fn("FileAccess.authorizeExternal")(function* (
--      targets: readonly Target[],
--      context: Invocation,
--      metadata?: Permission.AssertInput["metadata"],
--    ) {
--      const request = externalDirectoryRequest(targets)
--      if (!request) return
--      yield* permission.assert({
--        ...request,
+@@ -306,7 +307,7 @@ const layer = Layer.effect(
+       if (!request) return
+       yield* permission.assert({
+         ...request,
 -        ...(metadata === undefined ? {} : { metadata }),
--        ...Permission.invocation(context),
--      })
--    })
--
--    const authorizeRead = Effect.fn("FileAccess.authorizeRead")(function* (
--      file: string,
--      context: Invocation,
--      options?: ReadOptions,
--    ) {
--      // A local sibling keeps the Location's resolution exactly as without recovery; a machine's candidate has no
--      // Location to resolve against, so it takes the machine and the sibling's directory.
--      const siblingPath = options?.siblingOf.environment.path ?? path
--      const base =
--        options === undefined || options.siblingOf.environment.id === environment.id
--          ? undefined
--          : {
--              absolute: AbsolutePath.make(siblingPath.dirname(options.siblingOf.absolute)),
--              environment: options.siblingOf.environment,
--            }
--      const target = yield* resolve({ path: file, base, kind: options ? "file" : undefined })
--      const sibling =
--        options !== undefined &&
--        target.environment.id === options.siblingOf.environment.id &&
--        (target.environment.path ?? path).dirname(target.absolute) === siblingPath.dirname(options.siblingOf.absolute)
--
--      // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
--      if (!sibling) yield* authorizeExternal([target], context)
--      yield* permission.assert({
--        action: "read",
--        resources: [target.resource],
--        save: [always(target)],
--        ...Permission.invocation(context),
--      })
--      return target
--    })
-+    const { authorizeExternal, authorizeRead } = makeFileAccessPermissions({ environment, resolve, permission })
++        ...(metadata === undefined ? {} : { metadata: externalMetadata(targets, metadata) }),
+         ...Permission.invocation(context),
+       })
+     })
+@@ -333,11 +334,13 @@ const layer = Layer.effect(
+         (target.environment.path ?? path).dirname(target.absolute) === siblingPath.dirname(options.siblingOf.absolute)
  
-     return Service.of({ locate, resolve, authorizeExternal, authorizeRead })
-   }),
+       // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
+-      if (!sibling) yield* authorizeExternal([target], context)
++      const metadata = yield* filesystemReadMetadata(target, environments)
++      if (!sibling) yield* authorizeExternal([target], context, metadata)
+       yield* permission.assert({
+         action: "read",
+         resources: [target.resource],
+         save: [always(target)],
++        metadata,
+         ...Permission.invocation(context),
+       })
+       return target
 diff --git a/packages/core/src/file-write.ts b/packages/core/src/file-write.ts
 index 2e743b1dc719a55f449cda5c06ceb2b1798820fd..eed29c9d671b17cbd41ffac99b3ee2d7c479de89 100644
 --- a/packages/core/src/file-write.ts
@@ -358,7 +329,7 @@ index 2e743b1dc719a55f449cda5c06ceb2b1798820fd..eed29c9d671b17cbd41ffac99b3ee2d7
      const commit = Effect.fn("FileWrite.commit")(function* (target: FileAccess.Target, content: string) {
        const written = yield* fileMutation.writeTextPreservingBom({ target, content })
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
-index d81da926f9f721906e9079c2d5412f3b8ccc73c7..59f15508182dd39260c7061fbf18c50974eb57c6 100644
+index 196c7f21043296804d3d0d13e04553bd6de82ea6..00f20764e09bcc0b0b112bc392b5c782efbedf9c 100644
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
 @@ -1,6 +1,6 @@
@@ -369,7 +340,7 @@ index d81da926f9f721906e9079c2d5412f3b8ccc73c7..59f15508182dd39260c7061fbf18c509
  import { Context, Deferred, Effect, Layer, Schema, Scope } from "effect"
  import { Permission } from "@opencode/schema/permission"
  import type { Tool } from "@opencode/schema/tool"
-@@ -126,7 +126,7 @@ export interface Interface {
+@@ -128,7 +128,7 @@ export interface Interface {
    readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
    /** True only when the rules already allow the request; never asks the user. */
    readonly allows: (input: AssertInput) => Effect.Effect<boolean, SessionErrors.NotFoundError>
@@ -378,16 +349,16 @@ index d81da926f9f721906e9079c2d5412f3b8ccc73c7..59f15508182dd39260c7061fbf18c509
    readonly get: (id: ID) => Effect.Effect<Request | undefined>
    readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
    readonly list: () => Effect.Effect<ReadonlyArray<Request>>
-@@ -209,70 +209,19 @@ const layer = Layer.effect(
+@@ -205,76 +205,18 @@ const layer = Layer.effect(
        return parent ? { ...source, id: parent } : source
      }
  
 -    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
--      const rules = yield* configured(input.sessionID, input.agent)
--      if (denied(input, rules)) return { effect: "deny" as const, rules }
--      const all = [...rules, ...(yield* savedRules())]
--      const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
--      const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
+-      const base = yield* configured(input.sessionID, input.agent)
+-      if (PermissionPolicy.evaluateAll(base, input.action, input.resources) === "deny")
+-        return { effect: "deny" as const, policy: base }
+-      const effective = PermissionPolicy.fallback(base, yield* savedPolicy())
+-      const effect = PermissionPolicy.evaluateAll(effective, input.action, input.resources)
 -      const event = yield* hooks.trigger("permission", "evaluate", {
 -        sessionID: input.sessionID,
 -        agent: input.agent,
@@ -399,18 +370,23 @@ index d81da926f9f721906e9079c2d5412f3b8ccc73c7..59f15508182dd39260c7061fbf18c509
 -      })
 -      const unattended = yield* Unattended
 -      if (event.effect !== "ask" || unattended === undefined)
--        return { effect: event.effect, message: event.message, rules: all }
--      const settled = [...all, ...unattended]
--      const allowed = input.resources.every((resource) => evaluate(input.action, resource, settled).effect === "allow")
--      if (allowed) return { effect: "allow" as const, rules: all }
+-        return { effect: event.effect, message: event.message, policy: effective }
+-      // When an evaluate hook downgraded `allow` to `ask`, unattended rules must explicitly allow the request
+-      // rather than inheriting the pre-hook `allow` from `effective`.
+-      const settled =
+-        effect === "ask" ? PermissionPolicy.override(effective, unattended) : PermissionPolicy.fromRules(unattended)
+-      if (
+-        (effect === "ask" || input.resources.length > 0) &&
+-        PermissionPolicy.evaluateAll(settled, input.action, input.resources) === "allow"
+-      )
+-        return { effect: "allow" as const, policy: effective }
 -      return {
 -        effect: "deny" as const,
 -        message: `Permission ${input.action} needs approval, and nobody is present to give it`,
--        rules: all,
+-        policy: effective,
 -      }
 +    const { evaluate: evaluateInput, request, create } = yield* createPermissionRuntime({
-+      pending, configured, savedRules, denied, row, bus, sessions, hooks,
-+      evaluateRule: evaluate,
++      pending, configured, savedPolicy, row, bus, sessions, hooks,
 +      unattended: Unattended,
 +      events: Permission.Event,
 +      makeID: () => ID.create(),
@@ -625,7 +601,7 @@ index 9aff3a280952cce799b9f6dbc80dcdaf0c2622ca..2582f412abf38c34c2a0cf92c1b6d140
                yield* Effect.forEach(
                  prepared,
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index 927115d99a27e8ca8b0cb09c7e968104801db346..d9fed2b63a781b3a9e8e5135e244ea2ec951ee01 100644
+index 09871a72de3ec8252477ca44151aacfd6a7ed383..1746c3dc9c1a84c40ef7cee5c33038a51f897583 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
 @@ -21,6 +21,7 @@ import { SessionMessage } from "../../session/message.js"
@@ -636,8 +612,8 @@ index 927115d99a27e8ca8b0cb09c7e968104801db346..d9fed2b63a781b3a9e8e5135e244ea2e
  import { ShellSelect } from "../../shell/select.js"
  import { ShellResult } from "../../shell/result.js"
  import { toolFailure } from "../runtime.js"
-@@ -347,11 +348,7 @@ export const Plugin = {
-           return Permission.merge(agent?.permissions ?? [], session.permissions ?? [])
+@@ -351,11 +352,7 @@ export const Plugin = {
+           return Permission.Policy.fromRules(agent?.permissions ?? [], session.permissions ?? [])
          }),
        })
 -      yield* Effect.forEach(
@@ -850,7 +826,7 @@ index 0000000000000000000000000000000000000000..14b996141327e7a46773fd88b4da82c7
 +  }
 +})
 diff --git a/packages/protocol/src/groups/permission.ts b/packages/protocol/src/groups/permission.ts
-index 8951244c5bc0c513717e91476f6080e1c015817f..a5e350935b46fa782dcbc1333f21cc02f5d08756 100644
+index 16b96db34f749c33aaac4d794c10a7da4d46b4f6..d66601478ebea58dda868af5d401a60bec84719a 100644
 --- a/packages/protocol/src/groups/permission.ts
 +++ b/packages/protocol/src/groups/permission.ts
 @@ -8,6 +8,7 @@ import { Context, Schema } from "effect"
@@ -861,7 +837,7 @@ index 8951244c5bc0c513717e91476f6080e1c015817f..a5e350935b46fa782dcbc1333f21cc02
    LocationNotFoundError,
    PermissionNotFoundError,
    PermissionSavedNotFoundError,
-@@ -146,7 +147,7 @@ export const makePermissionGroup = <
+@@ -150,7 +151,7 @@ export const makePermissionGroup = <
            message: Schema.String.pipe(Schema.optional),
          }),
          success: HttpApiSchema.NoContent,
@@ -871,7 +847,7 @@ index 8951244c5bc0c513717e91476f6080e1c015817f..a5e350935b46fa782dcbc1333f21cc02
          .middleware(sessionLocationMiddleware)
          .annotateMerge(
 diff --git a/packages/schema/src/config/experimental.ts b/packages/schema/src/config/experimental.ts
-index 4b06b4ea2c27bf1a029a8c03155d1b9be02df139..7c756e3b7bc54f3782fbc0bfd684df70af524c81 100644
+index 4cbfdff608b9fdf91c19d6a6fb4fa053a7000b4e..e675d0c51c348572d33cb6ef4a54db634bf5aaff 100644
 --- a/packages/schema/src/config/experimental.ts
 +++ b/packages/schema/src/config/experimental.ts
 @@ -7,6 +7,10 @@ import { ConfigModel } from "./model.js"
@@ -1768,10 +1744,10 @@ index 7d7497b434f91a69ca471e4b42434644d6071fbf..da8ab3f9a54fb3b9d43e474fed38c531
            agent: invocation.agent,
            source: { type: "tool", messageID: invocation.messageID, id: invocation.id },
 diff --git a/packages/core/test/machine-path.test.ts b/packages/core/test/machine-path.test.ts
-index 47e24105c6e9d1c93e33868ee22bfbf206b4a99a..430d3dee2f66ea27654125b9606e64365d9db823 100644
+index 408b34e0ebe57d7d19ce5f9adeef1ac0b2861bd7..1ccfb0401320554ca84097283d94a789db52e36e 100644
 --- a/packages/core/test/machine-path.test.ts
 +++ b/packages/core/test/machine-path.test.ts
-@@ -159,6 +159,7 @@ const graph = (fixture: Fixture, realPermissions = false) =>
+@@ -161,6 +161,7 @@ const graph = (fixture: Fixture, realPermissions = false) =>
          : [
              Permission.node.replace(
                permissionLayer({
@@ -1779,7 +1755,7 @@ index 47e24105c6e9d1c93e33868ee22bfbf206b4a99a..430d3dee2f66ea27654125b9606e6436
                  assert: (input) => Effect.sync(() => void fixture.assertions.push(input)),
                }),
              ),
-@@ -193,65 +194,59 @@ const slash = (value: string) => value.replaceAll("\\", "/")
+@@ -195,65 +196,59 @@ const slash = (value: string) => value.replaceAll("\\", "/")
  const on = testEffect(Layer.succeed(Flag.Overrides, "machines"))
  const off = testEffect(Layer.succeed(Flag.Overrides, "-machines"))
  
@@ -1880,7 +1856,7 @@ index 47e24105c6e9d1c93e33868ee22bfbf206b4a99a..430d3dee2f66ea27654125b9606e6436
      }).pipe(Effect.provide(graph(fixture(tmp.path), true))),
    ),
  )
-@@ -1072,7 +1067,10 @@ on.effect("locks a typed path and a resolved target to one file through a symlin
+@@ -1074,7 +1069,10 @@ on.effect("locks a typed path and a resolved target to one file through a symlin
      return Effect.gen(function* () {
        yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, "real")))
        yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "real", "a"), "one"))

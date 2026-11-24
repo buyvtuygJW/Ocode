@@ -118,6 +118,7 @@ jobs:
           echo "Running checker unit tests..."
           node --test .github/scripts/personalize-hooks.test.cjs
           node --test .github/scripts/personalize-workflow.test.cjs
+          node --test .github/scripts/release-combination.test.cjs
           node --experimental-vm-modules --test .github/scripts/personalize-runtime.test.cjs
           node --test .github/scripts/personalize-theme.test.cjs
           node --test .github/scripts/repair-photon-patch.test.cjs
@@ -137,6 +138,11 @@ jobs:
 
           if git show "origin/$STATE_BRANCH:$STATE_FILE_DIR/last-success-upstream.txt" >/tmp/last-success-upstream.txt 2>/dev/null; then
             LAST_SUCCESS="$(cat /tmp/last-success-upstream.txt | tr -d '[:space:]')"
+          fi
+          # A legacy SHA without its tested input/toolchain receipt is not a fallback.
+          if ! git show "origin/$STATE_BRANCH:$STATE_FILE_DIR/last-success-combination.json" >fallback-combination.json 2>/dev/null; then
+            LAST_SUCCESS=""
+            echo "No release-combination receipt; legacy upstream-only fallback disabled."
           fi
 
           echo "last_success=$LAST_SUCCESS" >> "$GITHUB_OUTPUT"
@@ -711,6 +717,11 @@ jobs:
             exit 1
           fi
 
+          if ! node .github/scripts/release-combination.cjs verify . fallback-combination.json "$(bun --version)" "$LAST_SUCCESS"; then
+            echo "No matching tested fallback for these inputs. Keeping the previous release; this build failed."
+            exit 1
+          fi
+
           echo "Falling back to last successful upstream ref: $LAST_SUCCESS"
 
           if try_build "$LAST_SUCCESS" "fallback-last-success"; then
@@ -1020,6 +1031,8 @@ jobs:
           cp ../.github/scripts/check-personalize-hooks.cjs .github/scripts/check-personalize-hooks.cjs
           cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
           cp ../.github/scripts/personalize-workflow.test.cjs .github/scripts/personalize-workflow.test.cjs
+          cp ../.github/scripts/release-combination.cjs .github/scripts/release-combination.cjs
+          cp ../.github/scripts/release-combination.test.cjs .github/scripts/release-combination.test.cjs
           cp ../.github/scripts/personalize-runtime.test.cjs .github/scripts/personalize-runtime.test.cjs
           cp ../.github/scripts/personalize-theme.test.cjs .github/scripts/personalize-theme.test.cjs
           cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
@@ -1031,6 +1044,8 @@ jobs:
             exit 1
           fi
 
+          # Produced only after mandatory runtime gates, compilation and packaging.
+          node ../.github/scripts/release-combination.cjs record .. "$STATE_FILE_DIR/last-success-combination.json" "$(bun --version)" "$BUILT_SHA" "$GITHUB_SHA" ../out
           echo "$BUILT_SHA" > "$STATE_FILE_DIR/last-success-upstream.txt"
           date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STATE_FILE_DIR/last-success-time.txt"
 
