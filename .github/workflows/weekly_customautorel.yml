@@ -181,7 +181,7 @@ jobs:
         shell: bash
         env:
           LAST_SUCCESS: ${{ steps.load_state.outputs.last_success }}
-        run: bash .github/scripts/build-personalize.sh
+        run: bash .github/workflows/build-personalize.sh
 
       - name: Package CLI artifacts
         id: package
@@ -472,6 +472,7 @@ jobs:
           rm -rf .github/workflows
           mkdir -p .github/workflows
           cp "../$SELF" "$SELF"
+          cp ../.github/workflows/build-personalize.sh .github/workflows/build-personalize.sh
 
           # The workflow is also used from dev, so retain its tested cleanup helper.
           mkdir -p .github/scripts
@@ -482,7 +483,6 @@ jobs:
           cp ../.github/scripts/check-personalize-hooks.cjs .github/scripts/check-personalize-hooks.cjs
           cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
           cp ../.github/scripts/personalize-workflow.test.cjs .github/scripts/personalize-workflow.test.cjs
-          cp ../.github/scripts/build-personalize.sh .github/scripts/build-personalize.sh
           cp ../.github/scripts/release-combination.cjs .github/scripts/release-combination.cjs
           cp ../.github/scripts/release-combination.test.cjs .github/scripts/release-combination.test.cjs
           cp ../.github/scripts/personalize-runtime.test.cjs .github/scripts/personalize-runtime.test.cjs

@@ -32,7 +32,7 @@ function inputs(root) {
   return inventory(root, [
     ...required.map((name) => `patches/${name}`),
     ...optional.filter((name) => fs.existsSync(path.join(root, 'patches', name))).map((name) => `patches/${name}`),
-    '.github/scripts', '.github/workflows/weekly_customautorel.yml',
+    '.github/scripts', '.github/workflows/weekly_customautorel.yml', '.github/workflows/build-personalize.sh',
   ]);
 }
 

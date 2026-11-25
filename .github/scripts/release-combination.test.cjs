@@ -16,8 +16,16 @@ test('fallback requires the same tested patch/helper bytes and toolchain, not an
       fs.writeFileSync(path.join(root, 'patches', name), 'patch');
     fs.writeFileSync(path.join(root, '.github/scripts/check.cjs'), 'gate');
     fs.writeFileSync(path.join(root, '.github/workflows/weekly_customautorel.yml'), 'workflow');
+    const helper = path.join(root, '.github/workflows/build-personalize.sh');
+    fs.writeFileSync(helper, 'build helper');
     for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `out/target-${i}`), `binary${i}`);
     const receipt = record(root, upstream, '1.3.3', '2'.repeat(40), path.join(root, 'out'));
+    assert.equal(verify(root, receipt, '1.3.3', upstream), upstream);
+    fs.writeFileSync(helper, 'changed build helper');
+    assert.throws(() => verify(root, receipt, '1.3.3', upstream), /patches\/helpers/);
+    fs.unlinkSync(helper);
+    assert.throws(() => verify(root, receipt, '1.3.3', upstream), /ENOENT/);
+    fs.writeFileSync(helper, 'build helper');
     assert.equal(verify(root, receipt, '1.3.3', upstream), upstream);
     fs.writeFileSync(path.join(root, 'patches/legacy.patch.bak'), 'not shipped');
     assert.equal(verify(root, receipt, '1.3.3', upstream), upstream);

@@ -2,25 +2,74 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const { tmpdir } = require('node:os');
 
 const workflow = readFileSync(path.join(__dirname, '../workflows/weekly_customautorel.yml'), 'utf8');
-const buildFile = path.join(__dirname, 'build-personalize.sh');
+const buildFile = path.join(__dirname, '../workflows/build-personalize.sh');
 const buildScript = readFileSync(buildFile, 'utf8');
 const buildEnv = { ...process.env, PERSONALIZE_BUILD_SCRIPT: buildFile.replaceAll('\\', '/') };
 const bash = process.env.PERSONALIZE_TEST_BASH || 'bash';
 
 test('build script is external, synced, and receives the fallback ref through env', () => {
   assert.match(workflow, /LAST_SUCCESS: \$\{\{ steps\.load_state\.outputs\.last_success \}\}/);
-  assert.match(workflow, /run: bash \.github\/scripts\/build-personalize\.sh\s/);
-  assert.match(workflow, /cp \.\.\/\.github\/scripts\/build-personalize\.sh \.github\/scripts\/build-personalize\.sh/);
+  assert.match(workflow, /run: bash \.github\/workflows\/build-personalize\.sh\s/);
+  assert.match(workflow, /cp \.\.\/\.github\/workflows\/build-personalize\.sh \.github\/workflows\/build-personalize\.sh/);
   assert.doesNotMatch(buildScript, /\$\{\{/);
   const result = spawnSync(bash, ['--noprofile', '--norc', '-n', buildFile], { encoding: 'utf8' });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
+});
+
+test('two successive dev syncs retain runnable workflow helpers and their tests byte-for-byte', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'workflow-generations-'));
+  const files = [
+    '.github/workflows/weekly_customautorel.yml',
+    '.github/workflows/build-personalize.sh',
+    ...readdirSync(__dirname, { withFileTypes: true }).filter((entry) => entry.isFile())
+      .map((entry) => `.github/scripts/${entry.name}`),
+  ];
+  const expected = new Map(files.map((file) => [file, readFileSync(path.join(__dirname, '../..', file))]));
+  try {
+    let source = path.join(directory, 'seed');
+    for (const [file, bytes] of expected) {
+      mkdirSync(path.dirname(path.join(source, file)), { recursive: true });
+      writeFileSync(path.join(source, file), bytes);
+    }
+    for (let generation = 1; generation <= 2; generation++) {
+      const target = path.join(source, 'opencode-src');
+      mkdirSync(path.join(target, '.github/workflows'), { recursive: true });
+      writeFileSync(path.join(target, '.github/workflows/upstream-only.yml'), 'must be removed');
+      // Execute the actual copy block from THIS generation, not a reimplementation.
+      // Only Git index bookkeeping is stubbed; directory removal and copies are real.
+      const current = readFileSync(path.join(source, files[0]), 'utf8');
+      const start = current.indexOf('          SELF=".github/workflows/weekly_customautorel.yml"');
+      const end = current.indexOf('          # Produced only after', start);
+      assert.ok(start >= 0 && end > start, 'sync block missing');
+      const result = spawnSync(bash, ['--noprofile', '--norc', '-s'], {
+        cwd: target, encoding: 'utf8',
+        input: `set -euo pipefail\ngit() { [[ "$1" == rm ]]; }\n${current.slice(start, end).replace(/^ {10}/gm, '')}`,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(existsSync(path.join(target, '.github/workflows/upstream-only.yml')), false);
+      for (const [file, bytes] of expected)
+        assert.deepEqual(readFileSync(path.join(target, file)), bytes, `generation ${generation}: ${file}`);
+      // The copied tests must locate and execute the copied neighbor, not the seed.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('NODE_TEST_')));
+      const check = spawnSync(process.execPath, ['--test',
+        '--test-name-pattern=build script is external|external entry point preserves',
+        '.github/scripts/personalize-workflow.test.cjs'], { cwd: target, encoding: 'utf8', env });
+      assert.ifError(check.error);
+      assert.equal(check.status, 0, check.stdout + check.stderr);
+      assert.match(check.stdout, /external entry point preserves fallback/);
+      source = target;
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('inline script scalars leave room below the Actions 21000-character expression limit', () => {
