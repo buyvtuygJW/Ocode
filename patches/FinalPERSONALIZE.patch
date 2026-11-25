@@ -3830,14 +3830,15 @@ index 0000000000000000000000000000000000000000..dda10857d45708eee4773946ee25f828
 +module.exports = { repairText, repairFile, runWithRepair, relative };
 diff --git a/.personalize/context-decay.test.mjs b/.personalize/context-decay.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..49c9d43d057a2010a9e0341dad58ea50bdf74572
+index 0000000000000000000000000000000000000000..e26cd0c37022f75667bd10eabb7783808f0af704
 --- /dev/null
 +++ b/.personalize/context-decay.test.mjs
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,146 @@
 +import assert from "node:assert/strict"
 +import { existsSync, readFileSync } from "node:fs"
 +import { stripTypeScriptTypes } from "node:module"
 +import { AsyncLocalStorage } from "node:async_hooks"
++import { spawnSync } from "node:child_process"
 +import path from "node:path"
 +import { test } from "node:test"
 +import { fileURLToPath, pathToFileURL } from "node:url"
@@ -3945,53 +3946,39 @@ index 0000000000000000000000000000000000000000..49c9d43d057a2010a9e0341dad58ea50
 +
 +test("duplicate anchors survive actual upstream history lowering", async () => {
 +  assert.ok(stockSource, "Set PERSONALIZE_TEST_UPSTREAM when testing owned sources without stock history lowering")
-+  const { Option, Schema } = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
-+  // Execute the real stock selection/lowering code. Only schema and message
-+  // constructor boundaries are supplied; no provider, database or network.
-+  const Message = {
-+    make: (message) => message,
-+    text: (text) => ({ type: "text", text }),
-+    tool: (part) => ({ role: "tool", content: [part] }),
-+    user: (text) => ({ role: "user", content: [{ type: "text", text }] }),
-+  }
-+  const stock = load(stockSource, {
-+    "@opencode/ai/effect": {
-+      Message, Media: {}, ReasoningEfforts: [],
-+      ToolCallPart: { make: (part) => ({ type: "tool-call", ...part }) },
-+      ToolResultPart: { make: (part) => ({ type: "tool-result", ...part }) },
-+    },
-+    effect: { Option, Schema },
-+    url: { fileURLToPath },
-+    "../message.js": {},
-+    "../history.js": { SessionHistory: { NativeWindow: Schema.Unknown } },
-+    "../recent-text.js": { SessionRecentText: {} },
-+  }, ["toLLMMessages"])
-+  const wrapped = load("../packages/core/src/personalize/to-llm-message.ts", {
-+    "@opencode/ai/effect": { Message },
-+    "../session/runner/context-decay": decayModule,
-+    "./content": content,
-+    "./decay-policy": policy,
-+  }, ["decorate"]).decorate(stock).toLLMMessages
-+  const model = { providerID: "test", id: "model" }
-+  const large = "original-evidence".repeat(6000)
-+  const completed = (id) => {
-+    const message = { ...tool(id, large), id: `message-${id}`, model, finish: "tool-calls" }
-+    message.content[0].time = { ran: 0 }
-+    return message
-+  }
-+  const first = completed("original"), second = completed("duplicate")
-+  const resultParts = (messages) => messages.flatMap((message) => message.content)
-+    .filter((part) => part.type === "tool-result")
-+  const before = resultParts(wrapped([first], model))
-+  const after = resultParts(wrapped([first, second], model))
++  // Bun loads the complete real dependency graph, including newly introduced
++  // compaction renderers. No import doubles can conceal upstream contract drift.
++  const owned = new URL("../packages/core/src/personalize/to-llm-message.ts", import.meta.url)
++  const result = spawnSync(process.env.PERSONALIZE_TEST_BUN ?? "bun", ["--eval", `
++    const stock = await import(${JSON.stringify(stockSource.href)});
++    const { decorate } = await import(${JSON.stringify(owned.href)});
++    const wrapped = decorate(stock).toLLMMessages;
++    const tool = ${tool.toString()};
++    const model = { providerID: "test", id: "model" };
++    const large = "original-evidence".repeat(6000);
++    const completed = (id) => {
++      const message = { ...tool(id, large), id: "message-" + id, model, finish: "tool-calls" };
++      message.content[0].time = { ran: 0 };
++      return message;
++    };
++    const first = completed("original"), second = completed("duplicate");
++    const parts = (messages) => messages.flatMap((message) => message.content)
++      .filter((part) => part.type === "tool-result");
++    const before = parts(wrapped([first], model));
++    const after = parts(wrapped([first, second], model));
++    const failed = { ...first, error: { type: "unknown" },
++      content: first.content.map((part) => ({ ...part, executed: true })) };
++    const withoutAnchor = parts(wrapped([failed, second], model));
++    console.log(JSON.stringify({ before, after, withoutAnchor }));
++  `], { encoding: "utf8", timeout: 30000, maxBuffer: 2 * 1024 * 1024 })
++  assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`)
++  const { before, after, withoutAnchor } = JSON.parse(result.stdout)
 +  assert.deepEqual(after[0], before[0], "appending a duplicate must not change the retained result")
-+  assert.equal(after[0].result.value, large)
++  assert.equal(after[0].result.value, "original-evidence".repeat(6000))
 +  assert.match(after[1].result.value, /earlier tool result "original"/)
-+  const failed = { ...first, error: { type: "unknown" } }
-+  failed.content = first.content.map((part) => ({ ...part, executed: true }))
-+  const withoutAnchor = resultParts(wrapped([failed, second], model))
 +  assert.equal(withoutAnchor.length, 1, "stock drops the failed hosted call")
-+  assert.equal(withoutAnchor[0].result.value, large, "the remaining result must retain the unique evidence")
++  assert.equal(withoutAnchor[0].result.value, "original-evidence".repeat(6000),
++    "the remaining result must retain the unique evidence")
 +})
 diff --git a/.personalize/session-title.test.mjs b/.personalize/session-title.test.mjs
 new file mode 100644
@@ -10286,7 +10273,7 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..4adfe26e1671d374986f0a68aab22737
        }
      >
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
-index 2918c5865630bfca19efdec96870276b522ed073..9420c76473dc9eaea1e014537b3f0b09ea77faff 100644
+index 42b4dc3f686dab955771ef9155cdc8d2e5586293..1d0583917fb8338c42be2ba25e4f28167e67d60c 100644
 --- a/packages/client/src/promise/generated/types.ts
 +++ b/packages/client/src/promise/generated/types.ts
 @@ -306,7 +306,34 @@ export type CommandInfo = { name: string; description?: string }
@@ -10325,7 +10312,7 @@ index 2918c5865630bfca19efdec96870276b522ed073..9420c76473dc9eaea1e014537b3f0b09
  
  export type PtyID = string
  
-@@ -2661,6 +2688,7 @@ export type ConfigEntry =
+@@ -2695,6 +2722,7 @@ export type ConfigEntry =
            }
          }
          experimental?: {
@@ -10333,7 +10320,7 @@ index 2918c5865630bfca19efdec96870276b522ed073..9420c76473dc9eaea1e014537b3f0b09
            portable_shell_scanner?: boolean
            codemode_vm?: boolean
            all_flags?: boolean
-@@ -4458,8 +4486,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
+@@ -4509,8 +4537,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
  export type PermissionReplyInput = {
    readonly sessionID: string
    readonly requestID: string
@@ -10405,7 +10392,7 @@ index 8806276f3527ba23970938caffea4586a6e3266b..96a0ca529a8c8f9b679fb4c463ff093d
      }
    })
 diff --git a/packages/core/src/file-access.ts b/packages/core/src/file-access.ts
-index 391bc69da9eaa42a37d4f5be996d406e90612796..527107d76b964ff7962d7f8c66eeaf5cd3708c58 100644
+index b8d2f61bdfec114e070a9e7b7df2d034d52ed929..c2ed8e8ecc0303de1f58d8b2b592c7fee692b9d5 100644
 --- a/packages/core/src/file-access.ts
 +++ b/packages/core/src/file-access.ts
 @@ -4,6 +4,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -10416,7 +10403,7 @@ index 391bc69da9eaa42a37d4f5be996d406e90612796..527107d76b964ff7962d7f8c66eeaf5c
  import path from "path"
  import { Environments } from "./environment/environments.js"
  import { Environment } from "./environment/index.js"
-@@ -306,7 +307,7 @@ const layer = Layer.effect(
+@@ -304,7 +305,7 @@ const layer = Layer.effect(
        if (!request) return
        yield* permission.assert({
          ...request,
@@ -10425,7 +10412,7 @@ index 391bc69da9eaa42a37d4f5be996d406e90612796..527107d76b964ff7962d7f8c66eeaf5c
          ...Permission.invocation(context),
        })
      })
-@@ -333,11 +334,13 @@ const layer = Layer.effect(
+@@ -331,11 +332,13 @@ const layer = Layer.effect(
          (target.environment.path ?? path).dirname(target.absolute) === siblingPath.dirname(options.siblingOf.absolute)
  
        // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
@@ -10709,7 +10696,7 @@ index 9cf20e4a1f1201d33a816c8c7913e605d5f332be..3171e04014e6585abf5d2fb8653b8bd7
                })
                const resource = yield* mcp.readResource(input)
 diff --git a/packages/core/src/tool/plugin/patch.ts b/packages/core/src/tool/plugin/patch.ts
-index 9aff3a280952cce799b9f6dbc80dcdaf0c2622ca..2582f412abf38c34c2a0cf92c1b6d1401e087638 100644
+index e5f2c590f3413b29f50eb0e6c6d7d7bcb8f0b33b..9632d7e5cf3b2e8626b782e7623d930503b9f69a 100644
 --- a/packages/core/src/tool/plugin/patch.ts
 +++ b/packages/core/src/tool/plugin/patch.ts
 @@ -15,6 +15,7 @@ import { FileMutation } from "../../file-mutation.js"
@@ -10740,8 +10727,8 @@ index 9aff3a280952cce799b9f6dbc80dcdaf0c2622ca..2582f412abf38c34c2a0cf92c1b6d140
 +                  const { target, resolveTarget } = yield* authorization.prepare(hunk)
                    const file = FileAccess.key(target)
                    if (hunk.type === "add") {
-                     const content =
-@@ -204,17 +197,7 @@ export const Plugin = {
+                     prepared.push({
+@@ -202,17 +195,7 @@ export const Plugin = {
                  change.target,
                  ...(change.type === "update" && change.moveTarget ? [change.moveTarget] : []),
                ])
@@ -11632,7 +11619,7 @@ index 42247d2768cebab03cf9408c7acb3d19a9a4081d..9eccfdc1ba4b84742efb704d4509fc53
            subscribe,
            log,
 diff --git a/packages/core/test/tool-patch.test.ts b/packages/core/test/tool-patch.test.ts
-index ec0d930957970d4525ba1000f4c21a3788695c80..f62f4ad1836459a747b278df42ac98314e9b73ef 100644
+index 1242a855796292dd1d0df460a5833e59a7279ece..30b56a022eb3a018bf76aad1b957dcf6bfb15d9d 100644
 --- a/packages/core/test/tool-patch.test.ts
 +++ b/packages/core/test/tool-patch.test.ts
 @@ -214,19 +214,20 @@ describe("PatchTool", () => {
@@ -11661,32 +11648,10 @@ index ec0d930957970d4525ba1000f4c21a3788695c80..f62f4ad1836459a747b278df42ac9831
                expect(readsBeforeEditApproval).toBe(2)
                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/new.txt"), "utf8"))).toBe(
                  "created\n",
-@@ -540,59 +541,40 @@ describe("PatchTool", () => {
+@@ -554,37 +555,40 @@ describe("PatchTool", () => {
      ),
    )
  
--  it.live("includes the move destination in edit permission resources", () =>
--    withTempTool((directory, registry) =>
--      Effect.gen(function* () {
--        const source = path.join(directory, "old", "name.txt")
--        yield* Effect.promise(() => fs.mkdir(path.dirname(source), { recursive: true }))
--        yield* Effect.promise(() => fs.writeFile(source, "old content\n"))
--        yield* executeTool(
--          registry,
--          call(
--            "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-old content\n+new content\n*** End Patch",
--          ),
--        )
--        expect(assertions).toMatchObject([
--          {
--            action: "edit",
--            resources: ["old/name.txt", "renamed/dir/name.txt"],
--          },
--        ])
--      }),
--    ),
--  )
--
 -  it.live("uses Location-relative resources for move targets in a nested Location", () =>
 -    withTempDir((tmp) => {
 +  for (const scenario of [
@@ -11754,20 +11719,15 @@ index ec0d930957970d4525ba1000f4c21a3788695c80..f62f4ad1836459a747b278df42ac9831
  
    it.live("inserts lines with an insert-only hunk", () =>
      withTempTool((directory, registry) =>
-@@ -1121,94 +1103,50 @@ describe("PatchTool", () => {
+@@ -1082,94 +1086,50 @@ describe("PatchTool", () => {
      ),
    )
  
 -  it.live("uses canonical external permissions and resources for a move destination", () =>
 -    Effect.acquireUseRelease(
-+  for (const scenario of [
-+    { name: "uses canonical external permissions and resources for a move destination", move: true },
-+    { name: "approves each external file under the same parent", move: false },
-+  ]) {
-+    it.live(scenario.name, () => Effect.acquireUseRelease(
-       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
-       ([active, outside]) => {
-         reset()
+-      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+-      ([active, outside]) => {
+-        reset()
 -        const source = path.join(active.path, "source.txt")
 -        const destination = path.join(outside.path, "moved.txt")
 -        return Effect.promise(() => fs.writeFile(source, "before\n")).pipe(
@@ -11812,9 +11772,14 @@ index ec0d930957970d4525ba1000f4c21a3788695c80..f62f4ad1836459a747b278df42ac9831
 -
 -  it.live("approves each external file under the same parent", () =>
 -    Effect.acquireUseRelease(
--      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
--      ([active, outside]) => {
--        reset()
++  for (const scenario of [
++    { name: "uses canonical external permissions and resources for a move destination", move: true },
++    { name: "approves each external file under the same parent", move: false },
++  ]) {
++    it.live(scenario.name, () => Effect.acquireUseRelease(
+       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+       ([active, outside]) => {
+         reset()
 -        const first = path.join(outside.path, "first.txt")
 -        const second = path.join(outside.path, "second.txt")
 -        return Effect.promise(() =>
@@ -11904,7 +11869,7 @@ index 7d7497b434f91a69ca471e4b42434644d6071fbf..da8ab3f9a54fb3b9d43e474fed38c531
            agent: invocation.agent,
            source: { type: "tool", messageID: invocation.messageID, id: invocation.id },
 diff --git a/packages/core/test/machine-path.test.ts b/packages/core/test/machine-path.test.ts
-index 408b34e0ebe57d7d19ce5f9adeef1ac0b2861bd7..1ccfb0401320554ca84097283d94a789db52e36e 100644
+index baf79443b8d6cd2ffa9ba7d8df41214eb1ba063f..e8458d4c82133f0aae83d8431e303c3a050297aa 100644
 --- a/packages/core/test/machine-path.test.ts
 +++ b/packages/core/test/machine-path.test.ts
 @@ -161,6 +161,7 @@ const graph = (fixture: Fixture, realPermissions = false) =>
@@ -12016,7 +11981,7 @@ index 408b34e0ebe57d7d19ce5f9adeef1ac0b2861bd7..1ccfb0401320554ca84097283d94a789
      }).pipe(Effect.provide(graph(fixture(tmp.path), true))),
    ),
  )
-@@ -1074,7 +1069,10 @@ on.effect("locks a typed path and a resolved target to one file through a symlin
+@@ -1072,7 +1067,10 @@ on.effect("locks a typed path and a resolved target to one file through a symlin
      return Effect.gen(function* () {
        yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, "real")))
        yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "real", "a"), "one"))

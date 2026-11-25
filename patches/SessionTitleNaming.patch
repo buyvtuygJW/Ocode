@@ -116,7 +116,7 @@ index d69dc95ffab9d37318f4b0c5e8f95a2b9866d710..386eb8c733c7d902d195e5b48f9bdc51
      return Service.of({ generate })
    }),
 diff --git a/packages/core/test/session-title.test.ts b/packages/core/test/session-title.test.ts
-index 24380c57183784f269ed73607bf7e3836b9cbb8b..5b6db27167fa5533f5e53b3ff1353f56bd1296a1 100644
+index 23044fd92df6875576cb708f0b007ba64b8ed948..5b6db27167fa5533f5e53b3ff1353f56bd1296a1 100644
 --- a/packages/core/test/session-title.test.ts
 +++ b/packages/core/test/session-title.test.ts
 @@ -67,7 +67,7 @@ const providerRejected = (input: { readonly message: string }) =>
@@ -128,7 +128,7 @@ index 24380c57183784f269ed73607bf7e3836b9cbb8b..5b6db27167fa5533f5e53b3ff1353f56
      LLMEvent.stepFinish({
        index: 0,
        reason: { normalized: "stop" },
-@@ -205,564 +205,286 @@ const enableTitleAgent = Effect.gen(function* () {
+@@ -205,563 +205,286 @@ const enableTitleAgent = Effect.gen(function* () {
    })
  })
  
@@ -809,7 +809,6 @@ index 24380c57183784f269ed73607bf7e3836b9cbb8b..5b6db27167fa5533f5e53b3ff1353f56
 -for (const [prefix, stored] of [
 -  [95, `${"a".repeat(95)}😀...`],
 -  [96, `${"a".repeat(96)}...`],
--  [97, `${"a".repeat(97)}...`],
 -] as const)
 -  it.effect(`clips a long generated title without splitting an emoji after ${prefix} letters`, () =>
 -    Effect.gen(function* () {

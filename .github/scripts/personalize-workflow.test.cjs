@@ -25,13 +25,26 @@ test('build script is external, synced, and receives the fallback ref through en
 
 test('two successive dev syncs retain runnable workflow helpers and their tests byte-for-byte', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'workflow-generations-'));
+  function supportFiles(relative) {
+    return readdirSync(path.join(__dirname, '../..', relative), { withFileTypes: true })
+      .flatMap((entry) => {
+        const file = `${relative}/${entry.name}`;
+        if (entry.isDirectory()) return supportFiles(file);
+        assert.ok(entry.isFile(), `unsupported support entry: ${file}`);
+        return [file];
+      });
+  }
   const files = [
     '.github/workflows/weekly_customautorel.yml',
     '.github/workflows/build-personalize.sh',
-    ...readdirSync(__dirname, { withFileTypes: true }).filter((entry) => entry.isFile())
-      .map((entry) => `.github/scripts/${entry.name}`),
+    ...supportFiles('.github/scripts'),
   ];
   const expected = new Map(files.map((file) => [file, readFileSync(path.join(__dirname, '../..', file))]));
+  // An uploaded checkout can retain the pre-move helper even when the local
+  // checkout removed it. Exercise that actual CI layout on every platform.
+  const legacy = '.github/scripts/build-personalize.sh';
+  if (!expected.has(legacy)) expected.set(legacy, Buffer.from('# retained legacy helper\n'));
+  expected.set('.github/scripts/fixtures/sync-recursion/input.json', Buffer.from('{"nested":true}\n'));
   try {
     let source = path.join(directory, 'seed');
     for (const [file, bytes] of expected) {

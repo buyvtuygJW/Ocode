@@ -474,21 +474,9 @@ jobs:
           cp "../$SELF" "$SELF"
           cp ../.github/workflows/build-personalize.sh .github/workflows/build-personalize.sh
 
-          # The workflow is also used from dev, so retain its tested cleanup helper.
+          # Retain the complete support tree, including legacy and nested helpers.
           mkdir -p .github/scripts
-          cp ../.github/scripts/cleanup-storage.cjs .github/scripts/cleanup-storage.cjs
-          cp ../.github/scripts/cleanup-storage.test.cjs .github/scripts/cleanup-storage.test.cjs
-          # Same for the isolation-contract validator: the dev tree carries the
-          # patched sources it checks, so it stays runnable wherever the workflow runs.
-          cp ../.github/scripts/check-personalize-hooks.cjs .github/scripts/check-personalize-hooks.cjs
-          cp ../.github/scripts/personalize-hooks.test.cjs .github/scripts/personalize-hooks.test.cjs
-          cp ../.github/scripts/personalize-workflow.test.cjs .github/scripts/personalize-workflow.test.cjs
-          cp ../.github/scripts/release-combination.cjs .github/scripts/release-combination.cjs
-          cp ../.github/scripts/release-combination.test.cjs .github/scripts/release-combination.test.cjs
-          cp ../.github/scripts/personalize-runtime.test.cjs .github/scripts/personalize-runtime.test.cjs
-          cp ../.github/scripts/personalize-theme.test.cjs .github/scripts/personalize-theme.test.cjs
-          cp ../.github/scripts/repair-photon-patch.cjs .github/scripts/repair-photon-patch.cjs
-          cp ../.github/scripts/repair-photon-patch.test.cjs .github/scripts/repair-photon-patch.test.cjs
+          cp -R ../.github/scripts/. .github/scripts/
 
           if [ ! -s "$SELF" ]; then
             echo "ERROR: $SELF missing from automation checkout; refusing to push"

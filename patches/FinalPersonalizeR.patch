@@ -2305,14 +2305,16 @@ index 0000000000000000000000000000000000000000..bce92efbbe8e63ee5105bf4e294d67b3
 +import "../../../.personalize/legacy.test.mjs"
 diff --git a/packages/core/src/personalize/subagent-capabilities.ts b/packages/core/src/personalize/subagent-capabilities.ts
 new file mode 100644
+index 0000000000000000000000000000000000000000..81080febf5e4ce6d85a8a652cc1cab9e500d7b75
 --- /dev/null
 +++ b/packages/core/src/personalize/subagent-capabilities.ts
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,140 @@
 +import type { ToolEditor } from "@opencode/plugin/effect/tool"
 +import { Tool } from "@opencode/schema/tool"
 +import { isRecord } from "@opencode/util/record"
 +import { Effect, Schema } from "effect"
 +import type { Agent } from "../agent.js"
++import { PermissionPolicy } from "../permission/policy.js"
 +import type { Session } from "../session.js"
 +import { SessionSchema } from "../session/schema.js"
 +import type { Interface } from "../tool.js"
@@ -2356,7 +2358,9 @@ new file mode 100644
 +          (error) => new Tool.Error({ message: `Parent session not found: ${context.sessionID}`, error }),
 +        ),
 +      ))
-+      const snapshot = yield* deps.registry.snapshot([...agent.permissions, ...(inherited.permissions ?? [])])
++      const snapshot = yield* deps.registry.snapshot(
++        PermissionPolicy.fromRules(agent.permissions, inherited.permissions ?? []),
++      )
 +      const tools = Array.from(
 +        new Set([
 +          ...snapshot.definitions.map((definition) => definition.name),
@@ -2447,9 +2451,10 @@ new file mode 100644
 +}
 diff --git a/.personalize/subagent-capabilities.test.mjs b/.personalize/subagent-capabilities.test.mjs
 new file mode 100644
+index 0000000000000000000000000000000000000000..5362200474bcb823ff46f6d3decdbf7051377ed1
 --- /dev/null
 +++ b/.personalize/subagent-capabilities.test.mjs
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,229 @@
 +import assert from "node:assert/strict"
 +import { readFileSync } from "node:fs"
 +import { createRequire, registerHooks, stripTypeScriptTypes } from "node:module"
@@ -2460,7 +2465,7 @@ new file mode 100644
 +const requireCore = createRequire(root + "packages/core/package.json")
 +const effectURL = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(requireCore.resolve("effect")).href
 +const helperURL = pathToFileURL(root + "packages/core/src/personalize/subagent-capabilities.ts").href
-+// Only boundary/schema dependencies are doubled. Effects and the runtime schema converter are real.
++// Only boundary/schema dependencies are doubled. Effects, permission policy and the runtime schema converter are real.
 +registerHooks({
 +  resolve(specifier, context, next) {
 +    if (specifier === "effect") return { url: effectURL, shortCircuit: true }
@@ -2468,6 +2473,14 @@ new file mode 100644
 +      return { url: pathToFileURL(root + "packages/schema/src/tool.ts").href, shortCircuit: true }
 +    if (specifier === "@opencode/util/record")
 +      return { url: pathToFileURL(root + "packages/util/src/record.ts").href, shortCircuit: true }
++    if (specifier.endsWith("/permission/policy.js"))
++      return { url: pathToFileURL(root + "packages/core/src/permission/policy.ts").href, shortCircuit: true }
++    if (specifier === "./policy.js" && context.parentURL.endsWith("/permission/policy.ts"))
++      return { url: context.parentURL, shortCircuit: true }
++    if (specifier.endsWith("/util/wildcard.js"))
++      return { url: pathToFileURL(root + "packages/core/src/util/wildcard.ts").href, shortCircuit: true }
++    if (specifier === "./wildcard.js" && context.parentURL.endsWith("/util/wildcard.ts"))
++      return { url: context.parentURL, shortCircuit: true }
 +    if (specifier.endsWith("/session/schema.js")) return { url: "fixture:session", shortCircuit: true }
 +    if (specifier.endsWith("/tool/runtime.js")) return { url: "fixture:runtime", shortCircuit: true }
 +    if (specifier === "./tool.js" && context.parentURL.endsWith("/packages/schema/src/tool.ts"))
@@ -2496,6 +2509,7 @@ new file mode 100644
 +})
 +
 +const { Effect, Schema } = await import("effect")
++const { PermissionPolicy } = await import(pathToFileURL(root + "packages/core/src/permission/policy.ts").href)
 +const { registerSubagentCapabilities } = await import(helperURL)
 +const caller = { sessionID: "parent" }
 +function fixture(options = {}) {
@@ -2524,10 +2538,11 @@ new file mode 100644
 +      id, parentID: id === "foreign" ? "other" : "parent", agent: "old",
 +      permissions: (id === "parent" ? options.parentPermissions : options.childPermissions) ?? [{ action: "read", resource: "*", effect: "allow" }],
 +    }) },
-+    registry: { snapshot: (permissions) => {
-+      snapshots.push(permissions)
++    registry: { snapshot: (policy) => {
++      assert.equal(policy._tag, "rules", "snapshot requires a PermissionPolicy, not a raw rules array")
++      snapshots.push(policy)
 +      if (options.permissionFiltered) return Effect.succeed({
-+        definitions: permissions.filter(x => x.action === "shell" || x.action === "*").at(-1)?.effect === "allow" ? [{ name: "shell" }] : [],
++        definitions: PermissionPolicy.isActionDenied(policy, "shell") ? [] : [{ name: "shell" }],
 +      })
 +      return Effect.succeed({
 +        definitions: options.readOnly ? [{ name: "read" }] : [{ name: "read" }, { name: "execute" }],
@@ -2551,7 +2566,7 @@ new file mode 100644
 +  assert.deepEqual(caps.tools, ["council", "execute", "read"])
 +  assert.equal(caps.approvalMayBeRequired, true)
 +  assert.equal(caps.authorization, "visibility_only")
-+  assert.equal(f.snapshots[0].length, 2)
++  assert.equal(f.snapshots[0].rules.length, 2)
 +  assert.match(result.content, /not authorization/)
 +})
 +test("rejects unknown, primary, missing and foreign children without snapshot or execution", async () => {
@@ -2610,7 +2625,7 @@ new file mode 100644
 +  await assert.rejects(invoke(f, "subagent", {
 +    agent: "general", sessionID: "child", required_tools: ["shell", "council"],
 +  }), /missing required tools: shell, council.*Available tools: read/)
-+  assert.deepEqual(f.snapshots[0], [
++  assert.deepEqual(f.snapshots[0].rules, [
 +    { action: "*", resource: "*", effect: "deny" },
 +    { action: "read", resource: "*", effect: "allow" },
 +  ])
@@ -2642,13 +2657,25 @@ new file mode 100644
 +    if (parent === "deny") await assert.rejects(invoke(f, "subagent", input), /missing required tools: shell/)
 +    else await invoke(f, "subagent", input)
 +    assert.equal(f.calls(), parent === "allow" ? 1 : 0)
-+    assert.deepEqual(f.snapshots[0], [...shell(parent === "allow" ? "deny" : "allow"), ...shell(parent)])
++    assert.deepEqual(f.snapshots[0].rules, [...shell(parent === "allow" ? "deny" : "allow"), ...shell(parent)])
 +  }
 +})
 +test("continuation uses actual child permissions rather than current parent rules", async () => {
 +  const f = fixture({ permissionFiltered: true, agentPermissions: shell("deny"), parentPermissions: shell("deny"), childPermissions: shell("allow") })
 +  const result = await invoke(f, "subagent_capabilities", { agent: "general", sessionID: "child" })
 +  assert.deepEqual(result.metadata.subagentCapabilities.tools, ["shell"])
++})
++test("stock policy keeps ask and resource-scoped grants visible without authorizing execution", async () => {
++  for (const parentPermissions of [
++    shell("ask"),
++    [{ action: "shell", resource: "git *", effect: "allow" }],
++  ]) {
++    const f = fixture({ permissionFiltered: true, agentPermissions: shell("deny"), parentPermissions })
++    const result = await invoke(f, "subagent_capabilities", { agent: "general" })
++    assert.deepEqual(result.metadata.subagentCapabilities.tools, ["shell"])
++    assert.equal(result.metadata.subagentCapabilities.approvalMayBeRequired, true)
++    assert.equal(result.metadata.subagentCapabilities.authorization, "visibility_only")
++  }
 +})
 +test("parent lookup failure stops fresh-child inspection and spawning", async () => {
 +  const f = fixture({ parentMissing: true })
