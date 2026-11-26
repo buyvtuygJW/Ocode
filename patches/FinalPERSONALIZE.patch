@@ -4533,10 +4533,10 @@ index 0000000000000000000000000000000000000000..be571dad220619ee911a0b9c726bd4b8
 +})
 diff --git a/.personalize/permission-contract.test.mjs b/.personalize/permission-contract.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a9b79a08fb25d30ab53c9f61c1d0b0c5b95000ba
+index 0000000000000000000000000000000000000000..305420c18ab02f38082a918e92a07f786cbcba30
 --- /dev/null
 +++ b/.personalize/permission-contract.test.mjs
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,464 @@
 +import assert from "node:assert/strict"
 +import { readFileSync, existsSync } from "node:fs"
 +import { stripTypeScriptTypes } from "node:module"
@@ -4574,6 +4574,7 @@ index 0000000000000000000000000000000000000000..a9b79a08fb25d30ab53c9f61c1d0b0c5
 +})
 +const engine = load(path.join(root, "packages/core/src/personalize/permission-policy.ts"), {
 +  "node:crypto": { createHash },
++  "node:path": path,
 +  "drizzle-orm": {},
 +  effect: {},
 +  "@opencode/schema/personalize/permission-policy": policy,
@@ -4709,8 +4710,22 @@ index 0000000000000000000000000000000000000000..a9b79a08fb25d30ab53c9f61c1d0b0c5
 +  assert.deepEqual(policy.parsePolicy("unknown=s", true), { kind: "unknown", lifetime: "session" })
 +  assert.deepEqual(policy.parsePolicy("Unknown=SE", true), { kind: "unknown", lifetime: "session", scope: "executable" })
 +  assert.deepEqual(policy.parsePolicy("Unknown=SEA", true), { kind: "unknown", lifetime: "session", scope: "executable-all" })
-+  for (const text of ["Unknown=S*", "Unknown=E", "Unknown=E*", "Unknown=SE*", "Unknown=SEA*", "Unknown=1*", "Unknown=S R=S*", "", "RU=S*"])
++  for (const text of ["Unknown=S*", "Unknown=E", "Unknown=E*", "Unknown=SE*", "Unknown=SEA*", "Unknown=1*", "Unknown=S R=S*", ""])
 +    assert.match(policy.policyError(text, true), /no wildcard/)
++})
++
++test("v11 CRUD choice precedes read shortcut; shell CRUD and execution approval remain separate", () => {
++  const read = policy.withFacts(request(), { ...facts, operations: ["read"] })
++  assert.deepEqual(policy.choices(read), ["once", "policy", "session_read", "reject"])
++  const value = executableRequest("[IO.File]::ReadAllBytes($p)")
++  assert.deepEqual(policy.policyDirectories(value), [value.metadata.unknownCwd])
++  const sent = []
++  const controller = createPermissionController(value, { send: (reply) => { sent.push(reply) } })
++  assert.equal(controller.submit({ scope: "session", policy: "RU=S* CD=D*" }), true, controller.getState().error)
++  assert.equal(sent[0].decision.policy, "RU=S* CD=D*")
++  assert.equal(policy.parsePolicy("RU=S* CD=D*", true).kind, "filesystem")
++  assert.match(policy.policyError("R=1", true, value), /require =S or =D/)
++  controller.dispose()
 +})
 +
 +const executableRequest = (command, extra = {}) => request({
@@ -4778,14 +4793,15 @@ index 0000000000000000000000000000000000000000..a9b79a08fb25d30ab53c9f61c1d0b0c5
 +  }]), key)
 +})
 +
-+test("compound or variable commands cannot obtain an executable grant or reach the backend through SE/SEA", () => {
++test("compound or dynamic-target commands cannot obtain a command grant or reach the backend through SE/SEA", () => {
 +  for (const command of [
 +    "$git = 'Z:/PortableGit/cmd/git.exe'; & $git status",
 +    "& 'Z:/PortableGit/cmd/git.exe' status; Write-Output done",
 +    "& 'Z:/PortableGit/cmd/git.exe' diff | Out-File result",
 +    "& 'Z:/PortableGit/cmd/git.exe' status > result",
 +    "& 'Z:/PortableGit/cmd/git.exe' $(Get-Content args)",
-+    "git status",
++    '& "$base/node.exe" script.mjs',
++    'node "$(Get-Content args)"',
 +  ]) {
 +    const value = executableRequest(command)
 +    assert.equal(engine.unknownExecutableKey(value, []), undefined)
@@ -4794,10 +4810,33 @@ index 0000000000000000000000000000000000000000..a9b79a08fb25d30ab53c9f61c1d0b0c5
 +      const controller = createPermissionController(value, { send: () => { sent++ } })
 +      assert.equal(controller.submit({ scope: "session", policy: text }), false)
 +      assert.equal(sent, 0)
-+      assert.match(controller.getState().error, /one literal absolute \.exe command/)
++      assert.match(controller.getState().error, /one command with a literal name or path/)
 +      controller.dispose()
 +    }
 +  }
++})
++
++test("git names and the reported Node variable arguments reach the backend with the requested scope", () => {
++  for (const [command, text] of [
++    ["git status --short", "Unknown=SE"],
++    ["git add file.txt", "Unknown=SEA"],
++    ['node "$base\\synthetic-transform-profile.mjs" "$base\\diagnostics-gate-detail-01" batch', "Unknown=SEA"],
++  ]) {
++    const value = executableRequest(command)
++    const sent = []
++    const controller = createPermissionController(value, { send: (reply) => { sent.push(reply) } })
++    assert.equal(controller.submit({ scope: "session", policy: text }), true, controller.getState().error)
++    assert.equal(sent.length, 1)
++    assert.ok(engine.unknownExecutableKey(value, [], text === "Unknown=SE" ? "executable" : "executable-all"))
++    controller.dispose()
++  }
++  const node = executableRequest('node "$base\\profile.mjs" batch')
++  assert.match(policy.policyError("Unknown=SE", true, node), /Use Unknown=SEA/)
++  const key = engine.unknownExecutableKey(node, [], "executable-all")
++  assert.equal(key, engine.unknownExecutableKey(executableRequest("node other.mjs next"), [], "executable-all"))
++  assert.notEqual(key, engine.unknownExecutableKey(executableRequest("git status"), [], "executable-all"))
++  const lookup = (value) => engine.unknownExecutableKey(executableRequest("git status", { unknownLookup: value }), [], "executable-all")
++  assert.notEqual(lookup("first-environment"), lookup("second-environment"))
 +})
 +
 +test("filesystem validation preserves omitted operations and rejects MCP or contradictory policies", () => {
@@ -4964,10 +5003,10 @@ index 0000000000000000000000000000000000000000..a9b79a08fb25d30ab53c9f61c1d0b0c5
 +})
 diff --git a/.personalize/single-executable.test.mjs b/.personalize/single-executable.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3721ce15ac8e9c22052297c04dd302170bafbfc8
+index 0000000000000000000000000000000000000000..a9a6a8408b510df3977a4963780562f080abed95
 --- /dev/null
 +++ b/.personalize/single-executable.test.mjs
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,158 @@
 +import assert from "node:assert/strict"
 +import { readFileSync } from "node:fs"
 +import { stripTypeScriptTypes } from "node:module"
@@ -5009,7 +5048,7 @@ index 0000000000000000000000000000000000000000..3721ce15ac8e9c22052297c04dd30217
 +  assert.notEqual(singleExecutable("C:\\CaseSensitive\\Node.exe", shell), singleExecutable("C:\\CaseSensitive\\node.exe", shell))
 +})
 +
-+test("commands requiring interpretation or shell expansion are not classified", () => {
++test("compound commands and command substitutions are not classified", () => {
 +  for (const command of [
 +    `$git='${git}'; & $git status`,
 +    `${git} status; ${git} log`,
@@ -5017,11 +5056,9 @@ index 0000000000000000000000000000000000000000..3721ce15ac8e9c22052297c04dd30217
 +    `${git} status > out.txt`,
 +    `${git} status 2>&1`,
 +    `${git} $(Get-Location)`,
-+    `${git} $args`,
 +    `${git} @args`,
 +    `${git} status # comment`,
 +    `${git} sta\`tus`,
-+    `${git} "value $env:PATH"`,
 +    `${git} "value \`$(Get-Location)"`,
 +    `${git} 'unterminated`,
 +    `${git} 'one'two`,
@@ -5035,18 +5072,54 @@ index 0000000000000000000000000000000000000000..3721ce15ac8e9c22052297c04dd30217
 +  ]) assert.equal(singleExecutable(command, shell), undefined, command)
 +})
 +
-+test("paths must be literal absolute drive paths to an exe", () => {
++test("ambiguous paths and dynamic command targets are not classified", () => {
 +  for (const command of [
-+    "git.exe status", ".\\git.exe status", "C:git.exe status",
++    "$git status", "& $git status", "C:git.exe status",
 +    "\\\\server\\share\\git.exe status", "C:\\a\\\\git.exe status",
 +    "C:\\a\\.\\git.exe status", "C:\\a\\..\\git.exe status",
 +    "C:\\a.\\git.exe status", "C:\\a\\git.exe:stream status",
 +    "C:\\a\\*.exe status", "C:\\a\\git?.exe status",
 +    "& 'C:\\PROGRA~1\\git.exe' status", "C:\\a\\CON.exe status",
-+    "C:\\a\\git.cmd status", "& 'C:\\a \\git.exe' status",
++    "& 'C:\\a \\git.exe' status",
 +  ]) assert.equal(singleExecutable(command, shell), undefined, command)
 +  assert.equal(singleExecutable(`${git} status`, "cmd.exe"), undefined)
 +  assert.equal(singleExecutable(`${git} status`, "/usr/bin/bash"), undefined)
++})
++
++test("ordinary command names and script launchers do not require an exe suffix", () => {
++  for (const [command, target] of [
++    ["git status --short", "git"],
++    ["git --short", "git"],
++    ["git add file.txt", "git"],
++    ["git.exe add file.txt", "git.exe"],
++    ["node script.mjs batch", "node"],
++    ["npm.cmd run test", "npm.cmd"],
++    [".\\scripts\\check.ps1 -Mode test", ".\\scripts\\check.ps1"],
++    ["& 'C:/Tools/runner' --version", "c:\\Tools\\runner"],
++    ["& 'C:/Tools/check.ps1' -Mode test", "c:\\Tools\\check.ps1"],
++  ]) assert.equal(singleExecutable(command, shell), target, command)
++  assert.notEqual(singleExecutable("git status", shell), singleExecutable("git.exe status", shell))
++  const scope = (command) => singleExecutableScope(command, shell, "D:/work").modeKey
++  assert.equal(scope("git add test/a.ts"), scope("git add test/b.ts"))
++  assert.notEqual(scope("git add test/a.ts"), scope("git add src/b.ts"))
++  assert.notEqual(scope("git status --short"), scope("git add test/a.ts"))
++})
++
++test("SEA accepts the reported Node invocation and scalar argument expansion, not executable substitutions", () => {
++  const reported = 'node "$base\\synthetic-transform-profile.mjs" "$base\\diagnostics-gate-detail-01" batch'
++  for (const command of [
++    reported, 'node "${base}\\profile.mjs" "$env:TEMP\\output" batch',
++    'node $script $base\\output batch', `& '${node}' "$base\\profile.mjs"`,
++  ]) {
++    assert.ok(singleExecutable(command, shell), command)
++    assert.equal(singleExecutableScope(command, shell, "D:/work"), undefined, "SE cannot infer a variable's directory")
++  }
++  for (const command of [
++    'node "$($base; whoami)\\profile.mjs"', 'node "$(whoami)"', 'node "`$(whoami)"',
++    'node $base.Member', 'node $base[0]', 'node @args', 'node script.mjs; whoami',
++    'node "$base\\profile.mjs" | whoami', 'node "$base\\profile.mjs" > out',
++    '& "$base\\node.exe" script.mjs', '& (Get-Command node) script.mjs',
++  ]) assert.equal(singleExecutable(command, shell), undefined, command)
 +})
 +
 +test("scope fixes ordinary argv and allows basenames only within the same parent", () => {
@@ -5088,13 +5161,13 @@ index 0000000000000000000000000000000000000000..3721ce15ac8e9c22052297c04dd30217
 +test("scope shares the existing conservative command grammar", () => {
 +  for (const command of [
 +    `${git} status; ${git} log`, `${git} $args`, `${git} 'a\u2019b'`,
-+    "git.exe status", `& '${node}' --test test/*.mjs`, `${git} status\nwhoami`,
++    `& '${node}' --test test/*.mjs`, `${git} status\nwhoami`,
 +  ]) assert.equal(singleExecutableScope(command, shell, "D:\\project"), undefined, command)
 +  assert.equal(singleExecutableScope(`${git} status`, "cmd.exe"), undefined)
 +})
 diff --git a/packages/app/src/session/requests/permission-controls.tsx b/packages/app/src/session/requests/permission-controls.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..e9e6324d76d435dfaa2344a9f7a631499b2cd5da
+index 0000000000000000000000000000000000000000..f1b3bfa07b21c84c9aec1c95c09c14dd99e8377d
 --- /dev/null
 +++ b/packages/app/src/session/requests/permission-controls.tsx
 @@ -0,0 +1,80 @@
@@ -5147,7 +5220,7 @@ index 0000000000000000000000000000000000000000..e9e6324d76d435dfaa2344a9f7a63149
 +          <For each={policyDirectories(props.request)}>{(directory) => <code>{directory}</code>}</For>
 +          <input
 +            value={policy.text}
-+            placeholder={unknown() ? policyText.unknownPlaceholder : policyText.placeholder}
++            placeholder={unknown() ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
 +            disabled={props.responding}
 +            onInput={(event) => setPolicy("text", event.currentTarget.value)}
 +            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyPolicy() } }}
@@ -5646,16 +5719,17 @@ index 0000000000000000000000000000000000000000..19d222c49ee23f0790234cac6aede717
 +}
 diff --git a/packages/core/src/personalize/permission-policy.ts b/packages/core/src/personalize/permission-policy.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f0663ed00b703213159110d2a8349d73bc576f8f
+index 0000000000000000000000000000000000000000..a1e65078e0bb8e1182b61e4665bb0b25b7557270
 --- /dev/null
 +++ b/packages/core/src/personalize/permission-policy.ts
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,457 @@
 +import { createHash } from "node:crypto"
++import path from "node:path"
 +import { eq } from "drizzle-orm"
 +import { Effect } from "effect"
 +import type { Permission as SchemaPermission } from "@opencode/schema/permission"
 +import type { Reply as PolicyReply, InvalidPolicyError } from "@opencode/schema/personalize/permission-contract"
-+import { parsePolicy, readFacts, unknownExecutable, unknownExecutableScope, unknownShell, type Facts } from "@opencode/schema/personalize/permission-policy"
++import { executablePolicyError, executableScopeError, parsePolicy, readFacts, unknownExecutable, unknownExecutableScope, unknownPolicyDirectory, unknownShell, type Facts } from "@opencode/schema/personalize/permission-policy"
 +import { SessionEvent } from "@opencode/schema/session-event"
 +import type { Bus } from "../bus.js"
 +import type { Database } from "../database/database.js"
@@ -5756,6 +5830,7 @@ index 0000000000000000000000000000000000000000..f0663ed00b703213159110d2a8349d73
 +  return createHash("sha256").update(JSON.stringify([
 +    scope === "executable" ? "single-executable-args-v1" : "single-executable-v1",
 +    input.sessionID, executable, metadata.unknownCwd, metadata.unknownShell,
++    ...(metadata.unknownLookup === undefined ? [] : [{ lookup: metadata.unknownLookup }]),
 +    ...(scoped ? [scoped.modeKey] : []),
 +    grants.filter((grant) => grant.effect === "deny").map((grant) => JSON.stringify(grant)).sort(),
 +    ...(metadata.unknownMachine === undefined ? [] : [{ machine: metadata.unknownMachine }]),
@@ -5962,7 +6037,7 @@ index 0000000000000000000000000000000000000000..f0663ed00b703213159110d2a8349d73
 +        if (parsed.kind === "unknown") {
 +          const selectedKey = parsed.scope ? unknownExecutableKey(request, grants, parsed.scope) : key
 +          if (!selectedKey) return yield* deps.invalidPolicy(
-+            "Unknown=SE/SEA requires one literal absolute .exe command; no scripts, variables, pipes, or redirects.",
++            unknownExecutable(request) && parsed.scope === "executable" ? executableScopeError : executablePolicyError,
 +          )
 +          return {
 +            type: "unknown", key: selectedKey, lifetime: parsed.lifetime,
@@ -5976,12 +6051,18 @@ index 0000000000000000000000000000000000000000..f0663ed00b703213159110d2a8349d73
 +      catch: (error) => deps.invalidPolicy(error instanceof Error ? error.message : String(error)),
 +    })
 +    if (!selections) return { type: "delegate" } satisfies ReplyPlan
-+    const directories = SessionGrant.directories(request)
-+    if (!directories) return yield* deps.invalidPolicy(
++    const shellDirectory = unknownPolicyDirectory(request)
++    const directories = shellDirectory
++      ? ([shellDirectory.directory].filter((directory) =>
++        (path.posix.isAbsolute(directory) || path.win32.isAbsolute(directory)) && !/[\0\r\n*?]/.test(directory)))
++      : SessionGrant.directories(request)
++    if (shellDirectory && selections.some((selection) => selection.lifetime === "once"))
++      return yield* deps.invalidPolicy("Shell CRUD settings require =S or =D; use Unknown=1 for one shell invocation.")
++    if (!directories?.length) return yield* deps.invalidPolicy(
 +      "Filesystem selections require an explicitly classified directory request; no save pattern can widen the selected scope.",
 +    )
 +    if (!grants) return yield* deps.invalidPolicy("Invalid stored conversation filesystem policy; revoke it before applying another selection.")
-+    const machine = readFacts(request)?.machine
++    const machine = shellDirectory?.machine ?? readFacts(request)?.machine
 +    return { type: "filesystem", additions: directories.flatMap((directory) =>
 +      selections.map((selection) => ({ ...selection, directory, ...(machine === undefined ? {} : { machine }) }))) } satisfies ReplyPlan
 +  })
@@ -6514,11 +6595,12 @@ index 0000000000000000000000000000000000000000..a8f3c59361aa5661ec3697b26a0147cd
 +}
 diff --git a/packages/core/src/personalize/shell-permission.ts b/packages/core/src/personalize/shell-permission.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..165d28cc4154690bcd1868d1a1c2a7c47976f8d0
+index 0000000000000000000000000000000000000000..9ccf58ff6786bab73d7333f078737c58e1ef4b54
 --- /dev/null
 +++ b/packages/core/src/personalize/shell-permission.ts
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,58 @@
 +import path from "node:path"
++import { createHash } from "node:crypto"
 +import { Effect } from "effect"
 +import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 +import type { Tool } from "@opencode/schema/tool"
@@ -6566,6 +6648,11 @@ index 0000000000000000000000000000000000000000..165d28cc4154690bcd1868d1a1c2a7c4
 +    metadata: request.action === "shell" && unknown ? {
 +      ...request.metadata, filesystemEffects: "unknown",
 +      unknownCommand: invocation.command, unknownCwd: target.absolute, unknownShell: invocation.shell,
++      // PATH/other environment changes must not silently reuse a named-command
++      // grant. Hash the final shell environment; never publish its secret values.
++      unknownLookup: createHash("sha256").update(JSON.stringify(
++        Object.entries(invocation.env).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0),
++      )).digest("hex"),
 +      ...(target.machine === undefined ? {} : { unknownMachine: target.machine }),
 +    } : request.metadata,
 +  })
@@ -6622,10 +6709,10 @@ index 0000000000000000000000000000000000000000..655e18271098ee5144a03e5228ad06db
 +})
 diff --git a/packages/core/test/permission/personalize.integration.test.ts b/packages/core/test/permission/personalize.integration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d05eb0c69755d9a163a9e42a82facd3cb96fdcf
+index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8ee5aaa421
 --- /dev/null
 +++ b/packages/core/test/permission/personalize.integration.test.ts
-@@ -0,0 +1,905 @@
+@@ -0,0 +1,968 @@
 +import { expect, test } from "bun:test"
 +import { Deferred, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
 +import { Agent } from "@opencode/core/agent"
@@ -6733,6 +6820,35 @@ index 0000000000000000000000000000000000000000..7d05eb0c69755d9a163a9e42a82facd3
 +      expect("directories" in value!).toBe(false)
 +    }
 +    yield* first.service.reply({ requestID: first.request.id, reply: "once" })
++    yield* Fiber.join(first.fiber)
++  }),
++)
++
++it.effect("shell CRUD policy persists without approving the pending PowerShell program", () =>
++  Effect.gen(function* () {
++    yield* setup()
++    const command = "[IO.File]::ReadAllBytes($p)"
++    const first = yield* waitForRequest({
++      action: "shell", resources: [command], metadata: {
++        filesystemEffects: "unknown", unknownCommand: command,
++        unknownCwd: "/project", unknownShell: "powershell.exe",
++      },
++    })
++    yield* first.service.reply({
++      requestID: first.request.id, reply: { scope: "session", policy: "RU=S* CD=D*" },
++    })
++    expect((yield* first.service.list()).some((request) => request.id === first.request.id)).toBe(true)
++    const sessions = yield* SessionStore.Service
++    const rules = (yield* sessions.get(first.request.sessionID))!.permissions!
++    expect(rules.filter((rule) => rule.action === "__opencode_filesystem_session_v1")).toHaveLength(4)
++    expect(rules.some((rule) => rule.action === "__opencode_shell_unknown_v1")).toBe(false)
++    expect((yield* first.service.ask(assertion({
++      action: "read", operations: ["read"], paths: ["/project/file"], directories: ["/project"],
++    }))).effect).toBe("allow")
++    expect((yield* first.service.ask(assertion({
++      action: "edit", operations: ["create"], paths: ["/project/new"], directories: ["/project"],
++    }))).effect).toBe("deny")
++    yield* first.service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=1" } })
 +    yield* Fiber.join(first.fiber)
 +  }),
 +)
@@ -6886,6 +7002,40 @@ index 0000000000000000000000000000000000000000..7d05eb0c69755d9a163a9e42a82facd3
 +    }
 +  }),
 +)
++
++for (const command of [
++  "git status --short",
++  'node "$base\\synthetic-transform-profile.mjs" "$base\\diagnostics-gate-detail-01" batch',
++]) {
++  it.effect(`Unknown=SEA settles and remembers the real named-command request: ${command}`, () =>
++    Effect.gen(function* () {
++      yield* setup()
++      const metadata = {
++        filesystemEffects: "unknown", unknownCommand: command,
++        unknownCwd: "D:/work", unknownShell: "powershell.exe", unknownLookup: "environment-one",
++      }
++      const first = yield* waitForRequest({ action: "shell", resources: [command], metadata })
++      yield* first.service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=SEA" } })
++      yield* Fiber.join(first.fiber)
++      const next = command.startsWith("git") ? "git add file.txt" : 'node "$other\\next.mjs" different'
++      const input = (text: string, change = {}) => assertion({
++        action: "shell", resources: [text], metadata: { ...metadata, unknownCommand: text, ...change },
++      })
++      expect((yield* first.service.ask(input(next))).effect).toBe("allow")
++      for (const candidate of [
++        input(next + "; whoami"), input(next + " | Out-String"), input('node "$(whoami)"'),
++        input(next, { unknownCwd: "D:/other" }), input(next, { unknownLookup: "environment-two" }),
++        input(next, { unknownMachine: "remote" }), input("different-command --version"),
++      ]) {
++        const pending = yield* first.service.ask(candidate)
++        expect(pending.effect).toBe("ask")
++        yield* first.service.reply({ requestID: pending.id, reply: "reject" })
++      }
++      yield* setRules([{ action: "shell", resource: "*", effect: "deny" }])
++      expect((yield* first.service.ask(input(next))).effect).toBe("deny")
++    }),
++  )
++}
 +
 +it.effect("concurrent listing requests consume R=-1 at most once", () =>
 +  Effect.gen(function* () {
@@ -8729,10 +8879,10 @@ index 0000000000000000000000000000000000000000..076266e09fd340fa03974217f693d4c8
 +}
 diff --git a/packages/schema/src/personalize/permission-policy.ts b/packages/schema/src/personalize/permission-policy.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0f9d8c9a2961cfde270cc39fee5bdfb2b991642c
+index 0000000000000000000000000000000000000000..12edc8501ac12f4197b1efb0272b3da43e3550aa
 --- /dev/null
 +++ b/packages/schema/src/personalize/permission-policy.ts
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,202 @@
 +import { parsePermissionShorthand, type FilesystemDecision } from "../permission-shorthand.js"
 +import { singleExecutable, singleExecutableScope } from "./single-executable.js"
 +
@@ -8836,7 +8986,7 @@ index 0000000000000000000000000000000000000000..0f9d8c9a2961cfde270cc39fee5bdfb2
 +export function parsePolicy(text: string, unknown: boolean):
 +  | { readonly kind: "unknown"; readonly lifetime: "once" | "session"; readonly scope?: "executable" | "executable-all" }
 +  | { readonly kind: "filesystem"; readonly rules: readonly FilesystemDecision[] } {
-+  if (unknown) {
++  if (unknown && (!text.trim() || /^unknown(?:\s|=|$)/i.test(text.trim()))) {
 +    const match = /^unknown=(1|s|se|sea)$/i.exec(text.trim())
 +    if (!match) throw new Error("Use Unknown=1, Unknown=S, Unknown=SE, or Unknown=SEA; no wildcard.")
 +    if (match[1].toLowerCase() === "se") return { kind: "unknown", lifetime: "session", scope: "executable" }
@@ -8853,11 +9003,21 @@ index 0000000000000000000000000000000000000000..0f9d8c9a2961cfde270cc39fee5bdfb2
 +export function policyError(text: string, unknown: boolean, request?: RequestLike): string | undefined {
 +  try {
 +    const parsed = parsePolicy(text, unknown)
-+    if (parsed.kind === "unknown" && parsed.scope && request && !unknownExecutable(request))
-+      throw new Error("Unknown=SE/SEA requires one literal absolute .exe command; no scripts, variables, pipes, or redirects.")
++    if (parsed.kind === "unknown" && parsed.scope && request) {
++      if (!unknownExecutable(request)) throw new Error(executablePolicyError)
++      if (parsed.scope === "executable" && !unknownExecutableScope(request)) throw new Error(executableScopeError)
++    }
++    if (parsed.kind === "filesystem" && unknown && request) {
++      if (!unknownPolicyDirectory(request)) throw new Error("Shell CRUD settings require a displayed working directory.")
++      if (parsed.rules.some((rule) => rule.lifetime === "once"))
++        throw new Error("Shell CRUD settings require =S or =D; use Unknown=1 for one shell invocation.")
++    }
 +  }
 +  catch (error) { return error instanceof Error ? error.message : String(error) }
 +}
++
++export const executablePolicyError = "Unknown=SE/SEA requires one command with a literal name or path; no dynamic command targets, command substitutions, pipes, or redirects."
++export const executableScopeError = "Unknown=SE requires literal arguments to keep their structure and directories fixed. Use Unknown=SEA to approve this command with variable arguments."
 +
 +/** Policy success is not proof that the original request was actually settled. */
 +export function isPolicyReply(reply: unknown): boolean {
@@ -8881,8 +9041,8 @@ index 0000000000000000000000000000000000000000..0f9d8c9a2961cfde270cc39fee5bdfb2
 +  const policy = facts !== undefined && (!!facts.directories?.length || request.action === "external_directory")
 +  return [
 +    "once",
-+    ...(policy && facts.operations.every((operation) => operation === "read") ? ["session_read" as const] : []),
 +    ...(policy ? ["policy" as const] : []),
++    ...(policy && facts.operations.every((operation) => operation === "read") ? ["session_read" as const] : []),
 +    ...(request.save?.length ? ["always" as const] : []),
 +    "reject",
 +  ]
@@ -8902,32 +9062,46 @@ index 0000000000000000000000000000000000000000..0f9d8c9a2961cfde270cc39fee5bdfb2
 +export function policyDirectories(request: RequestLike): readonly string[] {
 +  // Presentation fallback only: the backend never derives a grant from save.
 +  const facts = readFacts(request)
++  const shellDirectory = unknownPolicyDirectory(request)
++  if (shellDirectory) return [shellDirectory.machine ? `${shellDirectory.machine}:${shellDirectory.directory}` : shellDirectory.directory]
 +  if (facts?.machine && facts.directories) return facts.directories.map((directory) => `${facts.machine}:${directory}`)
 +  return facts?.directories ?? request.directories ??
 +    request.resources.map((resource) => resource.replace(/\/\*$/, ""))
 +}
 +
++/** Shell CRUD edits configure a displayed directory; they do NOT approve shell execution. */
++export function unknownPolicyDirectory(request: Pick<RequestLike, "action" | "metadata">) {
++  const metadata = request.metadata
++  if (request.action !== "shell" || metadata?.filesystemEffects !== "unknown" ||
++    typeof metadata.unknownCwd !== "string" || !metadata.unknownCwd ||
++    (metadata.unknownMachine !== undefined && (typeof metadata.unknownMachine !== "string" ||
++      !metadata.unknownMachine || /[\0\r\n]/.test(metadata.unknownMachine)))) return
++  return { directory: metadata.unknownCwd, machine: metadata.unknownMachine as string | undefined }
++}
++
 +export function policyHint(unknown: boolean, request?: RequestLike): string {
 +  const executable = request && unknownExecutable(request)
 +  return unknown
-+    ? `Unknown=1 once · S exact command/session · SE executable/session, fixed argument structure with file names varying only in the same parent directory · SEA executable/session, any arguments${executable ? ` (${executable})` : ""} · no * · executable/code/child processes may bypass filesystem denies.`
++    ? `RU=S* CD=D* edits the displayed directory's CRUD policy; shell execution still needs separate approval. Unknown=1 once · S exact command/session · SE fixed literal arguments · SEA any arguments including scalar variables${executable ? ` (${executable})` : ""} · names resolve in the shell · Unknown has no * · executable/code/child processes may bypass filesystem denies.`
 +    : "RU=S* CD=D* · selected subtree + descendants · survives restart · =1 once · =S session · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged."
 +}
 diff --git a/packages/schema/src/personalize/single-executable.ts b/packages/schema/src/personalize/single-executable.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ceccea895162e5b6ff296da7eb1cd0cf426c2cfa
+index 0000000000000000000000000000000000000000..1c413fc4f09a2ad2cff13d285a7331b30625170a
 --- /dev/null
 +++ b/packages/schema/src/personalize/single-executable.ts
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,173 @@
 +/**
-+ * Identify one literal native Windows executable in a PowerShell command.
-+ * This does not assess the executable, its arguments, or child processes.
++ * Identify a single PowerShell invocation by its literal command target.
++ * PATH names (git, node), script launchers and explicit paths are commands too;
++ * a filename extension neither proves nor disproves that a target is runnable.
++ * This is syntax classification, not binary resolution or a subprocess sandbox.
 + */
 +export function singleExecutable(command: string, shell: string): string | undefined {
 +  return parseCommand(command, shell)?.executable
 +}
 +
-+function parseCommand(command: string, shell: string): { executable: string; arguments: string[] } | undefined {
++function parseCommand(command: string, shell: string, expandArguments = true): { executable: string; arguments: string[] } | undefined {
 +  const basename = shell.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase()
 +  if (!basename || !["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(basename)) return undefined
 +  // This intentionally rejects tabs as well as newlines and other controls.
@@ -8941,7 +9115,13 @@ index 0000000000000000000000000000000000000000..ceccea895162e5b6ff296da7eb1cd0cf
 +  const call = command[index] === "&"
 +  if (call) { index++; spaces() }
 +
-+  const token = (): { value: string; quoted: boolean } | undefined => {
++  const variable = () => {
++    const match = /^\$(?:[a-z_][a-z0-9_]*(?::[a-z_][a-z0-9_]*)?|\{[a-z_][a-z0-9_]*(?::[a-z_][a-z0-9_]*)?\})/i.exec(command.slice(index))
++    if (!match) return undefined
++    index += match[0].length
++    return match[0]
++  }
++  const token = (expand = false): { value: string; quoted: boolean } | undefined => {
 +    const first = command[index]
 +    if (first === "'" || first === '"') {
 +      index++
@@ -8958,7 +9138,15 @@ index 0000000000000000000000000000000000000000..ceccea895162e5b6ff296da7eb1cd0cf
 +          closed = true
 +          break
 +        }
-+        if (first === '"' && (char === "$" || char === "`")) return undefined
++        if (first === '"' && char === "`") return undefined
++        if (first === '"' && char === "$") {
++          if (!expand) return undefined
++          index--
++          const name = variable()
++          if (!name) return undefined // In particular, never allow $(command).
++          value += name
++          continue
++        }
 +        value += char
 +      }
 +      if (!closed || (index < command.length && command[index] !== " ")) return undefined
@@ -8966,6 +9154,12 @@ index 0000000000000000000000000000000000000000..ceccea895162e5b6ff296da7eb1cd0cf
 +    }
 +    const start = index
 +    while (index < command.length && command[index] !== " ") {
++      if (expand && index === start && command[index] === "$") {
++        if (!variable()) return undefined
++        // A plain scalar/path argument, not member/index access or an expression.
++        if (index < command.length && ![" ", "/", "\\"].includes(command[index]!)) return undefined
++        continue
++      }
 +      // No PowerShell metacharacters, quoting, escapes, variable/splat
 +      // expansion, or wildcard syntax are permitted in a bare token.
 +      if (!/^[\p{L}\p{N}_.:,/\\=+\-]$/u.test(command[index]!)) return undefined
@@ -8978,26 +9172,31 @@ index 0000000000000000000000000000000000000000..ceccea895162e5b6ff296da7eb1cd0cf
 +  const executable = token()
 +  if (!executable || (executable.quoted && !call)) return undefined
 +  const normalized = executable.value.replaceAll("/", "\\")
-+  if (!/^[a-z]:\\/i.test(normalized)) return undefined
-+  const segments = normalized.slice(3).split("\\")
++  const absolute = /^[a-z]:\\/i.test(normalized)
++  const relative = normalized.startsWith(".\\")
++  const named = /^[\p{L}\p{N}_][\p{L}\p{N}_.-]*$/u.test(normalized)
++  if (!absolute && !relative && !named) return undefined
++  if (named && /^(?:begin|break|catch|class|continue|data|define|do|dynamicparam|else|elseif|end|enum|exit|filter|finally|for|foreach|from|function|if|in|inlinescript|parallel|param|process|return|sequence|switch|throw|trap|try|until|using|var|while|workflow)$/i.test(normalized)) return undefined
++  const segments = (absolute ? normalized.slice(3) : relative ? normalized.slice(2) : normalized).split("\\")
 +  if (!segments.length || segments.some((segment) =>
 +    !segment || segment === "." || segment === ".." || /[. ]$/.test(segment) ||
 +    /[\u0000-\u001f\u007f-\u009f<>:"|?*\[\]{}()$`@#;&~]/u.test(segment) ||
 +    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment))) return undefined
-+  if (!/\.exe$/i.test(segments.at(-1)!)) return undefined
 +
 +  const args: string[] = []
 +  while (index < command.length) {
 +    if (command[index] !== " ") return undefined
 +    spaces()
 +    if (index === command.length) break
-+    const argument = token()
++    const argument = token(expandArguments)
 +    if (!argument) return undefined
 +    args.push(argument.value)
 +  }
 +  // Only drive letters are unconditionally case-insensitive. Windows can enable
 +  // case-sensitive directories; different executable spellings must not alias.
-+  return { executable: normalized[0]!.toLowerCase() + normalized.slice(1), arguments: args }
++  // Do not merge PATH names with paths, or git with git.exe: resolution may
++  // differ. The policy key also binds cwd, shell, machine and lookup environment.
++  return { executable: absolute ? normalized[0]!.toLowerCase() + normalized.slice(1) : normalized, arguments: args }
 +}
 +
 +// Only unambiguous Windows path components are eligible for directory scoping.
@@ -9041,7 +9240,9 @@ index 0000000000000000000000000000000000000000..ceccea895162e5b6ff296da7eb1cd0cf
 +  shell: string,
 +  cwd?: string,
 +): { executable: string; arguments: readonly string[]; modeKey: string } | undefined {
-+  const parsed = parseCommand(command, shell)
++  // SE promises fixed argument structure/parents. An unresolved variable cannot
++  // establish either; SEA explicitly opts into arbitrary executable arguments.
++  const parsed = parseCommand(command, shell, false)
 +  if (!parsed) return undefined
 +  const shape: string[][] = []
 +  for (const argument of parsed.arguments) {
@@ -9132,7 +9333,7 @@ index 0000000000000000000000000000000000000000..963785423c1a2b8533400b56d6ff78b2
 +)
 diff --git a/packages/tui/src/personalize/mini-permission-controls.tsx b/packages/tui/src/personalize/mini-permission-controls.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e5b9e8e8fb561d847ccd0d42b41dad0088e46db
+index 0000000000000000000000000000000000000000..75ce34d2fdb2532d9c0f0041cc0105e0fe5742a7
 --- /dev/null
 +++ b/packages/tui/src/personalize/mini-permission-controls.tsx
 @@ -0,0 +1,195 @@
@@ -9285,7 +9486,7 @@ index 0000000000000000000000000000000000000000..8e5b9e8e8fb561d847ccd0d42b41dad0
 +                onChange={(text) => controller.setMessage(text)} onConfirm={confirm} onCancel={cancel} />
 +            }>
 +              <PolicyField theme={props.theme} text={state().message} disabled={busy()}
-+                placeholder={unknown() ? policyText.unknownPlaceholder : policyText.placeholder}
++                placeholder={unknown() ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
 +                onChange={(text) => controller.setMessage(text)} onConfirm={confirm} onCancel={cancel} />
 +            </Show>
 +            <text fg={props.theme.muted}>{busy() ? "Waiting for permission event…" : "enter confirm  esc cancel"}</text>
@@ -9410,10 +9611,10 @@ index 0000000000000000000000000000000000000000..4297716fe0a3b090b2e7f7b1b5ed0f2b
 +}
 diff --git a/packages/tui/src/personalize/permission-view.tsx b/packages/tui/src/personalize/permission-view.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ef58b6cc82f0c42a928af531bdf01e45e4d6c59
+index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883e64a069a
 --- /dev/null
 +++ b/packages/tui/src/personalize/permission-view.tsx
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,145 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import type { TextareaRenderable } from "@opentui/core"
 +import type { PermissionRequest } from "@opencode/client"
@@ -9427,6 +9628,7 @@ index 0000000000000000000000000000000000000000..5ef58b6cc82f0c42a928af531bdf01e4
 +import { useInteractivity } from "../context/interactivity"
 +import { Keymap } from "../context/keymap"
 +import { permissionAlwaysLines, permissionOptionLabel } from "../util/permission"
++import { SplitBorder } from "../ui/border"
 +import type { SessionQuestion, permissionSemanticLabel } from "../routes/session/permission"
 +
 +/** Own only decision state/navigation. Stock renders request details and diffs. */
@@ -9543,12 +9745,14 @@ index 0000000000000000000000000000000000000000..5ef58b6cc82f0c42a928af531bdf01e4
 +      { id: "app.exit", title: "Cancel permission policy", group: "Permission", run: cancel },
 +    ],
 +  }))
-+  return <box flexDirection="column" backgroundColor={theme.background.raised.base} padding={1} gap={1}>
++  return <box flexDirection="column" backgroundColor={theme.background.raised.base}
++    border={["left"]} borderColor={theme.text.feedback.error.base} customBorderChars={SplitBorder.customBorderChars}
++    paddingLeft={2} paddingRight={3} paddingTop={1} paddingBottom={1} gap={1}>
 +    <text fg={theme.text.base}>Session CRUD policy</text>
 +    <For each={policyDirectories(props.request)}>{(directory) => <text fg={theme.text.base}>{directory}</text>}</For>
 +    <text fg={theme.text.muted}>{policyHint(unknownShell(props.request), props.request)}</text>
 +    <textarea ref={(value) => { input = value }} minHeight={1} maxHeight={3} focused={enabled() && !props.busy}
-+      placeholder={unknownShell(props.request) ? policyText.unknownPlaceholder : policyText.placeholder}
++      placeholder={unknownShell(props.request) ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
 +      textColor={theme.text.base} focusedTextColor={theme.text.base} cursorColor={theme.text.base} cursorStyle={cursor()} />
 +    <box flexDirection="row" gap={2}>
 +      <text fg={theme.text.base} onMouseUp={confirm}>enter apply policy</text>
@@ -9623,16 +9827,17 @@ index 0000000000000000000000000000000000000000..d1221bf3595ce88d4c653a0bc9d3638a
 +})
 diff --git a/packages/tui/test/personalize-permission-render.test.tsx b/packages/tui/test/personalize-permission-render.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a3434e3cb0520266237953baa16adec286fdd47
+index 0000000000000000000000000000000000000000..5fb927d61e647bc8e813d9ae5e7e02b50ca67339
 --- /dev/null
 +++ b/packages/tui/test/personalize-permission-render.test.tsx
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,201 @@
 +/** @jsxImportSource @opentui/solid */
 +import { expect, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
 +import { createSignal } from "solid-js"
 +import type { PermissionRequest } from "@opencode/client"
 +import type { PermissionReply } from "@opencode/schema/personalize/permission-controller"
++import { withFacts } from "@opencode/schema/personalize/permission-policy"
 +import { ConfigProvider } from "../src/config"
 +import { ClientProvider } from "../src/context/client"
 +import { DataProvider } from "../src/context/data"
@@ -9719,6 +9924,39 @@ index 0000000000000000000000000000000000000000..7a3434e3cb0520266237953baa16adec
 +}
 +
 +for (const surface of ["full", "mini"] as const) {
++  test(`${surface}: v11 left/right opens CRUD first and accepts CRUD on shell prompts`, async () => {
++    await using state = await tmpdir()
++    const view = await mount(surface, state.path)
++    try {
++      view.replace(withFacts({ ...request("per_crud"), action: "read", metadata: {}, resources: ["C:/work/file"] }, {
++        operations: ["read"], paths: ["C:/work/file"], directories: ["C:/work"],
++      }))
++      await view.frame()
++      view.app.mockInput.pressArrow("right")
++      view.app.mockInput.pressArrow("left")
++      view.app.mockInput.pressArrow("right")
++      await view.enter()
++      expect(await view.frame()).toContain("Session CRUD policy")
++      await view.type("RU=S* CD=D*")
++      await view.enter()
++      await view.app.waitFor(() => view.sent.length === 1)
++      expect(view.sent[0]!.decision).toEqual({ scope: "session", policy: "RU=S* CD=D*" })
++      view.pending[0]!.resolve()
++      await view.frame()
++      view.replace({ ...request("per_shell_crud"), resources: ["[IO.File]::ReadAllBytes($p)"] })
++      await view.frame()
++      await view.policy()
++      const policyFrame = await view.frame()
++      expect(policyFrame).toContain("C:/work")
++      expect(policyFrame).not.toContain("[IO.File]::ReadAllBytes($p)")
++      await view.type("RU=S* CD=D*")
++      await view.enter()
++      await view.app.waitFor(() => view.sent.length === 2)
++      expect(view.sent[1]!.decision).toEqual({ scope: "session", policy: "RU=S* CD=D*" })
++      view.pending[1]!.resolve()
++    } finally { view.close() }
++  })
++
 +  test(`${surface}: rendered policy failure stays open and retries only on explicit input`, async () => {
 +    await using state = await tmpdir()
 +    const view = await mount(surface, state.path)
@@ -10310,10 +10548,10 @@ index 0000000000000000000000000000000000000000..8570ab890c2e4de342a8b1cf446d4e58
 +})
 diff --git a/.personalize/startup-recovery.test.mjs b/.personalize/startup-recovery.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a82b45b985ac29519eb1e49ff678c6f99903bf85
+index 0000000000000000000000000000000000000000..ec66a577aebf788834a10b282214ab47f674f250
 --- /dev/null
 +++ b/.personalize/startup-recovery.test.mjs
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,262 @@
 +import assert from "node:assert/strict"
 +import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 +import { createRequire } from "node:module"
@@ -10492,6 +10730,84 @@ index 0000000000000000000000000000000000000000..a82b45b985ac29519eb1e49ff678c6f9
 +    })
 +    const result = spawnSync(process.env.BUN_EXECUTABLE ?? "bun", [launcher],
 +      { cwd: root, env, encoding: "utf8", timeout: 30_000 })
++    assert.ifError(result.error)
++    assert.equal(result.status, 0, result.stdout + result.stderr)
++  } finally {
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
++
++test("database bootstrap stays serialized when contenders share state but have different TEMP directories", () => {
++  const directory = mkdtempSync(path.join(tmpdir(), "opencode-shared-boot-"))
++  for (const part of ["home", "state", "data", "first-temp", "second-temp", "config", "cache"])
++    mkdirSync(path.join(directory, part))
++  try {
++    const entry = path.join(directory, "database.ts")
++    writeFileSync(entry, `
++      import fs from "node:fs"
++      import path from "node:path"
++      import { Effect, Layer } from ${effect}
++      import { Global } from ${source("packages/util/src/global.ts")}
++      import { decorate } from ${source("packages/core/src/personalize/database.ts")}
++      const directory = ${JSON.stringify(directory)}
++      const role = process.argv[2]
++      const witness = path.join(directory, "critical-section")
++      const database = decorate({ layer: () => Layer.effectDiscard(Effect.acquireUseRelease(
++        Effect.sync(() => {
++          fs.writeFileSync(witness, role, { flag: "wx" })
++          console.log("entered")
++        }),
++        () => Effect.sleep(role === "first" ? "800 millis" : "5 millis"),
++        () => Effect.sync(() => fs.unlinkSync(witness)),
++      )) })
++      await Effect.runPromise(Effect.scoped(Layer.build(database.layer({ path: "fixture.db" })).pipe(
++        Effect.provideService(Global.Service, {
++          state: path.join(directory, "state"), data: path.join(directory, "data"),
++        }),
++      )))
++    `)
++    const launcher = path.join(directory, "build.mjs")
++    writeFileSync(launcher, `
++      import assert from "node:assert/strict"
++      import { build } from ${source(".personalize/build.mjs")}
++      const result = await build({ entrypoints: [${JSON.stringify(entry)}], target: "bun", write: false },
++        { root: ${JSON.stringify(root)} })
++      if (!result.success) throw new Error(result.logs.map(String).join("\\n"))
++      const bundle = ${JSON.stringify(path.join(directory, "database.mjs"))}
++      await Bun.write(bundle, result.outputs[0])
++      function child(role, temporary) {
++        return Bun.spawn([process.execPath, bundle, role], {
++          env: { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary },
++          stdout: "pipe", stderr: "pipe",
++        })
++      }
++      const first = child("first", ${JSON.stringify(path.join(directory, "first-temp"))})
++      let second
++      try {
++        const reader = first.stdout.getReader()
++        const initial = await reader.read()
++        assert.match(new TextDecoder().decode(initial.value), /entered/)
++        reader.releaseLock()
++        second = child("second", ${JSON.stringify(path.join(directory, "second-temp"))})
++        const [firstCode, secondCode, firstError, secondError] = await Promise.all([
++          first.exited, second.exited,
++          new Response(first.stderr).text(), new Response(second.stderr).text(),
++        ])
++        assert.equal(firstCode, 0, firstError)
++        assert.equal(secondCode, 0, "different TEMP directories must not split database ownership: " + secondError)
++      } finally {
++        if (first.exitCode === null) first.kill()
++        if (second?.exitCode === null) second.kill()
++        await Promise.all([first.exited, second?.exited])
++      }
++    `)
++    const result = spawnSync(process.env.BUN_EXECUTABLE ?? "bun", [launcher], {
++      cwd: root, encoding: "utf8", timeout: 20_000,
++      env: { ...process.env, HOME: path.join(directory, "home"), USERPROFILE: path.join(directory, "home"),
++        OPENCODE_TEST_HOME: path.join(directory, "home"), XDG_STATE_HOME: path.join(directory, "state"),
++        XDG_DATA_HOME: path.join(directory, "data"), XDG_CONFIG_HOME: path.join(directory, "config"),
++        XDG_CACHE_HOME: path.join(directory, "cache"), OPENCODE_CONFIG_CONTENT: "{}" },
++    })
 +    assert.ifError(result.error)
 +    assert.equal(result.status, 0, result.stdout + result.stderr)
 +  } finally {
