@@ -238,6 +238,8 @@ run_patch_tests() {
     .personalize/single-executable.test.mjs
     .personalize/node-typescript.test.mjs
     .personalize/bootstrap.test.mjs
+    .personalize/startup-ownership.test.mjs
+    .personalize/startup-recovery.test.mjs
     .personalize/storage-diagnostic.test.mjs
     .personalize/connection-backoff.test.mjs
   )
@@ -258,6 +260,8 @@ run_patch_tests() {
       ../../.personalize/single-executable.test.mjs \
       ../../.personalize/node-typescript.test.mjs \
       ../../.personalize/bootstrap.test.mjs \
+      ../../.personalize/startup-ownership.test.mjs \
+      ../../.personalize/startup-recovery.test.mjs \
       ../../.personalize/storage-diagnostic.test.mjs \
       ../../.personalize/connection-backoff.test.mjs); then
     echo "ERROR: lifetime/context/title regressions FAILED -- refusing to build this ref"

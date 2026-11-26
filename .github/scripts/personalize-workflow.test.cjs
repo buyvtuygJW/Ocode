@@ -353,7 +353,7 @@ test('successful gates retain all applied optional features', () => {
 
 const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs',
   'permission-contract.test.mjs', 'single-executable.test.mjs', 'node-typescript.test.mjs', 'bootstrap.test.mjs',
-  'storage-diagnostic.test.mjs', 'connection-backoff.test.mjs'];
+  'storage-diagnostic.test.mjs', 'connection-backoff.test.mjs', 'startup-ownership.test.mjs', 'startup-recovery.test.mjs'];
 const permissionRegressions = ['packages/core/test/permission/personalize.integration.test.ts',
   'packages/core/test/permission/service.node.test.mjs', 'packages/server/test/personalize-permission-policy.test.ts',
   'packages/tui/test/personalize-mini-permission.test.ts', 'packages/tui/test/personalize-permission-render.test.tsx',

@@ -1031,13 +1031,14 @@ index 0000000000000000000000000000000000000000..d3da95e10bd09fbd15b8986406a03e20
 +})
 diff --git a/.personalize/manifest.json b/.personalize/manifest.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..f9e7d8d4806bb379eff0c812e6253d9f587fbe1c
+index 0000000000000000000000000000000000000000..5f7355459f3691401136cb084c64111c386fd8da
 --- /dev/null
 +++ b/.personalize/manifest.json
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,29 @@
 +{
 +  "modules": [
 +    { "target": "packages/cli/src/index.ts", "before": ["packages/cli/src/personalize/bootstrap.ts"] },
++    { "target": "packages/cli/src/services/service-registration.ts", "factory": "packages/cli/src/personalize/service-registration.ts", "exports": ["register"] },
 +    { "target": "packages/ai/src/protocols/open-responses.ts", "factory": "packages/ai/src/personalize/open-responses.ts", "exports": ["lowerGeneration", "fromRequest", "fromRequestWithAdapter", "protocol"] },
 +    { "target": "packages/core/src/config/markdown.ts", "factory": "packages/core/src/personalize/markdown.ts", "exports": ["sanitize"] },
 +    { "target": "packages/core/src/database/database.ts", "factory": "packages/core/src/personalize/database.ts", "exports": ["layer", "configured", "node"] },
@@ -1358,11 +1359,14 @@ index 0000000000000000000000000000000000000000..552e669cfaa7a25bdecdb6630c9add91
 +}
 diff --git a/packages/client/src/personalize/service-probe.ts b/packages/client/src/personalize/service-probe.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d97bd0e0cfe0fa208803d0a935c663557172126
+index 0000000000000000000000000000000000000000..adbef56f2e97a2bf1ad944c5e54404657a4bdc23
 --- /dev/null
 +++ b/packages/client/src/personalize/service-probe.ts
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,41 @@
 +import type { Info } from "../service"
++// The stock Promise client has no util/Effect dependency. This owned helper is
++// Node-only and dependency-free; use its source without adding util's runtime.
++import { isStarting } from "../../../util/src/personalize-startup-state"
 +
 +export function decorate(stock: typeof import("../service-probe")) {
 +  const decide: typeof stock.decide = (service, options) => {
@@ -1371,6 +1375,15 @@ index 0000000000000000000000000000000000000000..7d97bd0e0cfe0fa208803d0a935c6635
 +  }
 +  const probeResult: typeof stock.probeResult = async (info: Info, timeout) => {
 +    const result = await stock.probeResult(info, timeout)
++    if (result.timedOut && isStarting(info)) {
++      // Explicit local startup state only; never report ready or return an
++      // endpoint from ensure/discover until the real health request succeeds.
++      return { timedOut: false, service: { info, endpoint: {
++        url: info.url, auth: info.password === undefined ? undefined : {
++          type: "basic" as const, username: "opencode", password: info.password,
++        },
++      }, version: info.version, state: "waiting" as const, compatible: true } }
++    }
 +    if (result.service || result.timedOut) return result
 +    // A registered owner must not be killed merely because the published version
 +    // changes while that same PID is starting. All other stock health rules stay intact.
@@ -1436,16 +1449,15 @@ index 0000000000000000000000000000000000000000..8a1e00858111426db1377040d7e232d8
 +}
 diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f9182faec519d18cfcefc6e20b8b604f03b1383
+index 0000000000000000000000000000000000000000..10453d3db8a0eef5273195a99b09464af2166a1a
 --- /dev/null
 +++ b/packages/core/src/personalize/database.ts
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,46 @@
 +import path from "node:path"
 +import { Cause, Effect, Exit, Layer, Scope } from "effect"
 +import { Global } from "@opencode/util/global"
-+import { Flock } from "@opencode/util/flock"
 +import { makeGlobalNode } from "@opencode/util/effect/app-node"
-+import { sqliteBusy, updateBoot } from "@opencode/util/personalize-boot"
++import { sqliteBusy, updateBoot, withBootLock } from "@opencode/util/personalize-boot"
 +import { storageDiagnostic } from "@opencode/util/personalize-storage-diagnostic"
 +import { guardSessionSchema } from "./schema-guard"
 +
@@ -1457,8 +1469,8 @@ index 0000000000000000000000000000000000000000..2f9182faec519d18cfcefc6e20b8b604
 +      const global = yield* Global.Service
 +      const file = path.isAbsolute(filename) ? filename : path.join(global.data, filename)
 +      const parent = yield* Scope.Scope
-+      return yield* Effect.acquireUseRelease(
-+        Effect.promise((signal) => Flock.acquire(file, { dir: path.join(global.state, "locks"), signal })),
++      return yield* withBootLock(
++        "database-bootstrap:" + (process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file)),
 +        () => Effect.gen(function* () {
 +          for (let attempt = 0; ; attempt++) {
 +            const scope = yield* Scope.make()
@@ -1480,7 +1492,6 @@ index 0000000000000000000000000000000000000000..2f9182faec519d18cfcefc6e20b8b604
 +            yield* Effect.sleep((attempt + 1) * 200)
 +          }
 +        }),
-+        (lease) => Effect.promise(() => lease.release()),
 +      )
 +    }))
 +  }
@@ -3076,16 +3087,14 @@ index 0000000000000000000000000000000000000000..8bee9fb60c5fc38bce9a5eb6f74558cc
 +}
 diff --git a/packages/server/src/personalize/process.ts b/packages/server/src/personalize/process.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b96a3b86afd35e442dc48f2efa16f1c54db7d4de
+index 0000000000000000000000000000000000000000..530d5f700bf2816bfc3b9786e2a4fc2fcea8511a
 --- /dev/null
 +++ b/packages/server/src/personalize/process.ts
-@@ -0,0 +1,88 @@
-+import os from "node:os"
-+import path from "node:path"
+@@ -0,0 +1,84 @@
 +import { Effect, Option } from "effect"
 +import { HttpServerRequest, HttpServerResponse } from "effect/http"
-+import { Flock } from "@opencode/util/flock"
-+import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++import { PersonalizeBoot, withBootLock } from "@opencode/util/personalize-boot"
++import { publishStartup } from "@opencode/util/personalize-startup-state"
 +import { defaults, duration } from "@opencode/util/personalize-lifetime"
 +import { save } from "@opencode/util/personalize-lifetime-store"
 +import { authorizedRequest, unauthorizedResponse } from "../middleware/authorization"
@@ -3148,23 +3157,21 @@ index 0000000000000000000000000000000000000000..b96a3b86afd35e442dc48f2efa16f1c5
 +        })
 +      }
 +    }
-+    return Effect.acquireUseRelease(
-+      Effect.promise((signal) => Flock.acquire("service-bootstrap", {
-+        dir: path.join(os.tmpdir(), "opencode", "personalize-boot-locks"), signal,
-+      }).then((lease) => {
-+        let done = false
-+        const release = () => {
-+          if (done) return Promise.resolve()
-+          done = true
-+          return lease.release()
-+        }
-+        return { release }
-+      })),
-+      (boot) => stock.start(options, ...rest).pipe(Effect.provideService(PersonalizeBoot, {
-+        retry: Effect.void, release: Effect.promise(() => boot.release()),
-+      })),
-+      (boot) => Effect.promise(() => boot.release()),
-+    )
++    return withBootLock("service-bootstrap", (lease) => {
++      let finish = () => {}
++      let finished = false
++      const release = Effect.sync(() => {
++        finished = true
++        try { finish() } finally { lease.release() }
++      })
++      return stock.start(options, ...rest).pipe(
++        Effect.provideService(PersonalizeBoot, {
++          retry: Effect.void, release,
++          register: (info) => { if (!finished) finish = publishStartup(info) },
++        }),
++        Effect.ensuring(release),
++      )
++    })
 +  }
 +  return { start }
 +}
@@ -3404,21 +3411,49 @@ index 0000000000000000000000000000000000000000..6197a6376aafc2093e03df84d6fe4667
 +}
 diff --git a/packages/util/src/personalize-boot.ts b/packages/util/src/personalize-boot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d599cc7ea1f8c5c2f38c35f6c2e1e2a483bb9176
+index 0000000000000000000000000000000000000000..9f745f1fd536dc359ebe6ae8e8c51918d3c03bc4
 --- /dev/null
 +++ b/packages/util/src/personalize-boot.ts
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,54 @@
 +import { Context, Effect, Option } from "effect"
++import { acquireBootLock, type BootLease } from "./personalize-boot-lock"
++import type { StartupIdentity } from "./personalize-startup-state"
 +
 +export interface BootState {
 +  retry: Effect.Effect<void>
 +  release: Effect.Effect<void>
++  register?: (info: StartupIdentity) => void
 +}
 +export class PersonalizeBoot extends Context.Service<PersonalizeBoot, BootState>()("@personalize/Boot") {}
 +
 +export const updateBoot = (kind: "retry" | "release") => Effect.serviceOption(PersonalizeBoot).pipe(
 +  Effect.flatMap((state) => Option.isSome(state) ? state.value[kind] : Effect.void),
 +)
++
++export function withBootLock<A, E, R>(key: string, use: (lease: BootLease) => Effect.Effect<A, E, R>) {
++  // acquireUseRelease normally masks interruption during acquisition. Install
++  // a holder's finalizer FIRST, then wait interruptibly in its use phase. Store
++  // the connection before resolving the promise so an interrupt at the handoff
++  // cannot lose the lease.
++  return Effect.acquireUseRelease(
++    Effect.sync(() => ({ lease: undefined as BootLease | undefined, closed: false })),
++    (holder) => Effect.promise((signal) => acquireBootLock(key, { signal }).then((lease) => {
++      holder.lease = lease
++      // Effect can finish interrupting before this promise's microtask runs.
++      // A late acquisition must close itself, not resurrect a finalized scope.
++      if (holder.closed || signal.aborted) {
++        lease.release()
++        signal.throwIfAborted()
++        throw new Error("Bootstrap acquisition scope closed")
++      }
++      return lease
++    })).pipe(Effect.flatMap(use)),
++    (holder) => Effect.sync(() => {
++      holder.closed = true
++      holder.lease?.release()
++    }),
++  )
++}
 +
 +export function sqliteBusy(input: unknown): boolean {
 +  const seen = new Set<unknown>()
@@ -10143,6 +10178,487 @@ index 0000000000000000000000000000000000000000..0b9251037fc390bf2d7de614324fd388
 +    sqliteCode: typeof native?.code === "string" && /^SQLITE_[A-Z_]+$/.test(native.code) ? native.code : undefined,
 +    sqliteExtendedCode: extended,
 +    sqlitePrimaryCode: extended === undefined ? undefined : extended & 0xff,
++  }
++}
+diff --git a/.personalize/startup-ownership.test.mjs b/.personalize/startup-ownership.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8570ab890c2e4de342a8b1cf446d4e583635124b
+--- /dev/null
++++ b/.personalize/startup-ownership.test.mjs
+@@ -0,0 +1,122 @@
++import assert from "node:assert/strict"
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { fileURLToPath } from "node:url"
++import { spawnSync } from "node:child_process"
++import { test } from "node:test"
++
++const root = process.env.PERSONALIZE_SOURCE ?? fileURLToPath(new URL("../", import.meta.url))
++const moduleURL = (name) => JSON.stringify(path.join(root, "packages/util/src", name).replaceAll("\\", "/"))
++
++test("native bootstrap ownership: death, cancellation, contention, stale release and bounded hangs", () => {
++  const directory = mkdtempSync(path.join(tmpdir(), "opencode-boot-ownership-"))
++  try {
++    const script = path.join(directory, "check.mjs")
++    writeFileSync(script, `
++      import assert from "node:assert/strict"
++      import { once } from "node:events"
++      import { spawn } from "node:child_process"
++      import { readdirSync, readFileSync, writeFileSync } from "node:fs"
++      import { setTimeout as sleep } from "node:timers/promises"
++      import { acquireBootLock } from ${moduleURL("personalize-boot-lock.ts")}
++      import { publishStartup, isStarting, startupGraceMs } from ${moduleURL("personalize-startup-state.ts")}
++      const directory = ${JSON.stringify(directory)}
++      const options = { directory, timeoutMs: 2000 }
++      const first = await acquireBootLock("same", options)
++      let pulse = false
++      setTimeout(() => { pulse = true }, 10)
++      const begun = performance.now()
++      await assert.rejects(acquireBootLock("same", { ...options, timeoutMs: 150 }), /Timed out/)
++      assert.ok(pulse, "contention must yield to the event loop")
++      assert.ok(performance.now() - begun < 1000, "live-owner wait must be bounded")
++      const abort = new AbortController()
++      const pending = acquireBootLock("same", { ...options, signal: abort.signal })
++      abort.abort()
++      await assert.rejects(pending)
++      await assert.rejects(acquireBootLock("aborted", { ...options, signal: abort.signal }))
++      first.release()
++      const second = await acquireBootLock("same", options)
++      first.release() // must not release the successor, including same PID
++      await assert.rejects(acquireBootLock("same", { ...options, timeoutMs: 50 }), /Timed out/)
++      second.release()
++      const childFile = directory + "/owner.mjs"
++      writeFileSync(childFile, \`
++        import { acquireBootLock } from ${moduleURL("personalize-boot-lock.ts")}
++        const lease = await acquireBootLock("crash", { directory: \${JSON.stringify(directory)} })
++        console.log("owned")
++        // An event-loop hang cannot defeat kernel-held ownership.
++        for (;;) {}
++      \`)
++      const child = spawn(process.execPath, [childFile], { stdio: ["ignore", "pipe", "pipe"] })
++      const exited = once(child, "exit")
++      try {
++        const [out] = await once(child.stdout, "data")
++        assert.match(out.toString(), /owned/)
++        await assert.rejects(acquireBootLock("crash", { ...options, timeoutMs: 100 }), /Timed out/)
++        child.kill("SIGKILL")
++        await exited
++        const at = performance.now()
++        const recovered = await acquireBootLock("crash", options)
++        assert.ok(performance.now() - at < 1000, "dead owner must not leave a 60s lease")
++        recovered.release()
++      } finally {
++        if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await exited }
++      }
++      // Three independent processes repeatedly enter the same critical section.
++      // The exclusive witness file detects overlap instead of inferring it
++      // from timestamps; it is not used as the ownership mechanism.
++      const contenderFile = directory + "/contender.mjs"
++      writeFileSync(contenderFile, \`
++        import { acquireBootLock } from ${moduleURL("personalize-boot-lock.ts")}
++        import { writeFileSync, unlinkSync } from "node:fs"
++        import { setTimeout as sleep } from "node:timers/promises"
++        for (let i = 0; i < 8; i++) {
++          const lease = await acquireBootLock("race", { directory: \${JSON.stringify(directory)}, timeoutMs: 5000 })
++          try {
++            writeFileSync(\${JSON.stringify(directory + "/witness")}, "", { flag: "wx" })
++            await sleep(5)
++            unlinkSync(\${JSON.stringify(directory + "/witness")})
++          } finally { lease.release() }
++        }
++      \`)
++      const children = Array.from({ length: 3 }, () => spawn(process.execPath, [contenderFile],
++        { stdio: ["ignore", "ignore", "pipe"] }))
++      try {
++        const results = await Promise.all(children.map(async c => {
++          let errors = ""; c.stderr.on("data", x => { errors += x })
++          const [code, signal] = await once(c, "exit")
++          return { code, signal, errors }
++        }))
++        for (const r of results) assert.equal(r.code, 0, JSON.stringify(r))
++      } finally {
++        for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL")
++      }
++      const info = { id: "generation-a", pid: process.pid, url: "http://127.0.0.1:1", version: "test", password: "private" }
++      const done = publishStartup(info, directory)
++      assert.equal(isStarting(info, directory), true)
++      for (const change of [{ id: "generation-b" }, { pid: 2147483647 }, { password: "wrong" },
++        { url: "http://127.0.0.1:2" }, { version: "other" }])
++        assert.equal(isStarting({ ...info, ...change }, directory), false)
++      assert.throws(() => publishStartup(info, directory), /EEXIST/)
++      const stateFile = readdirSync(directory).find(x => x.endsWith(".json"))
++      assert.ok(!readFileSync(directory + "/" + stateFile, "utf8").includes("private"))
++      writeFileSync(directory + "/" + stateFile, JSON.stringify({ protocol: 1, startedAt: Date.now() - startupGraceMs - 1 }))
++      assert.equal(isStarting(info, directory), false, "startup hang must resume stock recovery")
++      done(); done()
++      assert.equal(isStarting(info, directory), false)
++      const newer = { ...info, id: "generation-b" }
++      const finishNewer = publishStartup(newer, directory)
++      done()
++      assert.equal(isStarting(newer, directory), true, "old cleanup must not remove new generation")
++      finishNewer()
++      assert.equal(isStarting(newer, directory), false, "ready/failed states must stop startup protection")
++      console.log("ownership and startup state passed", process.platform)
++    `)
++    const result = spawnSync(process.env.BUN_EXECUTABLE ?? "bun", [script], { encoding: "utf8", timeout: 20_000 })
++    assert.ifError(result.error)
++    assert.equal(result.status, 0, result.stdout + result.stderr)
++  } finally {
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
+diff --git a/.personalize/startup-recovery.test.mjs b/.personalize/startup-recovery.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a82b45b985ac29519eb1e49ff678c6f99903bf85
+--- /dev/null
++++ b/.personalize/startup-recovery.test.mjs
+@@ -0,0 +1,184 @@
++import assert from "node:assert/strict"
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
++import { createRequire } from "node:module"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { spawnSync } from "node:child_process"
++import { fileURLToPath } from "node:url"
++import { test } from "node:test"
++
++const root = process.env.PERSONALIZE_SOURCE ?? fileURLToPath(new URL("../", import.meta.url))
++const source = (file) => JSON.stringify(path.join(root, file).replaceAll("\\", "/"))
++const require = createRequire(path.join(root, "packages/core/package.json"))
++const effect = JSON.stringify(require.resolve("effect").replaceAll("\\", "/"))
++const nodeServices = JSON.stringify(require.resolve("@effect/platform-node").replaceAll("\\", "/"))
++const net = JSON.stringify(require.resolve("effect/net").replaceAll("\\", "/"))
++
++test("delivered seams keep acquisition interruptible and real clients bounded without false readiness", () => {
++  const directory = mkdtempSync(path.join(tmpdir(), "opencode-startup-recovery-"))
++  for (const part of ["home", "tmp", "state", "config", "data", "cache"])
++    mkdirSync(path.join(directory, part))
++  try {
++    const entry = path.join(directory, "regression.ts")
++    writeFileSync(entry, `
++      import assert from "node:assert/strict"
++      import fs from "node:fs"
++      import os from "node:os"
++      import path from "node:path"
++      import { Effect, Fiber } from ${effect}
++      import { NodeServices } from ${nodeServices}
++      import { NetAddress } from ${net}
++      import { acquireBootLock } from ${source("packages/util/src/personalize-boot-lock.ts")}
++      import { withBootLock, PersonalizeBoot } from ${source("packages/util/src/personalize-boot.ts")}
++      import { publishStartup, isStarting, startupGraceMs } from ${source("packages/util/src/personalize-startup-state.ts")}
++      import * as promiseClient from ${source("packages/client/src/promise/service.ts")}
++      import * as effectClient from ${source("packages/client/src/effect/service.ts")}
++      import { withEnsureTiming, defaultEnsureTiming } from ${source("packages/client/src/service-timing.ts")}
++      import { probeResult, decide } from ${source("packages/client/src/service-probe.ts")}
++      import { make as makeStatus } from ${source("packages/server/src/service-status.ts")}
++      import { decorate as registerFactory } from ${source("packages/cli/src/personalize/service-registration.ts")}
++      const key = "effect-cancellation-" + process.pid
++      const held = await acquireBootLock(key)
++      let entered = false
++      const at = performance.now()
++      try {
++        await assert.rejects(Effect.runPromise(withBootLock(key, () => Effect.sync(() => { entered = true }))
++          .pipe(Effect.timeout("50 millis"))))
++        assert.equal(entered, false)
++        assert.ok(performance.now() - at < 1500, "Effect acquisition must not mask cancellation for 90s")
++      } finally { held.release() }
++      for (let i = 0; i < 25; i++) {
++        const fiber = Effect.runFork(withBootLock(key, () => Effect.never))
++        if (i % 2) await new Promise(r => setTimeout(r, 1))
++        await Effect.runPromise(Fiber.interrupt(fiber))
++        const next = await acquireBootLock(key, { timeoutMs: 200 })
++        next.release()
++      }
++      await assert.rejects(Effect.runPromise(withBootLock(key, () => Effect.fail(new Error("boot failed")))), /boot failed/)
++      ;(await acquireBootLock(key, { timeoutMs: 200 })).release()
++      for (const terminal of ["ready", "fail"]) {
++        let released = 0
++        const boot = { retry: Effect.void, release: Effect.sync(() => { released++ }) }
++        await Effect.runPromise(Effect.gen(function* () {
++          const state = yield* makeStatus()
++          yield* boot.retry
++          assert.equal((yield* state.current).type, "retrying")
++          yield* state[terminal]
++          assert.equal((yield* state.current).type, terminal === "fail" ? "failed" : "ready")
++          assert.equal(released, 1)
++        }).pipe(Effect.provideService(PersonalizeBoot, boot)))
++      }
++      // Exercise the registration adapter without replacing the stock signature.
++      let published, called = false
++      const options = { id: "registration-generation", password: "test-password",
++        address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 1), file: "unused", shutdown: Effect.void }
++      const cleanup = Effect.void
++      const wrapped = registerFactory({ register: supplied => Effect.sync(() => {
++        assert.equal(supplied, options); assert.ok(published); called = true; return cleanup
++      }) })
++      const returned = await Effect.runPromise(wrapped.register(options).pipe(
++        Effect.provideService(PersonalizeBoot, { retry: Effect.void, release: Effect.void,
++          register: info => { published = info } })))
++      assert.equal(called, true); assert.equal(returned, cleanup)
++      assert.equal(published.id, options.id); assert.equal(published.pid, process.pid)
++      assert.equal(published.password, options.password)
++      const nativeFetch = globalThis.fetch, nativeKill = process.kill
++      const directory = ${JSON.stringify(directory)}
++      const stateDir = path.join(os.tmpdir(), "opencode/personalize-startup-state")
++      let alive = true, kills = 0, mode = "timeout"
++      process.kill = (pid, signal) => {
++        assert.equal(pid, process.pid, "test must never signal any external process")
++        if (signal === 0) { if (!alive) throw new Error("gone"); return true }
++        kills++; alive = false; return true
++      }
++      globalThis.fetch = async (url, options) => {
++        assert.equal(new URL(url).hostname, "127.0.0.1")
++        if (mode === "timeout") return new Promise((_, reject) => {
++          if (options.signal.aborted) return reject(options.signal.reason)
++          options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
++        })
++        return new Response(JSON.stringify({ pid: process.pid, version: "test" }),
++          { status: mode === "ready" ? 200 : mode === "failed" ? 500 : 503 })
++      }
++      const keepAlive = setInterval(() => {}, 100)
++      try {
++        assert.equal(defaultEnsureTiming.promiseTimeout, 120000)
++        for (const kind of ["promise", "effect"]) {
++          alive = true; kills = 0; mode = "timeout"
++          const info = { id: kind, pid: process.pid, url: "http://127.0.0.1:1", version: "test", password: "secret" }
++          const finish = publishStartup(info)
++          try {
++            const probe = await probeResult(info, 10)
++            assert.equal(probe.service.state, "waiting")
++            assert.equal(probe.timedOut, false)
++            assert.equal(decide(probe.service, { version: "new-version" })._tag, "wait")
++            const file = path.join(directory, kind + ".json")
++            fs.writeFileSync(file, JSON.stringify(info))
++            const options = withEnsureTiming({ file, version: "test",
++              command: [process.execPath, "-e", "process.exit(42)"] }, {
++              requestTimeout: 10, pollInterval: 5, promiseTimeout: 180,
++              spawnDelay: 1000, stopPollInterval: 1, stopPollAttempts: 2,
++            })
++            const ensure = () => kind === "promise" ? promiseClient.ensure(options) :
++              Effect.runPromise(effectClient.ensure(options).pipe(Effect.provide(NodeServices.layer)))
++            const begun = performance.now()
++            await assert.rejects(ensure(), /Timed out waiting/)
++            assert.equal(kills, 0, "starting owner must survive blocked health")
++            assert.ok(performance.now() - begun < 1000, "local startup state must not extend ensure deadline")
++            mode = "ready"
++            assert.equal((await ensure()).url, info.url, "only real ready health may return an endpoint")
++            mode = "failed"
++            await assert.rejects(ensure(), /failed to start/)
++            mode = "timeout"
++            const marker = fs.readdirSync(stateDir).find(name => name.endsWith(".json"))
++            fs.writeFileSync(path.join(stateDir, marker), JSON.stringify({
++              protocol: 1, startedAt: Date.now() - startupGraceMs - 1,
++            }))
++            assert.equal(isStarting(info), false)
++            assert.equal((await probeResult(info, 10)).timedOut, true)
++            await assert.rejects(ensure())
++            assert.equal(kills, 1, "expired startup must retain actual stock hang recovery")
++          } finally { finish() }
++        }
++        alive = true
++        const info = { id: "ready-then-hung", pid: process.pid, url: "http://127.0.0.1:1", version: "test", password: "secret" }
++        const finish = publishStartup(info)
++        finish()
++        assert.equal((await probeResult(info, 10)).timedOut, true, "finished bootstrap cannot mask a ready-service hang")
++      } finally {
++        clearInterval(keepAlive)
++        globalThis.fetch = nativeFetch; process.kill = nativeKill
++      }
++      console.log("Effect cancellation and both real client recovery loops passed")
++    `)
++    const launcher = path.join(directory, "build.mjs")
++    writeFileSync(launcher, `
++      import { build } from ${source(".personalize/build.mjs")}
++      const result = await build({
++        entrypoints: [${JSON.stringify(entry)}], target: "bun",
++        define: { OPENCODE_VERSION: '"test"', OPENCODE_CHANNEL: '"local"' },
++        write: false,
++      }, { root: ${JSON.stringify(root)} })
++      if (!result.success) throw new Error(result.logs.map(String).join("\\n"))
++      await Bun.write(${JSON.stringify(path.join(directory, "bundle.mjs"))}, result.outputs[0])
++      const child = Bun.spawnSync([process.execPath, ${JSON.stringify(path.join(directory, "bundle.mjs"))}],
++        { stdout: "inherit", stderr: "inherit", timeout: 20000 })
++      process.exit(child.exitCode)
++    `)
++    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
++      !/^(OPENCODE_|XDG_|OTEL_)/.test(key) && !/(TOKEN|SECRET|PASSWORD|API_KEY)/i.test(key)))
++    Object.assign(env, {
++      HOME: path.join(directory, "home"), USERPROFILE: path.join(directory, "home"),
++      TMPDIR: path.join(directory, "tmp"), TMP: path.join(directory, "tmp"), TEMP: path.join(directory, "tmp"),
++      XDG_STATE_HOME: path.join(directory, "state"), XDG_CONFIG_HOME: path.join(directory, "config"),
++      XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"),
++      OPENCODE_TEST_HOME: path.join(directory, "home"),
++    })
++    const result = spawnSync(process.env.BUN_EXECUTABLE ?? "bun", [launcher],
++      { cwd: root, env, encoding: "utf8", timeout: 30_000 })
++    assert.ifError(result.error)
++    assert.equal(result.status, 0, result.stdout + result.stderr)
++  } finally {
++    rmSync(directory, { recursive: true, force: true })
++  }
++})
+diff --git a/packages/cli/src/personalize/service-registration.ts b/packages/cli/src/personalize/service-registration.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a41bb4969db33422e8f53c124a3bcce7eefea6cf
+--- /dev/null
++++ b/packages/cli/src/personalize/service-registration.ts
+@@ -0,0 +1,19 @@
++import { Effect, Option } from "effect"
++import { HttpServer } from "effect/http"
++import { PersonalizeBoot } from "@opencode/util/personalize-boot"
++import { OPENCODE_VERSION } from "../version"
++
++export function decorate(stock: typeof import("../services/service-registration")) {
++  const register: typeof stock.register = (options) => Effect.gen(function* () {
++    const boot = yield* Effect.serviceOption(PersonalizeBoot)
++    // Publish before the stock registration becomes visible and before the
++    // synchronous database bootstrap can block HTTP. Preserve the stock lease,
++    // ownership monitor, shutdown, and returned cleanup without alteration.
++    if (Option.isSome(boot)) yield* Effect.sync(() => boot.value.register?.({
++      id: options.id, pid: process.pid, url: HttpServer.formatAddress(options.address),
++      version: OPENCODE_VERSION, password: options.password,
++    }))
++    return yield* stock.register(options)
++  })
++  return { register }
++}
+diff --git a/packages/util/src/personalize-boot-lock.ts b/packages/util/src/personalize-boot-lock.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b531b79dc0453cdf1a4c2554894e4b97702f63f5
+--- /dev/null
++++ b/packages/util/src/personalize-boot-lock.ts
+@@ -0,0 +1,59 @@
++import { Database } from "bun:sqlite"
++import { createHash } from "node:crypto"
++import { mkdirSync } from "node:fs"
++import os from "node:os"
++import path from "node:path"
++import { setTimeout as sleep } from "node:timers/promises"
++
++export interface BootLease {
++  release(): void
++}
++
++// These are empty *control* files, never the application database. SQLite's
++// native file locks belong to the open connection and are released by the OS
++// even on SIGKILL/TerminateProcess. Do not unlink them: replacing the inode
++// would let two processes lock different files under the same name.
++export async function acquireBootLock(key: string, options: {
++  directory?: string
++  signal?: AbortSignal
++  timeoutMs?: number
++} = {}): Promise<BootLease> {
++  const timeout = options.timeoutMs ?? 90_000
++  if (!Number.isFinite(timeout) || timeout < 0) throw new Error("Invalid boot-lock timeout")
++  const deadline = performance.now() + timeout
++  const directory = options.directory ?? path.join(os.tmpdir(), "opencode", "personalize-boot-locks-v2")
++  const file = path.join(directory, createHash("sha256").update(key).digest("hex") + ".sqlite")
++  options.signal?.throwIfAborted()
++  mkdirSync(directory, { recursive: true, mode: 0o700 })
++  let firstAttempt = true
++  for (;;) {
++    options.signal?.throwIfAborted()
++    if (!firstAttempt && performance.now() >= deadline) throw new Error("Timed out waiting for bootstrap ownership")
++    firstAttempt = false
++    let db: Database | undefined
++    try {
++      db = new Database(file, { create: true })
++      // No native busy wait: yield to JS between attempts so cancellation and
++      // health remain responsive. Never steal a live owner's lock by age/PID.
++      db.run("PRAGMA busy_timeout=0")
++      db.run("BEGIN EXCLUSIVE")
++      options.signal?.throwIfAborted()
++      const owned = db
++      let released = false
++      return { release() {
++        if (released) return
++        // This connection is the ownership capability. Closing an old lease
++        // cannot close a successor's connection, even after PID reuse.
++        owned.close()
++        released = true
++      } }
++    } catch (error) {
++      db?.close()
++      if (!(error instanceof Error) || !("code" in error) ||
++          (error.code !== "SQLITE_BUSY" && error.code !== "SQLITE_LOCKED")) throw error
++    }
++    const remaining = deadline - performance.now()
++    if (remaining <= 0) throw new Error("Timed out waiting for bootstrap ownership")
++    await sleep(Math.min(100, remaining), undefined, { signal: options.signal })
++  }
++}
+diff --git a/packages/util/src/personalize-startup-state.ts b/packages/util/src/personalize-startup-state.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5cdd2a48ace9700c790b0fa0698b68579338213
+--- /dev/null
++++ b/packages/util/src/personalize-startup-state.ts
+@@ -0,0 +1,67 @@
++import { createHash } from "node:crypto"
++import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
++import os from "node:os"
++import path from "node:path"
++
++// A one-shot startup allowance, NOT a health/ready result or a renewable lease.
++// At expiry the unchanged client timeout/recovery rules resume.
++export const startupGraceMs = 30_000
++export type StartupIdentity = {
++  id?: string
++  pid: number
++  url: string
++  version?: string
++  password?: string
++}
++
++function filename(info: StartupIdentity, directory: string) {
++  if (!info.id || !info.password || !Number.isSafeInteger(info.pid) || info.pid <= 0) return
++  const key = createHash("sha256").update(JSON.stringify([
++    info.id, info.pid, info.url, info.version, info.password,
++  ])).digest("hex")
++  return path.join(directory, key + ".json")
++}
++const root = () => path.join(os.tmpdir(), "opencode", "personalize-startup-state")
++// Bound the allowance by monotonic time after the first observation, even if
++// the wall clock changes. Retain expired observations rather than re-arm them.
++const observed = new Map<string, number>()
++
++export function publishStartup(info: StartupIdentity, directory = root()) {
++  const file = filename(info, directory)
++  if (!file) return () => {}
++  mkdirSync(directory, { recursive: true, mode: 0o700 })
++  // Instance ID is random and registered by the CLI. Exclusive create means a
++  // second publish cannot renew an existing instance's allowance.
++  writeFileSync(file, JSON.stringify({ protocol: 1, startedAt: Date.now() }), { flag: "wx", mode: 0o600 })
++  let finished = false
++  return () => {
++    if (finished) return
++    finished = true
++    // Unique full-generation path: no successor's state can be removed here.
++    try { unlinkSync(file) } catch {}
++  }
++}
++
++export function isStarting(info: StartupIdentity, directory = root()): boolean {
++  const file = filename(info, directory)
++  if (!file) return false
++  try {
++    const state = JSON.parse(readFileSync(file, "utf8"))
++    const age = Date.now() - state.startedAt
++    if (state.protocol !== 1 || !Number.isSafeInteger(state.startedAt) || age < 0 || age >= startupGraceMs)
++      return false
++    let deadline = observed.get(file)
++    if (deadline === undefined) {
++      if (observed.size >= 256) observed.delete(observed.keys().next().value!)
++      deadline = performance.now() + startupGraceMs - age
++      observed.set(file, deadline)
++    }
++    if (performance.now() >= deadline) return false
++    // ESRCH, permission errors and uncertain liveness all fail closed. This
++    // check never grants lock ownership or deletes anything.
++    process.kill(info.pid, 0)
++    return true
++  } catch {
++    return false
 +  }
 +}
 diff --git a/packages/app/src/session/requests/permission-machine.node.test.mjs b/packages/app/src/session/requests/permission-machine.node.test.mjs
