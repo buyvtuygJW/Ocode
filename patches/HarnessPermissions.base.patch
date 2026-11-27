@@ -625,7 +625,7 @@ index e5f2c590f3413b29f50eb0e6c6d7d7bcb8f0b33b..9632d7e5cf3b2e8626b782e7623d9305
                yield* Effect.forEach(
                  prepared,
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index ccccf26faf0ab0253265e4eabf719f028ead629e..c873f945a19159827db6ac27b7128a5299c7418f 100644
+index ccccf26faf0ab0253265e4eabf719f028ead629e..6bda5cde9e6d4681b11394a2786f07f6928ef2fc 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
 @@ -22,6 +22,7 @@ import { SessionMessage } from "../../session/message.js"
@@ -645,21 +645,26 @@ index ccccf26faf0ab0253265e4eabf719f028ead629e..c873f945a19159827db6ac27b7128a52
 -        (request) => permission.assert({ ...request, ...Permission.invocation(context) }),
 -        { discard: true },
 -      )
-+      yield* authorizeShellRequests({ invocation, target, context, permission, requests })
++      yield* authorizeShellRequests({ invocation, target, context, permission, access, requests })
        // Approval can outlive the directory, so validate immediately before spawning.
        const workdir = yield* Environment.typeFollowing(target.environment.files, target.absolute).pipe(
          Effect.catchTag("Environment.NotFound", () =>
 diff --git a/packages/core/test/config/mcp-selection.node.test.mjs b/packages/core/test/config/mcp-selection.node.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd08eab6b5
+index 0000000000000000000000000000000000000000..ecc8d575b2ceac814f83d4b390c3ba392dbc4bb7
 --- /dev/null
 +++ b/packages/core/test/config/mcp-selection.node.test.mjs
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,104 @@
 +import assert from "node:assert/strict"
 +import test from "node:test"
 +import fs from "node:fs"
-+import { createRequire, registerHooks, stripTypeScriptTypes } from "node:module"
 +import { fileURLToPath, pathToFileURL } from "node:url"
++
++if (process.versions.bun) {
++  const { nodeSuite } = await import("../personalize/node-suite.mjs")
++  await nodeSuite(import.meta.url)
++} else {
++const { createRequire, registerHooks, stripTypeScriptTypes } = await import("node:module")
 +
 +const local = createRequire(import.meta.url)
 +const effectURL = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(local.resolve("effect")).href
@@ -753,15 +758,21 @@ index 0000000000000000000000000000000000000000..79991bfe5248c122a5402b1649e95fdd
 +  assert.equal(result.editor.get("other").disabled, true)
 +  assert.deepEqual(result.editor.get("other").command, ["plugin-owned"])
 +})
++}
 diff --git a/packages/core/test/permission/session-grant.test.mjs b/packages/core/test/permission/session-grant.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..14b996141327e7a46773fd88b4da82c7d08258d0
+index 0000000000000000000000000000000000000000..807be253e172678c4bf964f341a9b81f7760951a
 --- /dev/null
 +++ b/packages/core/test/permission/session-grant.test.mjs
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,96 @@
 +import { test } from "node:test"
 +import assert from "node:assert/strict"
-+import { registerHooks } from "node:module"
++
++if (process.versions.bun) {
++  const { nodeSuite } = await import("../personalize/node-suite.mjs")
++  await nodeSuite(import.meta.url)
++} else {
++const { registerHooks } = await import("node:module")
 +
 +registerHooks({
 +  resolve(specifier, context, next) {
@@ -849,6 +860,7 @@ index 0000000000000000000000000000000000000000..14b996141327e7a46773fd88b4da82c7
 +    assert.equal(unknownEffectsDenied([], input), false)
 +  }
 +})
++}
 diff --git a/packages/protocol/src/groups/permission.ts b/packages/protocol/src/groups/permission.ts
 index 16b96db34f749c33aaac4d794c10a7da4d46b4f6..d66601478ebea58dda868af5d401a60bec84719a 100644
 --- a/packages/protocol/src/groups/permission.ts
@@ -1871,20 +1883,24 @@ index baf79443b8d6cd2ffa9ba7d8df41214eb1ba063f..e8458d4c82133f0aae83d8431e303c3a
        const fileMutation = yield* FileMutation.Service
        // The resolved target keeps the symlinked text; the typed path names the real directory.
 diff --git a/packages/core/test/tool-shell.test.ts b/packages/core/test/tool-shell.test.ts
-index ac6e806fc92ea292d30731cb116619e634c97dbb..a5bd4ca92d2a0db36424269aca420370b1c3441b 100644
+index ac6e806fc92ea292d30731cb116619e634c97dbb..f2432a2912800d4898bfb46710a4f9d5209af8d1 100644
 --- a/packages/core/test/tool-shell.test.ts
 +++ b/packages/core/test/tool-shell.test.ts
-@@ -63,6 +63,9 @@ let denyAction: string | undefined
+@@ -63,6 +63,13 @@ let denyAction: string | undefined
  let afterPermission = (_input: Permission.AssertInput): Effect.Effect<void> => Effect.void
  
  const permission = permissionLayer({
++  // Record a rejecting permission check, but never invoke afterPermission:
++  // the deny-only probe is not an approval.
 +  assertNotDenied: (input) => input.action === denyAction
-+    ? Effect.fail(new Permission.BlockedError({ rules: [], permission: input.action, resources: input.resources }))
++    ? Effect.sync(() => assertions.push(input)).pipe(Effect.andThen(
++        Effect.fail(new Permission.BlockedError({ rules: [], permission: input.action, resources: input.resources })),
++      ))
 +    : Effect.void,
    assert: (input) =>
      Effect.sync(() => assertions.push(input)).pipe(
        Effect.andThen(Effect.suspend(() => afterPermission(input))),
-@@ -349,572 +352,9 @@ const runPermissionCommand = (
+@@ -349,572 +356,9 @@ const runPermissionCommand = (
      return { exit, requests }
    }).pipe(Effect.scoped, Effect.timeout(Duration.seconds(15)))
  
@@ -2454,25 +2470,24 @@ index ac6e806fc92ea292d30731cb116619e634c97dbb..a5bd4ca92d2a0db36424269aca420370
 -      ))
 -  }
 -})
-+export { permissionIt, withScanner, runPermissionCommand, isWindows }
++export { Cause, permissionIt, withScanner, runPermissionCommand, isWindows }
 +import { shellRunnerScenarios } from "./personalize/shell-runner-fixture"
-+shellRunnerScenarios({ permissionIt, withScanner, runPermissionCommand, isWindows })
++shellRunnerScenarios({ Cause, permissionIt, withScanner, runPermissionCommand, isWindows })
  
  describe("ShellTool", () => {
    it.live(
-@@ -1371,10 +811,8 @@ describe("ShellTool", () => {
+@@ -1371,9 +815,9 @@ describe("ShellTool", () => {
                status: "error",
                error: { message: expect.stringContaining("Permission denied: shell") },
              })
--            expect(assertions).toMatchObject([
++            // The shell deny-only check rejects before directory or shell approval.
+             expect(assertions).toMatchObject([
 -              { action: "external_directory", resources: ["*"], save: undefined },
 -              { action: "shell", resources: [command], save: undefined, metadata: { reason: "unterminated-quote" } },
--            ])
-+            // The deny-only precheck rejects before any approval is requested.
-+            expect(assertions).toEqual([])
++              { action: "shell", resources: [command] },
+             ])
              expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "marker")).exists())).toBe(false)
            }).pipe(
-             Effect.provide(
 diff --git a/packages/core/test/mcp.test.ts b/packages/core/test/mcp.test.ts
 index de8b57bea4e83f6ba9114363ae1112920f480ca5..bc2108bd7d2494ee25b3cae8c20e191cc8e94a4e 100644
 --- a/packages/core/test/mcp.test.ts
@@ -2615,7 +2630,7 @@ index e09ef9bb286bb9db445daf42c86d8b12af92cf5e..b765aa335a280208e35021d449fa25ef
      acp
        .waitForMessage(
 diff --git a/packages/core/test/subagent-idle-e2e.test.ts b/packages/core/test/subagent-idle-e2e.test.ts
-index ee73226c7fd7c749f397ef8cb2fb466631eacc55..8f35df16a72fd61f93404c545a86907e40999304 100644
+index ee73226c7fd7c749f397ef8cb2fb466631eacc55..e30c39a4ad023b109fbb305980a3ba65a82c62c3 100644
 --- a/packages/core/test/subagent-idle-e2e.test.ts
 +++ b/packages/core/test/subagent-idle-e2e.test.ts
 @@ -58,6 +58,22 @@ const pluginSupervisor = makeLocationNode({
@@ -2631,7 +2646,7 @@ index ee73226c7fd7c749f397ef8cb2fb466631eacc55..8f35df16a72fd61f93404c545a86907e
 +          const request = event.data
 +          expect(request.action).toBe("shell")
 +          expect(request.metadata?.filesystemEffects).toBe("unknown")
-+          expect(["call-shell", "call-grandchild-shell"]).toContain(request.source?.id)
++          expect(["call-shell", "call-grandchild-shell"]).toContain(request.source?.id ?? "")
 +          expect(request.metadata?.unknownCommand).toContain("release")
 +          expect(request.metadata?.unknownCommand).toContain("done")
 +          yield* permission.reply({ requestID: request.id, reply: "once" })
@@ -2704,13 +2719,23 @@ index e3efb3a15f9bec8a0e665f8bd5d4502615a38ce0..77d8ac71c3a8a620eb51447b1fa67c79
      const database = yield* Database.Service
      yield* database.db
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
-index cb86d5b96f791dcf5757924b9b566a018dbdaa43..140deca2fbc43ddf29e0f0ebd5bbadc56614f087 100644
+index cb86d5b96f791dcf5757924b9b566a018dbdaa43..b0e64e6c004bcc70f7c6a2228e71b22487605788 100644
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -1037,102 +1037,10 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
+@@ -1027,112 +1027,10 @@ const prepareTitleGeneration = Effect.gen(function* () {
    )
  })
  
+-const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
+-  const bus = yield* Bus.Service
+-  return yield* bus.subscribe(SessionEvent.Renamed).pipe(
+-    Stream.filter((event) => event.data.sessionID === sessionID),
+-    Stream.take(1),
+-    Stream.runDrain,
+-    Effect.forkScoped({ startImmediately: true }),
+-  )
+-})
+-
 +export { scenario, prepareTitleGeneration, sessionID, invalidRequest, providerRejected }
 +import { titleRunnerScenarios } from "./personalize/title-runner-fixture"
  describe("SessionRunnerLLM", () => {

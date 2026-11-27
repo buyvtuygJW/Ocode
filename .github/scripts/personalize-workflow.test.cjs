@@ -23,6 +23,19 @@ test('build script is external, synced, and receives the fallback ref through en
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('resolved upstream is checked before Bun setup without disabling latest/fallback rechecks', () => {
+  const check = workflow.indexOf('- name: Preflight resolved upstream patch compatibility');
+  assert.ok(check > workflow.indexOf('- name: Resolve upstream Bun version'));
+  assert.ok(check < workflow.indexOf('- name: Setup Bun'));
+  assert.match(workflow.slice(check, workflow.indexOf('- name: Setup Node for capability regressions', check)),
+    /continue-on-error: true[\s\S]*check-personalize-hooks\.cjs --upstream upstream-meta/);
+  const gate = buildScript.indexOf('check-personalize-hooks.cjs --patches ../patches --upstream .');
+  assert.ok(gate > buildScript.indexOf('UPSTREAM_SHA="$(git rev-parse HEAD)"'));
+  assert.ok(gate < buildScript.indexOf('  strip_upstream_workflows\n'));
+  assert.match(buildScript, /try_build "\$latest_ref" "latest"/);
+  assert.match(buildScript, /try_build "\$last_success" "fallback-last-success"/);
+});
+
 test('two successive dev syncs retain runnable workflow helpers and their tests byte-for-byte', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'workflow-generations-'));
   function supportFiles(relative) {
@@ -141,6 +154,7 @@ for (const scenario of ['latest', 'missing-receipt', 'stale-receipt', 'fallback'
 function run(scenario, label = 'latest', cwd) {
   const result = spawnSync(bash, ['--noprofile', '--norc', '-c', `
     set -euo pipefail
+    unset APPLIED_TRANSPARENCY APPLIED_SCIENCE APPLIED_RSI
     source "$PERSONALIZE_BUILD_SCRIPT"
     export UPSTREAM_REPO=fixture GITHUB_OUTPUT=/dev/null
     scenario=${scenario}
@@ -240,8 +254,11 @@ test('patch-only isolation runs the real checker tests without a local migration
     const scripts = path.join(directory, '.github/scripts');
     mkdirSync(scripts, { recursive: true });
     mkdirSync(path.join(directory, 'patches'));
-    for (const name of ['check-personalize-hooks.cjs', 'personalize-hooks.test.cjs'])
+    for (const name of ['check-personalize-hooks.cjs', 'personalize-hooks.test.cjs',
+      'check-patch-stack.cjs', 'patch-stack.test.cjs'])
       cpSync(path.join(__dirname, name), path.join(scripts, name));
+    mkdirSync(path.join(directory, '.github/workflows'));
+    cpSync(buildFile, path.join(directory, '.github/workflows/build-personalize.sh'));
     for (const name of ['FinalPERSONALIZE.patch', 'FinalPersonalizeX.patch', 'FinalPersonalizeS.patch',
       'FinalPersonalizeR.patch', 'SessionTitleNaming.patch', 'HarnessPermissions.base.patch'])
       cpSync(path.join(__dirname, '../../patches', name), path.join(directory, 'patches', name));
@@ -252,13 +269,16 @@ test('patch-only isolation runs the real checker tests without a local migration
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('NODE_TEST_')));
     for (const args of [
       ['--test', '.github/scripts/personalize-hooks.test.cjs'],
+      ['--test', '.github/scripts/patch-stack.test.cjs'],
       ['.github/scripts/check-personalize-hooks.cjs'],
     ]) {
       const result = spawnSync(process.execPath, args, { cwd: directory, encoding: 'utf8', env });
       assert.ifError(result.error);
       assert.equal(result.status, 0, result.stdout + result.stderr);
-      if (args[0] === '--test')
+      if (args[1] === '.github/scripts/personalize-hooks.test.cjs')
         assert.match(result.stdout, /the mandatory base embeds the complete pinned permissions patch/);
+      else if (args[0] === '--test')
+        assert.match(result.stdout, /bus.ts typed-commit upstream drift/);
       else
         assert.match(result.stdout, /Release integration budget PASS/);
     }
@@ -354,7 +374,7 @@ test('successful gates retain all applied optional features', () => {
 const owned = ['context-decay.test.mjs', 'lifetime-effect.test.mjs', 'lifetime.test.mjs', 'session-title.test.mjs',
   'permission-contract.test.mjs', 'single-executable.test.mjs', 'node-typescript.test.mjs', 'bootstrap.test.mjs',
   'storage-diagnostic.test.mjs', 'connection-backoff.test.mjs', 'startup-ownership.test.mjs', 'startup-recovery.test.mjs'];
-const permissionRegressions = ['packages/core/test/permission/personalize.integration.test.ts',
+const permissionRegressions = ['packages/core/test/bus.test.ts', 'packages/core/test/permission/personalize.integration.test.ts',
   'packages/core/test/permission/service.node.test.mjs', 'packages/server/test/personalize-permission-policy.test.ts',
   'packages/tui/test/personalize-mini-permission.test.ts', 'packages/tui/test/personalize-permission-render.test.tsx',
   'packages/core/test/tool-patch.test.ts', 'packages/core/test/patch.test.ts',
@@ -367,6 +387,10 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
   const directory = mkdtempSync(path.join(parent, 'regression-gate-'));
   const files = [
     'packages/cli/tsconfig.json',
+    'packages/core/tsconfig.json',
+    'packages/client/tsconfig.json',
+    'packages/tui/tsconfig.json',
+    'packages/core/test/bus.test.ts',
     'packages/core/test/session-context-decay.test.ts',
     'packages/core/test/session/content-guards.test.ts',
     'packages/core/test/session-model-request-hooks.test.ts',
@@ -410,6 +434,7 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
       APPLIED_TRANSPARENCY=${transparency}
       bun() {
         echo "CALL bun $*" >&2
+        if [[ "${scenario}" == package-typecheck && "$PWD" == */packages/${target} && "$*" == "run typecheck:tsc" ]]; then return 1; fi
         if [[ "${scenario}" == failure && "$*" == *"${path.basename(target)}"* ]]; then return 1; fi
         return 0
       }
@@ -434,6 +459,15 @@ function runRegressions(scenario, target = '', science = 'off', transparency = '
   }
 }
 
+for (const name of ['core', 'client', 'tui']) {
+  test(`a failed ${name} typecheck rejects the release before any tests or compilation`, () => {
+    const result = runRegressions('package-typecheck', name);
+    assert.match(result.output, /RESULT 1/);
+    assert.match(result.output, new RegExp(`personalization ${name} typecheck FAILED`));
+    assert.doesNotMatch(result.calls, /script\/test.ts|--test/);
+  });
+}
+
 for (const name of [...owned, ...permissionRegressions]) {
   test(`missing ${name} blocks the pre-build gate`, () => {
     assert.match(runRegressions('missing', name).output, /RESULT 1/);
@@ -448,6 +482,7 @@ test('the pre-build gate runs all owned regressions with Effect resolved from co
   assert.match(result.calls, /CALL bun run typecheck:tsc/);
   for (const name of owned) assert.ok(result.calls.includes(`../../.personalize/${name}`));
   assert.ok(result.calls.includes('test/permission/personalize.integration.test.ts'));
+  assert.ok(result.calls.includes('test/bus.test.ts'));
   assert.ok(result.calls.includes('packages/core/test/permission/service.node.test.mjs'));
   assert.match(result.calls, /CALL bun run script\/test\.ts /);
   assert.ok(result.calls.includes('test/personalize-plugin-registration.test.ts'));

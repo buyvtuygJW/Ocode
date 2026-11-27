@@ -13,7 +13,8 @@
 //   * the one allowed hook actually loads the owned boundaries (a build.ts edit
 //     that ignores them would silently ship inert owned modules);
 //   * with --upstream: declared exports and every `stock.X` access in a factory
-//     still resolve to public exports of the LIVE upstream module.
+//     still resolve to public exports of the LIVE upstream module, and the
+//     complete shipped stack applies sequentially with --index to that commit.
 //
 // analyze() verifies segment integrity and bootstrap wiring; it is NOT a release
 // approval. enforceReleaseBudget() must see the unstripped patch set, with titles.
@@ -25,9 +26,9 @@ const { createHash } = require('node:crypto');
 const NAMES = ['FinalPERSONALIZE.patch', 'FinalPersonalizeR.patch', 'FinalPersonalizeS.patch', 'FinalPersonalizeX.patch'];
 const MANDATORY = 'FinalPERSONALIZE.patch';
 const PERMISSIONS = 'HarnessPermissions.base.patch';
-const PERMISSIONS_SHA256 = '85b71b859ae4150e45d163d3505e3e86f360e1819f54a45d0e86642eadbefcb0';
-const PERMISSION_FILE_COUNT = 26;
-const TITLE_SHA256 = '6cc4ac0b06004dfde9c6dd238ca94db87f929fe7979414e60f87b867869e1880';
+const PERMISSIONS_SHA256 = '3e2d959adf0bc1775a8cc5deecf89d29a6d787f6058b0081b9183e9dc5fd83f3';
+const PERMISSION_FILE_COUNT = 37;
+const TITLE_SHA256 = '05f4d24f85653970b3fbd03ffbfcec5df34e9a79cb8edc947875f229b82f8e0c';
 const ALLOWED = 'packages/cli/script/build.ts';
 const MANIFESTS = ['manifest.json', 'R.json', 'S.json', 'X.json'];
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -343,6 +344,13 @@ if (require.main === module) {
   console.log(`Public-module injection targets: ${moduleBoundaries(release).length}; each counts against its target file's three-point budget.`);
   enforceReleaseBudget(release);
   console.log('Release integration budget PASS: every upstream file has at most 3 edit/injection points across the patch stack.');
+  if (upstream) {
+    const { checkPatchStack } = require('./check-patch-stack.cjs');
+    const applied = checkPatchStack({ upstream, directory });
+    console.log(`Indexed release stack PASS: ${applied.patches.length} patches at upstream ${applied.revision}`);
+  } else {
+    console.log('Upstream application compatibility NOT checked (no --upstream supplied).');
+  }
 }
 
 module.exports = { analyze, footprint, moduleBoundaries, integrationLedger, enforceReleaseBudget, verifyTitle, PERMISSION_FILE_COUNT };

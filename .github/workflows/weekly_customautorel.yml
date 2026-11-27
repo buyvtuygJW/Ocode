@@ -117,6 +117,7 @@ jobs:
 
           echo "Running checker unit tests..."
           node --test .github/scripts/personalize-hooks.test.cjs
+          node --test .github/scripts/patch-stack.test.cjs
           node --test .github/scripts/personalize-workflow.test.cjs
           node --test .github/scripts/release-combination.test.cjs
           node --experimental-vm-modules --test .github/scripts/personalize-runtime.test.cjs
@@ -165,6 +166,14 @@ jobs:
 
           echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
           echo "Using upstream Bun version: $BUN_VERSION"
+
+      - name: Preflight resolved upstream patch compatibility
+        # Report incompatibility before toolchain/dependency setup. Do not bypass
+        # the existing fallback policy; try_build rechecks its actual checkout.
+        id: early_compatibility
+        continue-on-error: true
+        shell: bash
+        run: node .github/scripts/check-personalize-hooks.cjs --upstream upstream-meta
 
       - name: Setup Node for capability regressions
         uses: actions/setup-node@v4

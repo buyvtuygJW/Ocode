@@ -148,8 +148,17 @@ run_patch_tests() {
     echo "ERROR: CLI/build-adapter typecheck FAILED -- refusing to build this ref"
     return 1
   fi
+  # CLI references do not include every owned client module or regression test.
+  local package
+  for package in core client tui; do
+    if ! (cd "packages/$package" && bun run typecheck:tsc); then
+      echo "ERROR: personalization $package typecheck FAILED -- refusing to build this ref"
+      return 1
+    fi
+  done
   local tests=() f found
   local required=(
+    packages/core/test/bus.test.ts
     packages/core/test/session-context-decay.test.ts
     packages/core/test/session/content-guards.test.ts
     packages/core/test/session-model-request-hooks.test.ts
@@ -350,6 +359,8 @@ try_build() {
   fi
   UPSTREAM_SHA="$(git rev-parse HEAD)"
   echo "Checked out upstream SHA: $UPSTREAM_SHA"
+  # Includes exact sequential indexed application in a disposable tree, before
+  # workflow removal, real patching, dependency installation or compilation.
   # A historical success is not compatibility evidence for today's patches.
   if ! node ../.github/scripts/check-personalize-hooks.cjs --patches ../patches --upstream .; then
     echo "ERROR: personalization isolation check failed ($label: $UPSTREAM_SHA)"
