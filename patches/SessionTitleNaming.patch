@@ -1,18 +1,19 @@
 diff --git a/packages/core/src/session/title.ts b/packages/core/src/session/title.ts
-index d69dc95ffab9d37318f4b0c5e8f95a2b9866d710..386eb8c733c7d902d195e5b48f9bdc5129a6d88d 100644
+index 5565f4a5a8ab6c406aa30460a674196182590400..6b806dbe1636d3d4a4c9989f2dfe5770f8783e35 100644
 --- a/packages/core/src/session/title.ts
 +++ b/packages/core/src/session/title.ts
-@@ -17,27 +17,18 @@ import type { SessionRunnerModel } from "./runner/model.js"
+@@ -17,28 +17,21 @@ import type { SessionRunnerModel } from "./runner/model.js"
  import { SessionSchema } from "./schema.js"
  import { SessionUsage } from "./usage.js"
  import { SessionStore } from "./store.js"
--
++import { dateTitle, createTitleRenamer } from "../personalize/session-naming.js"
++import { prepareTitle } from "../personalize/title-request.js"
+ 
 -const MAX_LENGTH = 100
 -const MAX_CONTEXT_LENGTH = 8_000
 -const MAX_FIRST_MESSAGE_LENGTH = 2_000
--const titleChanged = Symbol("Session title changed")
-+import { dateTitle, createTitleRenamer } from "../personalize/session-naming.js"
-+import { prepareTitle } from "../personalize/title-request.js"
+ // The title moved on while the model was naming it; the newer title wins.
+ class TitleChanged extends Data.TaggedError("SessionTitle.TitleChanged") {}
  
  export interface Interface {
 -  /** Generates an initial title or regenerates one from bounded conversation history. */
@@ -34,7 +35,7 @@ index d69dc95ffab9d37318f4b0c5e8f95a2b9866d710..386eb8c733c7d902d195e5b48f9bdc51
    isExactRootFallback({
      title: session.title,
      time: { created: DateTime.toEpochMillis(session.time.created) },
-@@ -71,7 +62,7 @@ export const layer = Layer.effect(
+@@ -72,7 +65,7 @@ export const layer = Layer.effect(
              })
            : Effect.void,
        )
@@ -43,12 +44,12 @@ index d69dc95ffab9d37318f4b0c5e8f95a2b9866d710..386eb8c733c7d902d195e5b48f9bdc51
          session: input.session,
          agent: input.agent.id,
          model: input.model,
-@@ -114,54 +105,32 @@ export const layer = Layer.effect(
+@@ -115,54 +108,32 @@ export const layer = Layer.effect(
      })
  
      const generate = Effect.fn("SessionTitle.generate")(function* (sessionID: SessionSchema.ID) {
 -      const session = yield* store.get(sessionID)
-+      const rename = createTitleRenamer({ bus, store, db })
++      const rename = createTitleRenamer({ bus, store, db, conflict: () => new TitleChanged() })
 +      let session = yield* store.get(sessionID)
        if (!session) return
 +      // Persist the date before model selection, streaming, or any early return.
@@ -104,9 +105,9 @@ index d69dc95ffab9d37318f4b0c5e8f95a2b9866d710..386eb8c733c7d902d195e5b48f9bdc51
 -            sessionID: session.id,
 -            title: truncate(title),
 -          },
--          { commit: (sequence) => (sequence === expectedSequence ? Effect.void : Effect.die(titleChanged)) },
+-          { commit: (sequence) => (sequence === expectedSequence ? Effect.void : Effect.fail(new TitleChanged())) },
 -        )
--        .pipe(Effect.catchDefect((defect) => (defect === titleChanged ? Effect.void : Effect.die(defect))))
+-        .pipe(Effect.catchTag("SessionTitle.TitleChanged", () => Effect.void))
 +      if (!generated) return
 +      const stamp = dateTitle(session.time.created)
 +      const pseudonym = /^[\p{L}\p{N}]{1,5}$/u.test(generated) ? generated : ""

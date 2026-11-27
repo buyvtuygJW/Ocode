@@ -1280,13 +1280,13 @@ index 0000000000000000000000000000000000000000..001ba8ad13e8a7ede81538bd447b7d97
 +for (const plugin of PersonalizeBuild.plugins([createSolidTransformPlugin()])) Bun.plugin(plugin)
 diff --git a/packages/ai/src/personalize/open-responses.ts b/packages/ai/src/personalize/open-responses.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d990e5cddb6e97f5586cc289110ed97f8683166
+index 0000000000000000000000000000000000000000..6f8ea9cabe7e8a84a65d99b310c24cabcf6d625c
 --- /dev/null
 +++ b/packages/ai/src/personalize/open-responses.ts
 @@ -0,0 +1,13 @@
 +import { Effect } from "effect"
 +
-+export function decorate(stock: typeof import("../protocols/open-responses")) {
++export function decorate(stock: typeof import("../protocols/open-responses.js")) {
 +  const lowerGeneration: typeof stock.lowerGeneration = (...args) => ({ ...stock.lowerGeneration(...args), store: false })
 +  const fromRequest: typeof stock.fromRequest = (...args) =>
 +    stock.fromRequest(...args).pipe(Effect.map((body) => ({ ...body, store: false })))
@@ -1359,11 +1359,12 @@ index 0000000000000000000000000000000000000000..552e669cfaa7a25bdecdb6630c9add91
 +}
 diff --git a/packages/client/src/personalize/service-probe.ts b/packages/client/src/personalize/service-probe.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..adbef56f2e97a2bf1ad944c5e54404657a4bdc23
+index 0000000000000000000000000000000000000000..6ab1ae52a8fe43229e764da7febbc402514179e6
 --- /dev/null
 +++ b/packages/client/src/personalize/service-probe.ts
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,45 @@
 +import type { Info } from "../service"
++import type { LocalService } from "../service-probe"
 +// The stock Promise client has no util/Effect dependency. This owned helper is
 +// Node-only and dependency-free; use its source without adding util's runtime.
 +import { isStarting } from "../../../util/src/personalize-startup-state"
@@ -1373,7 +1374,10 @@ index 0000000000000000000000000000000000000000..adbef56f2e97a2bf1ad944c5e5440465
 +    const state: unknown = service && typeof service === "object" ? Reflect.get(service, "state") : undefined
 +    return state === "waiting" || state === "retrying" ? { _tag: "wait" } : stock.decide(service, options)
 +  }
-+  const probeResult: typeof stock.probeResult = async (info: Info, timeout) => {
++  const probeResult = async (info: Info, timeout?: number): Promise<{
++    service: LocalService | undefined
++    timedOut: boolean
++  }> => {
 +    const result = await stock.probeResult(info, timeout)
 +    if (result.timedOut && isStarting(info)) {
 +      // Explicit local startup state only; never report ready or return an
@@ -1449,10 +1453,10 @@ index 0000000000000000000000000000000000000000..8a1e00858111426db1377040d7e232d8
 +}
 diff --git a/packages/core/src/personalize/database.ts b/packages/core/src/personalize/database.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..10453d3db8a0eef5273195a99b09464af2166a1a
+index 0000000000000000000000000000000000000000..ae52f6832459277a807cd8197a4d147867bce58d
 --- /dev/null
 +++ b/packages/core/src/personalize/database.ts
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,48 @@
 +import path from "node:path"
 +import { Cause, Effect, Exit, Layer, Scope } from "effect"
 +import { Global } from "@opencode/util/global"
@@ -1492,6 +1496,8 @@ index 0000000000000000000000000000000000000000..10453d3db8a0eef5273195a99b09464a
 +            yield* Effect.sleep((attempt + 1) * 200)
 +          }
 +        }),
++        // All openers of this database share state even when their TEMP differs.
++        { directory: path.join(global.state, "personalize-boot-locks-v2") },
 +      )
 +    }))
 +  }
@@ -3411,13 +3417,13 @@ index 0000000000000000000000000000000000000000..6197a6376aafc2093e03df84d6fe4667
 +}
 diff --git a/packages/util/src/personalize-boot.ts b/packages/util/src/personalize-boot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f745f1fd536dc359ebe6ae8e8c51918d3c03bc4
+index 0000000000000000000000000000000000000000..6513522739420280681e87094117f328a53e1a75
 --- /dev/null
 +++ b/packages/util/src/personalize-boot.ts
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,58 @@
 +import { Context, Effect, Option } from "effect"
-+import { acquireBootLock, type BootLease } from "./personalize-boot-lock"
-+import type { StartupIdentity } from "./personalize-startup-state"
++import { acquireBootLock, type BootLease } from "./personalize-boot-lock.js"
++import type { StartupIdentity } from "./personalize-startup-state.js"
 +
 +export interface BootState {
 +  retry: Effect.Effect<void>
@@ -3430,14 +3436,18 @@ index 0000000000000000000000000000000000000000..9f745f1fd536dc359ebe6ae8e8c51918
 +  Effect.flatMap((state) => Option.isSome(state) ? state.value[kind] : Effect.void),
 +)
 +
-+export function withBootLock<A, E, R>(key: string, use: (lease: BootLease) => Effect.Effect<A, E, R>) {
++export function withBootLock<A, E, R>(
++  key: string,
++  use: (lease: BootLease) => Effect.Effect<A, E, R>,
++  options: { directory?: string } = {},
++) {
 +  // acquireUseRelease normally masks interruption during acquisition. Install
 +  // a holder's finalizer FIRST, then wait interruptibly in its use phase. Store
 +  // the connection before resolving the promise so an interrupt at the handoff
 +  // cannot lose the lease.
 +  return Effect.acquireUseRelease(
 +    Effect.sync(() => ({ lease: undefined as BootLease | undefined, closed: false })),
-+    (holder) => Effect.promise((signal) => acquireBootLock(key, { signal }).then((lease) => {
++    (holder) => Effect.promise((signal) => acquireBootLock(key, { ...options, signal }).then((lease) => {
 +      holder.lease = lease
 +      // Effect can finish interrupting before this promise's microtask runs.
 +      // A late acquisition must close itself, not resurrect a finalized scope.
@@ -4288,11 +4298,11 @@ index 0000000000000000000000000000000000000000..5d5e3eff45f0b35f528de44f7ce0d734
 +}
 diff --git a/packages/core/src/personalize/session-naming.ts b/packages/core/src/personalize/session-naming.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..52ae8ad709a01c0e620bc91f604aa03c92a664c2
+index 0000000000000000000000000000000000000000..d914f0398ed355faf6e382ced6464a5cf9347816
 --- /dev/null
 +++ b/packages/core/src/personalize/session-naming.ts
-@@ -0,0 +1,54 @@
-+import { DateTime, Effect } from "effect"
+@@ -0,0 +1,57 @@
++import { Data, DateTime, Effect } from "effect"
 +import { Bus } from "../bus.js"
 +import { Database } from "../database/database.js"
 +import { SessionEvent } from "../session/event.js"
@@ -4306,7 +4316,7 @@ index 0000000000000000000000000000000000000000..52ae8ad709a01c0e620bc91f604aa03c
 +  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}-${two(date.getHours())}${two(date.getMinutes())}`
 +}
 +
-+const changed = Symbol("Session title changed")
++class TitleChanged extends Data.TaggedError("SessionTitle.TitleChanged") {}
 +
 +// Share the rename transaction between creation and title generation without
 +// requiring callers that already hold the services to construct another layer.
@@ -4314,6 +4324,7 @@ index 0000000000000000000000000000000000000000..52ae8ad709a01c0e620bc91f604aa03c
 +  bus: Bus.Interface
 +  store: SessionStore.Interface
 +  db: Database.Interface["db"]
++  conflict?: () => { readonly _tag: "SessionTitle.TitleChanged" }
 +}) => Effect.fn("Personalize.renameIfUnchanged")(function* (
 +  session: SessionSchema.Info,
 +  title: string,
@@ -4325,10 +4336,12 @@ index 0000000000000000000000000000000000000000..52ae8ad709a01c0e620bc91f604aa03c
 +    if (!current || current.title !== session.title) return false
 +    if (current.title === title) return true
 +    const committed = yield* bus.publish(SessionEvent.Renamed, { sessionID: session.id, title }, {
-+      commit: (sequence) => sequence === expected ? Effect.void : Effect.die(changed),
++      commit: (sequence) => sequence === expected ? Effect.void : Effect.fail(
++        deps.conflict ? deps.conflict() : new TitleChanged(),
++      ),
 +    }).pipe(
 +      Effect.as(true),
-+      Effect.catchDefect((defect) => defect === changed ? Effect.succeed(false) : Effect.die(defect)),
++      Effect.catchTag("SessionTitle.TitleChanged", () => Effect.succeed(false)),
 +    )
 +    if (committed) return true
 +    // An unrelated event must not strand an unnamed session. Re-read the title
@@ -4459,12 +4472,12 @@ index 0000000000000000000000000000000000000000..337bdb3b47b5bb1c8ac349b557951538
 +}))
 diff --git a/.personalize/node-typescript.mjs b/.personalize/node-typescript.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..96f788cfef597838d088d028fa7c3407a80886a9
+index 0000000000000000000000000000000000000000..45bb8153c041b7907052b1a92c7e90c555f4d680
 --- /dev/null
 +++ b/.personalize/node-typescript.mjs
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,26 @@
 +import { existsSync } from "node:fs"
-+import { registerHooks } from "node:module"
++import * as nodeModule from "node:module"
 +import { fileURLToPath } from "node:url"
 +
 +const packages = new URL("../packages/", import.meta.url).href
@@ -4472,7 +4485,9 @@ index 0000000000000000000000000000000000000000..96f788cfef597838d088d028fa7c3407
 +// Source packages use emitted .js specifiers. Node's native TS runner does not
 +// perform the .js -> .ts resolution that TypeScript and Bun use for those sources.
 +// Prefer actual JavaScript and never redirect imports outside this checkout.
-+registerHooks({
++// Bun already resolves emitted .js specifiers to TypeScript. Do not import a
++// Node-only named export when its ordinary suite discovers these shared tests.
++if (!process.versions.bun) nodeModule.registerHooks({
 +  resolve(specifier, context, next) {
 +    try {
 +      return next(specifier, context)
@@ -4533,10 +4548,10 @@ index 0000000000000000000000000000000000000000..be571dad220619ee911a0b9c726bd4b8
 +})
 diff --git a/.personalize/permission-contract.test.mjs b/.personalize/permission-contract.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..305420c18ab02f38082a918e92a07f786cbcba30
+index 0000000000000000000000000000000000000000..a2394a804db88a291da5411785e183aef64dc6bc
 --- /dev/null
 +++ b/.personalize/permission-contract.test.mjs
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,513 @@
 +import assert from "node:assert/strict"
 +import { readFileSync, existsSync } from "node:fs"
 +import { stripTypeScriptTypes } from "node:module"
@@ -4635,6 +4650,55 @@ index 0000000000000000000000000000000000000000..305420c18ab02f38082a918e92a07f78
 +  const internal = { ...target, absolute: "/sandbox/internal", externalDirectory: undefined }
 +  const metadata = filesystemMetadata([internal, target], ["read"], "content")
 +  assert.deepEqual(policy.readFacts({ metadata: externalMetadata([internal, target], metadata) }).paths, [target.absolute])
++})
++
++test("write authorization respects caller-owned external access and rechecks changed CRUD kinds", async () => {
++  const { Effect } = await import(process.env.PERSONALIZE_EFFECT ?? "effect")
++  const { makeFileWritePermissions } = load(
++    path.join(root, "packages/core/src/personalize/filesystem-permission.ts"), {
++      "node:path": path, effect: { Effect },
++      "@opencode/schema/personalize/permission-policy": policy,
++      "../environment/index.js": {},
++      "../file-access.js": { FileAccess: { always: (target) => target.resource } },
++      "../permission.js": { Permission: { invocation: (context) => context } },
++    },
++  )
++  let exists = false
++  const target = {
++    absolute: "/srv/file", resource: "pro:/srv/file", machine: "pro",
++    externalDirectory: { directory: "/srv" },
++    environment: { path: path.posix, files: {
++      stat: () => Effect.suspend(() => exists ? Effect.succeed({ type: "file" })
++        : Effect.fail({ _tag: "Environment.NotFound" })),
++    } },
++  }
++  const events = []
++  const write = makeFileWritePermissions({
++    access: {
++      resolve: () => Effect.succeed(target),
++      authorizeExternal: (_targets, _context, metadata) => Effect.sync(() => {
++        events.push({ type: "external", facts: policy.readFacts({ metadata }) })
++      }),
++    },
++    permission: { assert: (input) => Effect.sync(() => {
++      events.push({ type: input.action, facts: policy.readFacts(input) })
++    }) },
++  })
++  const context = { sessionID: "ses_write" }
++  // A transfer has already authorized its endpoints using FileAccess.
++  await Effect.runPromise(write.authorize(target, context))
++  assert.deepEqual(events.map((event) => event.type), ["edit"])
++  assert.deepEqual(events[0].facts.operations, ["create"])
++  assert.equal(events[0].facts.machine, "pro")
++  events.length = 0
++  await Effect.runPromise(write.target(target.resource, context))
++  await Effect.runPromise(write.authorize(target, context))
++  assert.deepEqual(events.map((event) => event.type), ["external", "edit"])
++  events.length = 0
++  exists = true
++  await Effect.runPromise(write.authorize(target, context))
++  assert.deepEqual(events.map((event) => event.type), ["external", "edit"])
++  assert.ok(events.every((event) => event.facts.operations.join() === "update"))
 +})
 +
 +test("machine-qualified metadata and persisted grants cannot alias local directories", () => {
@@ -5408,49 +5472,51 @@ index 0000000000000000000000000000000000000000..f5f94849f06f6b2ab04b1af3e68cac36
 +}
 diff --git a/packages/core/src/personalize/checked-publication.ts b/packages/core/src/personalize/checked-publication.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..adbed0900de14f4852a076131f9c9d8cfeab4a3a
+index 0000000000000000000000000000000000000000..43c90ef3e0ff3b20161909081813a40def13122b
 --- /dev/null
 +++ b/packages/core/src/personalize/checked-publication.ts
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,75 @@
 +import { Deferred, Effect, PubSub } from "effect"
 +import type { Event } from "@opencode/schema/event"
 +import type { PublishOptions, Subscriber } from "../bus.js"
 +import type { KeyedMutex } from "../effect/keyed-mutex.js"
 +
 +/** Listeners see an advisory, non-durable proposal; streams see committed events. */
-+export interface CheckedPublishOptions<E> extends PublishOptions {
++export interface CheckedPublishOptions<E, C = never> extends PublishOptions<C> {
 +  readonly check: Effect.Effect<void, E>
 +}
 +
 +export interface CheckedBus {
-+  readonly publishChecked: <D extends Event.DurableDefinition, E>(
-+    definition: D, data: Event.Data<D>, options: CheckedPublishOptions<E>,
-+  ) => Effect.Effect<Event.Payload<D>, E>
++  readonly publishChecked: <D extends Event.DurableDefinition, E, C = never>(
++    definition: D, data: Event.Data<D>, options: CheckedPublishOptions<E, C>,
++  ) => Effect.Effect<Event.Payload<D>, E | C>
 +}
 +
 +// Exact proposal identity, not an event ID or a global "publication mode".
 +// Entries exist only for the supervised worker's lifetime.
-+const receipts = new WeakMap<Event.Payload, Deferred.Deferred<Event.Payload>>()
++const receipts = new WeakMap<Event.Payload, (committed: Event.Payload) => Effect.Effect<void>>()
 +
 +/** The explicit Bus seam calls this AFTER SQLite commits and BEFORE delivery. */
 +export const acknowledgeCommit = (proposal: Event.Payload, committed: Event.Payload) => Effect.suspend(() => {
 +  const receipt = receipts.get(proposal)
-+  return receipt ? Deferred.succeed(receipt, committed).pipe(Effect.asVoid) : Effect.void
++  return receipt ? receipt(committed) : Effect.void
 +})
 +
 +export const makeCheckedPublisher = Effect.fn("Bus.makeCheckedPublisher")(function* (deps: {
 +  listeners: readonly Subscriber[]
 +  locks: KeyedMutex.KeyedMutex<string>
-+  makePayload: (definition: Event.Definition, data: unknown, options?: PublishOptions) => Effect.Effect<Event.Payload>
++  makePayload: (definition: Event.Definition, data: unknown, options?: PublishOptions<unknown>) => Effect.Effect<Event.Payload>
 +  aggregateID: (type: string, aggregate: string, data: unknown) => Effect.Effect<string>
-+  commit: (definition: Event.Definition, event: Event.Payload, input: undefined, commit?: PublishOptions["commit"]) =>
-+    Effect.Effect<{ event: Event.Payload } | void>
++  commit: <C = never>(definition: Event.Definition, event: Event.Payload, input: undefined, commit?: PublishOptions<C>["commit"]) =>
++    Effect.Effect<{ event: Event.Payload } | void, C>
 +  live: PubSub.PubSub<Event.Payload>
 +  typed: ReadonlyMap<string, ReadonlySet<PubSub.PubSub<Event.Payload>>>
 +}) {
 +  const scope = yield* Effect.scope
-+  const publishChecked: CheckedBus["publishChecked"] = (definition, data, options) =>
-+    Effect.uninterruptible(Effect.gen(function* () {
++  function publishChecked<D extends Event.DurableDefinition, E, C = never>(
++    definition: D, data: Event.Data<D>, options: CheckedPublishOptions<E, C>,
++  ): Effect.Effect<Event.Payload<D>, E | C> {
++    return Effect.uninterruptible(Effect.gen(function* () {
 +      const proposal = yield* deps.makePayload(definition, data, options)
 +      const aggregateID = yield* deps.aggregateID(definition.type, definition.durable.aggregate, data)
 +      // Fallible authorization work runs before the write and outside both
@@ -5458,8 +5524,8 @@ index 0000000000000000000000000000000000000000..adbed0900de14f4852a076131f9c9d8c
 +      for (const listener of [...deps.listeners])
 +        yield* Effect.suspend(() => listener(proposal))
 +      yield* options.check
-+      const receipt = yield* Deferred.make<Event.Payload>()
-+      receipts.set(proposal, receipt)
++      const receipt = yield* Deferred.make<Event.Payload, E | C>()
++      receipts.set(proposal, (committed) => Deferred.succeed(receipt, committed).pipe(Effect.asVoid))
 +      // Retain the aggregate lock through observation, but release the caller
 +      // at the transaction receipt. Delivery cannot reverse a successful grant.
 +      yield* deps.locks.withLock(aggregateID)(Effect.gen(function* () {
@@ -5480,16 +5546,17 @@ index 0000000000000000000000000000000000000000..adbed0900de14f4852a076131f9c9d8c
 +        Effect.uninterruptible,
 +        Effect.forkIn(scope),
 +      )
-+      return (yield* Deferred.await(receipt)) as Event.Payload<typeof definition>
++      return (yield* Deferred.await(receipt)) as Event.Payload<D>
 +    }))
++  }
 +  return { publishChecked } satisfies CheckedBus
 +})
 diff --git a/packages/core/src/personalize/filesystem-permission.ts b/packages/core/src/personalize/filesystem-permission.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8ddf8dd0b8af87395793ba28fcd096fd4f8cb258
+index 0000000000000000000000000000000000000000..d0416f8c8e1885d17a211274995e910ca0a66f9b
 --- /dev/null
 +++ b/packages/core/src/personalize/filesystem-permission.ts
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,99 @@
 +import path from "node:path"
 +import { Effect } from "effect"
 +import type { FileDiff } from "@opencode/schema/file-diff"
@@ -5574,7 +5641,11 @@ index 0000000000000000000000000000000000000000..8ddf8dd0b8af87395793ba28fcd096fd
 +  ) {
 +    const kind = yield* operation(target)
 +    const metadata = filesystemMetadata([target], [kind], undefined, preview ? { files: [preview] } : undefined)
-+    if (externalApproved.get(target) !== kind) {
++    // authorize() retains stock's contract: its caller obtained external access.
++    // Only target() owns a recorded CRUD-specific external approval to refresh
++    // if create changed to update (or vice versa) while that prompt was pending.
++    // Machine transfers authorize both endpoints themselves before calling here.
++    if (externalApproved.has(target) && externalApproved.get(target) !== kind) {
 +      yield* deps.access.authorizeExternal([target], context, metadata)
 +      externalApproved.set(target, kind)
 +    }
@@ -5666,10 +5737,10 @@ index 0000000000000000000000000000000000000000..c4791d801bb9c450316b32980fed261e
 +})
 diff --git a/packages/core/src/personalize/permission-node.ts b/packages/core/src/personalize/permission-node.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..19d222c49ee23f0790234cac6aede71758d9a083
+index 0000000000000000000000000000000000000000..40e6969d149260c602000b0aef346b7dacf93afe
 --- /dev/null
 +++ b/packages/core/src/personalize/permission-node.ts
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,49 @@
 +import { Context, Effect, Layer } from "effect"
 +import { makeLocationNode as stockNode } from "@opencode/util/effect/app-node"
 +import type { Permission } from "../permission.js"
@@ -5680,7 +5751,6 @@ index 0000000000000000000000000000000000000000..19d222c49ee23f0790234cac6aede717
 +import type { PermissionSaved } from "../permission/saved.js"
 +import type { PluginHooks } from "../plugin/hooks.js"
 +import { Database } from "../database/database.js"
-+import { SessionProjector } from "../session/projector.js"
 +
 +type Services = Bus.Service | Location.Service | Agent.Service | SessionStore.Service |
 +  PermissionSaved.Service | PluginHooks.Service
@@ -5715,7 +5785,10 @@ index 0000000000000000000000000000000000000000..19d222c49ee23f0790234cac6aede717
 +      }))),
 +    )
 +  }))
-+  return stockNode({ ...input, layer, deps: [...input.deps, Database.node, SessionProjector.node] })
++  // Projection belongs to the global application graph, not each location.
++  // Adding it here registers duplicate projectors on an externally supplied Bus
++  // and can leave that Bus pointing at a location's already-closed database.
++  return stockNode({ ...input, layer, deps: [...input.deps, Database.node] })
 +}
 diff --git a/packages/core/src/personalize/permission-policy.ts b/packages/core/src/personalize/permission-policy.ts
 new file mode 100644
@@ -6182,10 +6255,10 @@ index 0000000000000000000000000000000000000000..a1e65078e0bb8e1182b61e4665bb0b25
 +}
 diff --git a/packages/core/src/personalize/permission-runtime.ts b/packages/core/src/personalize/permission-runtime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a7cf07a47
+index 0000000000000000000000000000000000000000..d898a59f3fcfc3bd7a2df23280e78a18ab8d6d8b
 --- /dev/null
 +++ b/packages/core/src/personalize/permission-runtime.ts
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,394 @@
 +import { Deferred, Effect, Semaphore } from "effect"
 +import { readFacts, withFacts, type Facts } from "@opencode/schema/personalize/permission-policy"
 +import type { Reply as PolicyReply, InvalidPolicyError } from "@opencode/schema/personalize/permission-contract"
@@ -6214,6 +6287,11 @@ index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a
 +  readonly deferred: Deferred.Deferred<void, Declined | Corrected>
 +}
 +export type PolicyError = CorePermission.NotFoundError | SessionErrors.NotFoundError | InvalidPolicyError
++
++// Requests are protocol data, not shared authorization state. In-process event
++// listeners and callers of get/list/forSession must not mutate a pending entry's
++// resources, source or CRUD facts before a later policy recheck.
++const snapshot = <T>(value: T): T => structuredClone(value)
 +
 +export interface ConnectOptions {
 +  readonly pending: Map<Request["id"], PendingEntry>
@@ -6414,7 +6492,7 @@ index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a
 +        // Replied is advisory and may already have reached a UI. Reannounce the
 +        // original request; failure to notify does not remove its actionable entry.
 +        for (const entry of renewed)
-+          yield* options.bus.publish(options.events.Asked, entry.request).pipe(
++          yield* options.bus.publish(options.events.Asked, snapshot(entry.request)).pipe(
 +            Effect.catchCause(() => Effect.void),
 +          )
 +      })), Effect.ensuring(Effect.sync(() => {
@@ -6458,7 +6536,7 @@ index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a
 +  const create = (request: Request, agent?: Input["agent"]) => Effect.uninterruptible(
 +    Effect.gen(function* () {
 +      const deferred = yield* Deferred.make<void, Declined | Corrected>()
-+      const item = { request, agent, deferred }
++      const item = { request: snapshot(request), agent, deferred }
 +      if (options.isClosed()) {
 +        yield* Deferred.fail(deferred, options.declined())
 +        return item
@@ -6466,7 +6544,7 @@ index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a
 +      if (options.pending.has(request.id))
 +        return yield* Effect.die(new Error(`Duplicate pending permission ID: ${request.id}`))
 +      options.pending.set(request.id, item)
-+      yield* options.bus.publish(options.events.Asked, request).pipe(
++      yield* options.bus.publish(options.events.Asked, snapshot(item.request)).pipe(
 +        Effect.onError(() => Effect.sync(() => options.pending.delete(request.id))),
 +      )
 +      yield* registered(item)
@@ -6523,6 +6601,9 @@ index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a
 +    invoke(original.assertNotDenied(encoded(input)), input, false)
 +  const allows: typeof original.allows = (input) =>
 +    invoke(original.allows(encoded(input)), input, false)
++  const get: typeof original.get = (id) => original.get(id).pipe(Effect.map(snapshot))
++  const list: typeof original.list = () => original.list().pipe(Effect.map(snapshot))
++  const forSession: typeof original.forSession = (id) => original.forSession(id).pipe(Effect.map(snapshot))
 +
 +  const reply = (input: Omit<CorePermission.ReplyInput, "reply"> & { readonly reply: Reply }) => exclusive(
 +    Effect.suspend(() => {
@@ -6565,7 +6646,7 @@ index 0000000000000000000000000000000000000000..5ea8c2e1a79ffe2e630696346f64db9a
 +  }))
 +  yield* Effect.addFinalizer(() => close)
 +  return {
-+    ...original, ask, assert, assertNotDenied, allows, reply, close,
++    ...original, ask, assert, assertNotDenied, allows, reply, close, get, list, forSession,
 +  }
 +  })
 +  if (binding.connect) return yield* Effect.die(new Error("Duplicate permission runtime binding"))
@@ -6709,10 +6790,10 @@ index 0000000000000000000000000000000000000000..655e18271098ee5144a03e5228ad06db
 +})
 diff --git a/packages/core/test/permission/personalize.integration.test.ts b/packages/core/test/permission/personalize.integration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8ee5aaa421
+index 0000000000000000000000000000000000000000..6ee116f5ad6d350567ff8ed6ccf931bf93fd6387
 --- /dev/null
 +++ b/packages/core/test/permission/personalize.integration.test.ts
-@@ -0,0 +1,968 @@
+@@ -0,0 +1,1123 @@
 +import { expect, test } from "bun:test"
 +import { Deferred, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
 +import { Agent } from "@opencode/core/agent"
@@ -6723,15 +6804,18 @@ index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8e
 +import { Location } from "@opencode/core/location"
 +import { Permission } from "@opencode/core/permission"
 +import { PermissionSaved } from "@opencode/core/permission/saved"
++import { PluginHooks } from "@opencode/core/plugin/hooks"
 +import { Project } from "@opencode/core/project"
 +import { ProjectTable } from "@opencode/core/project/sql"
 +import { AbsolutePath } from "@opencode/core/schema"
 +import { Session } from "@opencode/core/session"
 +import { SessionTable } from "@opencode/core/session/sql"
 +import { SessionStore } from "@opencode/core/session/store"
++import { SessionProjector } from "@opencode/core/session/projector"
 +import { Tool } from "@opencode/core/tool"
-+import { readFacts, withFacts, type Facts } from "@opencode/schema/personalize/permission-policy"
++import { metadataKey, readFacts, withFacts, type Facts } from "@opencode/schema/personalize/permission-policy"
 +import { SessionEvent } from "@opencode/schema/session-event"
++import { EventSequenceTable, EventTable } from "@opencode/core/event/sql"
 +import { hasNoFilesystemEffects } from "../../src/personalize/shell-permission"
 +import { eq } from "drizzle-orm"
 +import { location } from "../fixture/location"
@@ -6745,7 +6829,7 @@ index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8e
 +)
 +const it = testEffect(
 +  AppNodeBuilder.build(
-+    LayerNode.group([Database.node, Bus.node, SessionStore.node, PermissionSaved.node, Agent.node, Permission.node]),
++    LayerNode.group([Database.node, Bus.node, SessionStore.node, SessionProjector.node, PermissionSaved.node, Agent.node, Permission.node]),
 +    [Location.node.replace(current), Bus.node.replace(Bus.configured({ persist: true }))],
 +  ),
 +)
@@ -6804,6 +6888,53 @@ index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8e
 +  })
 +}
 +
++it.effect("location permission graphs do not register session projectors on a shared global Bus", () =>
++  Effect.gen(function* () {
++    yield* setup()
++    const bus = yield* Bus.Service
++    const sessions = yield* SessionStore.Service
++    const agents = yield* Agent.Service
++    const saved = yield* PermissionSaved.Service
++    const hooks = yield* PluginHooks.Service
++    const registrations: string[] = []
++    const observed: Bus.Interface = {
++      ...bus,
++      project: (definition, projector) => {
++        registrations.push(definition.type)
++        return bus.project(definition, projector)
++      },
++    }
++    // Like automation's virtual locations, each graph has its own database but
++    // borrows the application's Bus and SessionStore. Closing it must not leave
++    // a projector on that Bus which still refers to the now-closed database.
++    for (let i = 0; i < 2; i++) yield* Effect.scoped(
++      Effect.gen(function* () {
++        const service = yield* Permission.Service
++        expect(yield* service.list()).toEqual([])
++      }).pipe(Effect.provide(AppNodeBuilder.build(Permission.node, [
++        Location.node.replace(current),
++        Database.node.replace(Database.layer()),
++        Bus.node.replace(Layer.succeed(Bus.Service, observed)),
++        SessionStore.node.replace(Layer.succeed(SessionStore.Service, sessions)),
++        Agent.node.replace(Layer.succeed(Agent.Service, agents)),
++        PermissionSaved.node.replace(Layer.succeed(PermissionSaved.Service, saved)),
++        PluginHooks.node.replace(Layer.succeed(PluginHooks.Service, hooks)),
++      ]))),
++    )
++    expect(registrations).not.toContain(SessionEvent.Permissions.type)
++    // The explicit global projector still persists CRUD grants after both local
++    // scopes close; merely removing all projection would not satisfy this test.
++    const first = yield* waitForRequest({
++      operations: ["read"], paths: ["/project/file"], directories: ["/project"],
++    })
++    yield* first.service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
++    yield* Fiber.join(first.fiber)
++    expect((yield* sessions.get(first.request.sessionID))?.permissions?.some(
++      (rule) => rule.action === "__opencode_filesystem_session_v1",
++    )).toBe(true)
++  }),
++)
++
 +it.effect("owned facts survive stock request publication and lookup without extra wire fields", () =>
 +  Effect.gen(function* () {
 +    yield* setup()
@@ -6821,6 +6952,65 @@ index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8e
 +    }
 +    yield* first.service.reply({ requestID: first.request.id, reply: "once" })
 +    yield* Fiber.join(first.fiber)
++  }),
++)
++
++for (const boundary of ["event", "get", "list", "forSession"] as const) {
++  it.effect(`${boundary} exposes a snapshot, not the pending authorization state`, () =>
++    Effect.gen(function* () {
++      yield* setup()
++      const facts = {
++        operations: ["read"] as const, paths: ["/project/file"], directories: ["/project"], access: "content" as const,
++      }
++      const first = yield* waitForRequest({
++        ...facts, source: { type: "tool", messageID: "msg_snapshot", id: "call_snapshot" },
++      })
++      const exposed = boundary === "event" ? first.request
++        : boundary === "get" ? yield* first.service.get(first.request.id)
++        : boundary === "list" ? (yield* first.service.list())[0]
++        : (yield* first.service.forSession(first.request.sessionID))[0]
++      expect(exposed).toBeDefined()
++      // Bun's object matcher was observed replacing resources with a matcher
++      // object. Reproduce that mutation explicitly, including nested CRUD data.
++      Reflect.set(exposed!, "resources", { asymmetricMatch: () => true })
++      Reflect.set(exposed!.source!, "id", "call_changed")
++      const exposedFacts = exposed!.metadata![metadataKey] as Facts
++      Reflect.set(exposedFacts.paths, "0", "/elsewhere/file")
++      Reflect.set(exposedFacts.directories!, "0", "/elsewhere")
++      const retained = yield* first.service.get(first.request.id)
++      expect(retained?.resources).toEqual(["src/index.ts"])
++      expect(retained?.source?.id).toBe("call_snapshot")
++      expect(readFacts(retained!)).toEqual(facts)
++      yield* first.service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
++      yield* Fiber.join(first.fiber)
++      expect((yield* first.service.ask(assertion(facts))).effect).toBe("allow")
++      const other = yield* first.service.ask(assertion({
++        ...facts, paths: ["/elsewhere/file"], directories: ["/elsewhere"],
++      }))
++      expect(other.effect).toBe("ask")
++      yield* first.service.reply({ requestID: other.id, reply: "reject" })
++    }),
++  )
++}
++
++it.effect("Asked listener mutations cannot alter registration or the later configured-deny recheck", () =>
++  Effect.gen(function* () {
++    yield* setup()
++    const service = yield* Permission.Service
++    const bus = yield* Bus.Service
++    const unsubscribe = yield* bus.listen((event) => Effect.sync(() => {
++      if (event.type !== Permission.Event.Asked.type) return
++      const request = event.data as Permission.Request
++      Reflect.set(request, "resources", ["allowed-by-listener"])
++    }))
++    yield* Effect.addFinalizer(() => unsubscribe)
++    const pending = yield* waitForRequest()
++    expect((yield* service.get(pending.request.id))?.resources).toEqual(["src/index.ts"])
++    yield* setRules([{ action: "read", resource: "src/index.ts", effect: "deny" }])
++    yield* service.reply({ requestID: pending.request.id, reply: "once" })
++    expect(Exit.isFailure(yield* Fiber.await(pending.fiber))).toBe(true)
++    expect(yield* service.get(pending.request.id)).toBeUndefined()
++    expect((yield* service.ask(assertion())).effect).toBe("deny")
 +  }),
 +)
 +
@@ -7409,6 +7599,52 @@ index 0000000000000000000000000000000000000000..9402af9554cec436fd2d31c98319cc8e
 +)
 +}
 +
++it.effect("checked typed failures preserve rollback, release the receipt, and never reach committed streams", () =>
++  Effect.gen(function* () {
++    yield* setup()
++    const bus = yield* Bus.Service
++    const { db } = yield* Database.Service
++    const sessionID = Session.ID.make("ses_test")
++    const data = { sessionID, permissions: [{ action: "read", resource: "*", effect: "allow" as const }] }
++    const checkError = { _tag: "CheckedCheckRejected" as const }
++    const commitError = { _tag: "CheckedCommitRejected" as const }
++    const live = yield* bus.subscribe().pipe(
++      Stream.filter((event) => event.type === SessionEvent.Permissions.type),
++      Stream.take(1), Stream.runCollect, Effect.forkScoped,
++    )
++    const typed = yield* bus.subscribe(SessionEvent.Permissions).pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
++    yield* Effect.yieldNow
++    let commits = 0
++    for (const phase of ["check", "commit"] as const) {
++      const failure = yield* bus.publishChecked(SessionEvent.Permissions, data, {
++        check: phase === "check" ? Effect.fail(checkError) : Effect.void,
++        commit: () => Effect.gen(function* () {
++          commits++
++          // This write and the stock permissions projector must both roll back.
++          yield* db.update(SessionTable).set({ title: "must roll back" })
++            .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
++          return yield* Effect.fail(commitError)
++        }),
++      }).pipe(Effect.flip)
++      expect(failure).toBe(phase === "check" ? checkError : commitError)
++      expect(commits).toBe(phase === "check" ? 0 : 1)
++      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++      expect(row?.permission ?? []).toEqual([])
++      expect(row?.title).toBe("test")
++      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)).toEqual([])
++      expect(yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)).toEqual([])
++      expect(live.pollUnsafe()).toBeUndefined()
++      expect(typed.pollUnsafe()).toBeUndefined()
++    }
++    const committed = yield* bus.publishChecked(SessionEvent.Permissions, data, { check: Effect.void })
++    expect(Number(committed.durable.seq)).toBe(0)
++    expect((yield* Fiber.join(live)).map((event) => event.id)).toEqual([committed.id])
++    expect((yield* Fiber.join(typed)).map((event) => event.id)).toEqual([committed.id])
++    const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++    expect(row?.permission).toEqual(data.permissions)
++  }),
++)
++
 +it.effect("checked transaction interruption rolls back and completes the failed receipt", () =>
 +  Effect.gen(function* () {
 +    yield* setup()
@@ -7905,533 +8141,29 @@ index 0000000000000000000000000000000000000000..cc5f4c0888f5c40ab93a886b9d1131f4
 +}
 diff --git a/packages/core/test/permission/service.node.test.mjs b/packages/core/test/permission/service.node.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..eabe35136baad53ede9ebfba680cd9d648907d75
+index 0000000000000000000000000000000000000000..51ffc66dda30ca4a0a9a0194a80e83b2803a91cf
 --- /dev/null
 +++ b/packages/core/test/permission/service.node.test.mjs
-@@ -0,0 +1,523 @@
-+import { test } from "node:test"
-+import assert from "node:assert/strict"
-+import { registerHooks, createRequire } from "node:module"
-+import { pathToFileURL, fileURLToPath } from "node:url"
-+import { existsSync } from "node:fs"
-+
-+// No build, install, Bun, live sessions or production database. Only host I/O/services are replaced;
-+// Permission.layer, canonical SessionEvent, SQL declarations, pending handling and CRUD matching
-+// are production. SQLite, Bus transaction/dispatch and projector execution remain synthetic adapters.
-+const local = createRequire(import.meta.url)
-+const effectURL = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(local.resolve("effect")).href
-+const fixtureURL = new URL("./service-fixture.mjs", import.meta.url).href
-+// Point at an assembled upstream tree; this owned test is also shipped into one.
-+const root = process.env.PERSONALIZE_PACKAGES
-+  ? pathToFileURL(`${process.env.PERSONALIZE_PACKAGES.replace(/[\\/]$/, "")}/`)
-+  : new URL("../../../", import.meta.url)
-+const stubs = new Set([
-+  "agent.js", "bus.js", "location/index.js", "session/store.js", "session/projector.js", "session/errors.js",
-+  "permission/saved.js", "plugin/hooks.js", "database/database.js", "session/sql.js",
-+  "layer/location-node.js", "project/schema.js", "location.js", "session/error.js", "session/schema.js",
-+])
-+registerHooks({
-+  resolve(specifier, context, next) {
-+    if (specifier === "effect") return { url: effectURL, shortCircuit: true }
-+    if (specifier === "@opencode/util/effect/app-node") return { url: fixtureURL, shortCircuit: true }
-+    if (specifier === "drizzle-orm") return { url: fixtureURL, shortCircuit: true }
-+    if (specifier === "drizzle-orm/sqlite-core") return { url: fixtureURL, shortCircuit: true }
-+    if (context.parentURL?.endsWith("/core/src/session/sql.ts") &&
-+      ["../database/path.js", "../database/schema.sql.js", "../project/sql.js"].includes(specifier))
-+      return { url: fixtureURL, shortCircuit: true }
-+    if (context.parentURL?.includes("/core/src/") && specifier.startsWith(".") &&
-+      stubs.has(new URL(specifier, context.parentURL).pathname.split("/core/src/")[1]))
-+      return { url: fixtureURL, shortCircuit: true }
-+    if (specifier.startsWith("@opencode/schema/"))
-+      return { url: new URL(`schema/src/${specifier.slice("@opencode/schema/".length)}.ts`, root).href, shortCircuit: true }
-+    if (specifier.startsWith("@opencode/util/"))
-+      return { url: new URL(`util/src/${specifier.slice("@opencode/util/".length)}.ts`, root).href, shortCircuit: true }
-+    if (specifier.startsWith(".") && context.parentURL?.startsWith("file:")) {
-+      const url = new URL(specifier, context.parentURL)
-+      if (url.pathname.endsWith(".js")) url.pathname = url.pathname.slice(0, -3) + ".ts"
-+      if (!/\.[a-z]+$/i.test(url.pathname)) url.pathname += ".ts"
-+      if (existsSync(fileURLToPath(url))) return { url: url.href, shortCircuit: true }
-+    }
-+    return next(specifier, context)
-+  },
-+  load(url, context, next) {
-+    if (/\/schema\/src\/(agent|session)\.ts$/.test(url)) {
-+      const name = url.endsWith("/agent.ts") ? "Agent" : "Session"
-+      return { format: "module", shortCircuit: true, source:
-+        `import {Schema} from "effect"; export const ID=Schema.String; export const ${name}={ID};` }
-+    }
-+    return next(url, context)
-+  },
-+})
-+const { Effect, Layer, Fiber, Exit } = await import("effect")
-+const { fixture, PluginHooks } = await import("./service-fixture.mjs")
-+const { SessionTable } = await import(new URL("core/src/session/sql.ts", root))
-+const { EventSequenceTable } = await import(new URL("core/src/event/sql.ts", root))
-+const Permission = await import(new URL("core/src/permission.ts", root))
-+const { SessionEvent } = await import("@opencode/schema/session-event")
-+const { readFacts, withFacts } = await import("@opencode/schema/personalize/permission-policy")
-+const state = fixture(SessionTable, EventSequenceTable)
-+const dependencies = (testState) => Layer.mergeAll(...testState.services.map(([key, value]) => Layer.succeed(key, value)))
-+const run = (body, testState = state) => Effect.runPromise(Effect.scoped(body.pipe(
-+  Effect.provide(Layer.provide(Permission.node.layer, dependencies(testState))),
-+)).pipe(Effect.timeout("10 seconds")))
-+const input = (sessionID = "ses_child", operation = "read", paths = ["D:/Data/Project/deep/file"]) => ({
-+  sessionID, agent: "build", action: operation === "read" ? "read" : "edit",
-+  operations: [operation], paths, resources: paths, access: "content",
-+})
-+const pending = (service, request) => Effect.gen(function* () {
-+  const facts = readFacts(request)
-+  const fiber = yield* service.assert(facts ? withFacts(request, facts) : request).pipe(Effect.forkChild)
-+  while (true) {
-+    const match = (yield* service.list()).find((item) => item.sessionID === request.sessionID && item.action === request.action)
-+    if (match) return { fiber, request: match }
-+    const status = fiber.pollUnsafe()
-+    if (status !== undefined) {
-+      if (Exit.isFailure(status)) return yield* status
-+      throw new Error("Expected a pending permission request, but assertion completed")
-+    }
-+    yield* Effect.yieldNow
-+  }
-+})
-+
-+test("nested UI rows are mapped exactly once during registration and policy rechecks", async () => {
-+  const root = "ses_nested_rows"
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add(root)
-+  const entry = isolated.services.find(([key]) => key === PluginHooks.Service)
-+  const original = entry[1]
-+  const rows = []
-+  entry[1] = { trigger: (_domain, _name, input) => Effect.sync(() => {
-+    rows.push(input.source?.id)
-+    return input
-+  }) }
-+  try {
-+    await run(Effect.gen(function* () {
-+      const service = yield* Permission.Service
-+      yield* service.nested("outer", "grandparent")
-+      yield* service.nested("child", "outer")
-+      const request = yield* pending(service, {
-+        ...input(root), directories: ["D:/Data/Project/deep"],
-+        source: { type: "tool", id: "child", messageID: "msg_nested" },
-+      })
-+      assert.equal(request.request.source.id, "outer")
-+      assert.ok(rows.length >= 2, "initial evaluation and post-registration race check both run")
-+      assert.deepEqual([...new Set(rows)], ["outer"])
-+      yield* service.reply({ requestID: request.request.id, reply: { scope: "session", policy: "RU=S*" } })
-+      yield* Fiber.join(request.fiber)
-+      assert.deepEqual([...new Set(rows)], ["outer"])
-+    }), isolated)
-+  } finally { entry[1] = original }
-+})
-+
-+test("upstream saved approvals only settle asks; unattended hook downgrades require explicit approval", async () => {
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add("ses_policy")
-+  isolated.saved.push({ projectID: "prj_test", action: "read", resource: "*" })
-+  const request = { sessionID: "ses_policy", agent: "build", action: "read", resources: ["file"] }
-+  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
-+  let downgrade = false
-+  hooks[1] = { trigger: (_domain, _name, input) =>
-+    Effect.succeed(downgrade ? { ...input, effect: "ask" } : input) }
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    assert.equal((yield* service.ask(request)).effect, "allow")
-+    isolated.agentRules.push({ action: "read", resource: "*", effect: "deny" })
-+    assert.equal((yield* service.ask(request)).effect, "deny", "saved allow cannot override configured deny")
-+    isolated.agentRules.push({ action: "read", resource: "*", effect: "allow" })
-+    downgrade = true
-+    assert.equal((yield* service.ask(request).pipe(Effect.provideService(Permission.Unattended, []))).effect, "deny")
-+    assert.equal((yield* service.ask({ ...request, resources: [] })
-+      .pipe(Effect.provideService(Permission.Unattended, []))).effect, "deny", "empty resources must not vacuously approve")
-+    assert.equal((yield* service.ask(request).pipe(Effect.provideService(Permission.Unattended, [
-+      { action: "read", resource: "file", effect: "allow" },
-+    ]))).effect, "allow")
-+  }), isolated)
-+})
-+
-+test("real Permission service: durable family CRUD, atomic invalid input, denies, unrelated roots, restart and revocation", async () => {
-+  state.add("ses_root")
-+  const unrelatedRule = { action: "unrelated_tool", resource: "*", effect: "ask" }
-+  state.records.set("ses_root", {
-+    ...state.records.get("ses_root"), permissions: [unrelatedRule], metadata: { retained: "root annotation" },
-+  })
-+  state.add("ses_child", "ses_root")
-+  state.add("ses_grandchild", "ses_child")
-+  state.add("ses_unrelated")
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const first = yield* pending(service, {
-+      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project"],
-+      resources: ["D:/Data/Project/*"], save: ["D:/Data/*"],
-+    })
-+    const second = yield* pending(service, input())
-+    const unrelated = yield* pending(service, input("ses_unrelated"))
-+    const before = JSON.stringify([...state.records])
-+    const invalid = yield* service.reply({
-+      requestID: first.request.id, reply: { scope: "session", policy: "R=S* R=D*" },
-+    }).pipe(Effect.flip)
-+    assert.equal(invalid._tag, "Permission.InvalidPolicyError")
-+    assert.equal(JSON.stringify([...state.records]), before)
-+    assert.equal((yield* service.list()).length, 3)
-+    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "RU=S* CD=D*" } })
-+    yield* Fiber.join(first.fiber)
-+    yield* Fiber.join(second.fiber)
-+    state.add("ses_future", "ses_child")
-+    assert.equal((yield* service.ask(input("ses_future"))).effect, "allow")
-+    assert.deepEqual((yield* service.list()).map((item) => item.id), [unrelated.request.id])
-+    for (const op of ["read", "update", "create", "delete"])
-+      assert.equal((yield* service.ask(input("ses_grandchild", op))).effect,
-+        op === "read" || op === "update" ? "allow" : "deny")
-+    assert.equal((yield* service.ask(input("ses_child", "read", ["D:/Data/Project-other/file"]))).effect, "ask")
-+    state.agentRules.push({ action: "shell", resource: "*", effect: "allow" })
-+    const opaque = yield* service.assert({
-+      ...input(), action: "shell", metadata: { filesystemEffects: "unknown" },
-+    }).pipe(Effect.flip)
-+    assert.equal(opaque._tag, "Permission.BlockedError")
-+    assert.match(opaque.reason, /Unknown shell effects lack an exact command/)
-+    state.agentRules.push({ action: "read", resource: "*", effect: "deny" })
-+    assert.equal((yield* service.ask(input())).effect, "deny")
-+    state.agentRules.push({ action: "edit", resource: "*", effect: "deny" })
-+    assert.equal((yield* service.ask(input("ses_child", "update"))).effect, "deny")
-+    state.agentRules.length = 0
-+    assert.equal(state.saved.length, 0)
-+    assert.equal(state.durable.length, 1)
-+    assert.equal(state.durable[0].type, "session.permissions")
-+    assert.equal(state.durable[0].seq, 0)
-+    assert.deepEqual(state.durable[0].data.permissions, state.records.get("ses_root").permissions)
-+    assert.deepEqual(state.records.get("ses_root").permissions[0], unrelatedRule)
-+    assert.deepEqual(state.records.get("ses_root").metadata, { retained: "root annotation" })
-+    yield* service.reply({ requestID: unrelated.request.id, reply: "once" })
-+    yield* Fiber.join(unrelated.fiber)
-+  }))
-+  const beforeReplay = JSON.stringify(state.records.get("ses_root"))
-+  state.replay()
-+  assert.equal(JSON.stringify(state.records.get("ses_root")), beforeReplay)
-+  // A fresh scoped Permission.layer must read the replayed projection, not an in-memory policy map.
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    assert.equal((yield* service.ask(input())).effect, "allow")
-+    assert.equal((yield* service.ask(input("ses_child", "create"))).effect, "deny")
-+    // Same event used by the existing session permissions PATCH / Session.setPermissions.
-+    yield* state.publishDurable(SessionEvent.Permissions, { sessionID: "ses_root", permissions: [unrelatedRule] })
-+    assert.equal((yield* service.ask(input())).effect, "ask")
-+    assert.deepEqual(state.records.get("ses_root").permissions, [unrelatedRule])
-+    state.replay()
-+    assert.equal(yield* service.allows(input()), false, "replay must not resurrect revoked grants")
-+  }))
-+})
-+
-+test("actual SQL metadata is singular and canonical session permissions events are durable", () => {
-+  assert.equal(SessionTable.permission.name, "permission")
-+  assert.equal(SessionTable.permissions, undefined)
-+  assert.equal(SessionEvent.Permissions.type, "session.permissions")
-+  assert.equal(SessionEvent.Permissions.durable.aggregate, "sessionID")
-+})
-+
-+test("stale durable snapshot rolls back, retries and preserves a concurrent approval and unrelated session fields", async () => {
-+  const original = { action: "baseline_tool", resource: "*", effect: "deny" }
-+  const concurrent = { action: "concurrent_tool", resource: "*", effect: "ask" }
-+  state.records.set("ses_root", {
-+    ...state.records.get("ses_root"), permissions: [original], metadata: { keep: "not a policy field" },
-+  })
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const first = yield* pending(service, {
-+      ...input("ses_root", "read", ["D:/Data/First/file"]),
-+      action: "external_directory", resources: ["D:/Data/First/*"],
-+    })
-+    const second = yield* pending(service, {
-+      ...input("ses_child", "read", ["D:/Data/Second/file"]),
-+      action: "external_directory", resources: ["D:/Data/Second/*"],
-+    })
-+    const logStart = state.durable.length
-+    const traceStart = state.trace.length
-+    const seq = state.sequences.get("ses_root")
-+    state.afterSnapshot(() => Effect.gen(function* () {
-+      // Interleave an ordinary Session.setPermissions-style update and a second user approval
-+      // after the first snapshot, but before its durable publication acquires the Bus lock.
-+      yield* state.publishDurable(SessionEvent.Permissions, {
-+        sessionID: "ses_root", permissions: [...state.records.get("ses_root").permissions, concurrent],
-+      })
-+      yield* service.reply({ requestID: second.request.id, reply: { scope: "session", policy: "R=S*" } })
-+    }))
-+    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
-+    yield* Fiber.join(first.fiber)
-+    yield* Fiber.join(second.fiber)
-+    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/First/file"])), true)
-+    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Second/file"])), true)
-+    const root = state.records.get("ses_root")
-+    assert.deepEqual(root.permissions.filter((rule) => !rule.action.startsWith("__opencode_")), [original, concurrent])
-+    assert.deepEqual(root.metadata, { keep: "not a policy field" })
-+    const committed = state.durable.slice(logStart)
-+    assert.equal(committed.length, 3, "the stale publication must not append a durable event")
-+    assert.deepEqual(committed.map((event) => event.seq), [seq + 1, seq + 2, seq + 3])
-+    const trace = state.trace.slice(traceStart)
-+    assert.equal(trace.filter((step) => step === "rollback").length, 1)
-+    assert.equal(trace.filter((step) => step === "notify:session.permissions").length, 3)
-+    assert.equal((yield* service.list()).length, 0)
-+    const expected = JSON.stringify(root)
-+    state.replay()
-+    assert.equal(JSON.stringify(state.records.get("ses_root")), expected)
-+  }))
-+})
-+
-+test("real service rechecks a request registered concurrently with a grant", async () => {
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const first = yield* pending(service, {
-+      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
-+    })
-+    state.publish((payload) => {
-+      if (payload.id && payload.id !== first.request.id) {
-+        state.publish(undefined)
-+        return service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
-+      }
-+      return Effect.void
-+    })
-+    yield* service.assert(input())
-+    yield* Fiber.join(first.fiber)
-+    assert.equal((yield* service.list()).length, 0)
-+  }))
-+})
-+
-+test("real service keeps parent-list-only content pending and consumes R=-1 exactly once", async () => {
-+  state.records.set("ses_root", { ...state.records.get("ses_root"), permissions: [] })
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const content = yield* pending(service, {
-+      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project/file"],
-+      resources: ["D:/Data/Project/*"],
-+    })
-+    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-1" } })
-+    assert.equal((yield* service.list()).length, 1)
-+    const listing = { ...input("ses_root", "read", ["D:/Data"]), access: "listing" }
-+    assert.equal(yield* service.allows({ ...listing, access: "content" }), false)
-+    yield* service.assert(listing)
-+    assert.equal(yield* service.allows(listing), false)
-+    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-S" } })
-+    assert.equal((yield* service.list()).length, 1)
-+    assert.equal((yield* service.ask({ ...listing, sessionID: "ses_grandchild" })).effect, "allow")
-+    assert.equal((yield* service.ask(input("ses_grandchild", "read", ["D:/Data/sibling/file"]))).effect, "ask")
-+    yield* service.reply({ requestID: content.request.id, reply: "once" })
-+    yield* Fiber.join(content.fiber)
-+  }))
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    assert.equal((yield* service.ask({ ...input("ses_child", "read", ["D:/Data"]), access: "listing" })).effect, "allow")
-+    assert.equal((yield* service.ask(input("ses_child", "read", ["D:/Data/parent-file"]))).effect, "ask")
-+  }))
-+})
-+
-+test("real service =1 settles only the selected request, unlike durable session policy", async () => {
-+  state.records.set("ses_root", { ...state.records.get("ses_root"), permissions: [] })
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const selected = yield* pending(service, {
-+      ...input("ses_root"), directories: ["D:/Data/Project"], // Ordinary read prompts also offer exact directories.
-+    })
-+    const other = yield* pending(service, input("ses_child"))
-+    yield* service.reply({ requestID: selected.request.id, reply: { scope: "session", policy: "R=1*" } })
-+    yield* Fiber.join(selected.fiber)
-+    assert.deepEqual((yield* service.list()).map((item) => item.id), [other.request.id])
-+    assert.equal((yield* service.ask(input())).effect, "ask")
-+    assert.deepEqual(state.records.get("ses_root").permissions, [])
-+    yield* service.reply({ requestID: other.request.id, reply: "once" })
-+    yield* Fiber.join(other.fiber)
-+  }))
-+})
-+
-+test("existing persistent always remains project-scoped and survives service recreation", async () => {
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const selected = yield* pending(service, { ...input(), save: ["D:/Data/Project/*"] })
-+    yield* service.reply({ requestID: selected.request.id, reply: "always" })
-+    yield* Fiber.join(selected.fiber)
-+    assert.equal(state.saved.length, 1)
-+    assert.deepEqual(state.records.get("ses_root").permissions, [])
-+  }))
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    assert.equal((yield* service.ask(input("ses_unrelated"))).effect, "allow")
-+    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Project-other/file"])), false)
-+    assert.equal(yield* service.allows(input("ses_child", "update")), false)
-+  }))
-+})
-+
-+test("unknown shell session approval is exact, revocable, and invalidated by changed denies", async () => {
-+  state.add("ses_unknown_root")
-+  state.add("ses_unknown_child", "ses_unknown_root")
-+  const shell = (sessionID = "ses_unknown_root", command = "npm run dev", cwd = "D:/work") => ({
-+    sessionID, agent: "build", action: "shell", resources: [command],
-+    metadata: { filesystemEffects: "unknown", unknownCommand: command, unknownCwd: cwd, unknownShell: "powershell.exe" },
-+  })
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const permission = yield* pending(service, {
-+      ...input("ses_unknown_root"), action: "external_directory", directories: ["D:/Data/Project"],
-+      paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
-+    })
-+    yield* service.reply({ requestID: permission.request.id, reply: { scope: "session", policy: "R=S* D=D" } })
-+    yield* Fiber.join(permission.fiber)
-+    const first = yield* pending(service, shell())
-+    const bad = yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S*" } }).pipe(Effect.flip)
-+    assert.equal(bad._tag, "Permission.InvalidPolicyError")
-+    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S" } })
-+    yield* Fiber.join(first.fiber)
-+    assert.equal((yield* service.ask(shell())).effect, "allow")
-+    assert.equal((yield* service.ask(shell("ses_unknown_child"))).effect, "ask")
-+    assert.equal((yield* service.ask(shell("ses_unknown_root", "npm run build"))).effect, "ask")
-+    assert.equal((yield* service.ask(shell("ses_unknown_root", "npm run dev", "D:/other"))).effect, "ask")
-+  }))
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    assert.equal((yield* service.ask(shell())).effect, "allow", "session approval survives service recreation")
-+    const root = state.records.get("ses_unknown_root")
-+    const extraDeny = {
-+      action: "__opencode_filesystem_session_v1", effect: "deny",
-+      resource: JSON.stringify({ directory: "D:/Other", operation: "delete", effect: "deny", lifetime: "session", recursive: false, scope: "selected" }),
-+    }
-+    yield* state.publishDurable(SessionEvent.Permissions, {
-+      sessionID: "ses_unknown_root", permissions: [...root.permissions, extraDeny],
-+    })
-+    assert.equal((yield* service.ask(shell())).effect, "ask", "a new deny requires new approval")
-+    yield* state.publishDurable(SessionEvent.Permissions, {
-+      sessionID: "ses_unknown_root",
-+      permissions: root.permissions.filter((rule) => rule.action !== "__opencode_shell_unknown_v1"),
-+    })
-+    assert.equal((yield* service.ask(shell())).effect, "ask", "removing approval revokes it")
-+  }))
-+})
-+
-+test("failed reply publication must not leave a durable session grant", async () => {
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add("ses_publish_failure")
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const request = yield* pending(service, {
-+      ...input("ses_publish_failure"), directories: ["D:/Data/Project/deep"],
-+    })
-+    isolated.publish((payload) => payload.requestID === request.request.id
-+      ? Effect.die(new Error("injected Replied publication failure"))
-+      : Effect.void)
-+    const reply = yield* Effect.exit(service.reply({
-+      requestID: request.request.id, reply: { scope: "session", policy: "R=S*" },
-+    }))
-+    assert.ok(Exit.isFailure(reply), "the failed notification must fail the reply")
-+    assert.equal(request.fiber.pollUnsafe(), undefined, "the waiter must remain pending")
-+    const renewed = yield* service.list()
-+    assert.equal(renewed.length, 1)
-+    assert.notEqual(renewed[0].id, request.request.id)
-+    assert.ok(Exit.isFailure(yield* Effect.exit(service.reply({ requestID: request.request.id, reply: "once" }))))
-+    isolated.publish(undefined)
-+    assert.equal((yield* service.ask(input("ses_publish_failure"))).effect, "ask",
-+      "a failed notification must not authorize later requests")
-+    assert.deepEqual(isolated.records.get("ses_publish_failure").permissions, [],
-+      "the projected session must not retain the failed approval")
-+    yield* service.reply({ requestID: renewed[0].id, reply: { scope: "session", policy: "R=S*" } })
-+    yield* Fiber.join(request.fiber)
-+  }), isolated)
-+})
-+
-+test("failed final confirmation must not leave a durable session grant", async () => {
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add("ses_confirm_failure")
-+  let confirming = false
-+  isolated.publish((value) => Effect.sync(() => { if (value.requestID) confirming = true }))
-+  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
-+  hooks[1] = { trigger: (_domain, _name, value) => confirming
-+    ? Effect.die(new Error("injected confirmation failure")) : Effect.succeed(value) }
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const request = yield* pending(service, {
-+      ...input("ses_confirm_failure"), directories: ["D:/Data/Project/deep"],
-+    })
-+    const result = yield* Effect.exit(service.reply({
-+      requestID: request.request.id, reply: { scope: "session", policy: "R=S*" },
-+    }))
-+    assert.ok(Exit.isFailure(result))
-+    assert.equal(request.fiber.pollUnsafe(), undefined)
-+    assert.deepEqual(isolated.records.get("ses_confirm_failure").permissions, [],
-+      "confirmation failure must not leave an authorizing durable grant")
-+  }), isolated)
-+})
-+
-+test("no fallible confirmation hook is called after durable authorization", async () => {
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add("ses_no_postcommit_hook")
-+  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
-+  let late = 0
-+  hooks[1] = { trigger: (_domain, _name, value) => Effect.suspend(() => {
-+    if (!isolated.durable.length) return Effect.succeed(value)
-+    late++
-+    return Effect.die(new Error("confirmation after commit is forbidden"))
-+  }) }
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const request = yield* pending(service, {
-+      ...input("ses_no_postcommit_hook"), directories: ["D:/Data/Project/deep"],
-+    })
-+    yield* service.reply({ requestID: request.request.id, reply: { scope: "session", policy: "R=S*" } })
-+    yield* Fiber.join(request.fiber)
-+    assert.equal(late, 0)
-+    assert.equal(isolated.durable.length, 1)
-+  }), isolated)
-+})
-+
-+test("candidate validation never restores a one-shot listing consumed reentrantly", async () => {
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add("ses_listing_reentry")
-+  let onEvaluate = () => Effect.void
-+  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
-+  hooks[1] = { trigger: (_domain, _name, value) => onEvaluate(value).pipe(Effect.as(value)) }
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const content = yield* pending(service, {
-+      ...input("ses_listing_reentry", "read", ["D:/parent/selected/file"]),
-+      directories: ["D:/parent/selected"],
-+    })
-+    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-1" } })
-+    const listing = { ...input("ses_listing_reentry", "read", ["D:/parent"]), access: "listing" }
-+    const target = yield* pending(service, {
-+      ...input("ses_listing_reentry", "update", ["D:/other/file"]), directories: ["D:/other"],
-+    })
-+    let armed = false
-+    let consumed = 0
-+    isolated.afterSnapshot(() => Effect.sync(() => { armed = true }))
-+    onEvaluate = (value) => Effect.suspend(() => {
-+      if (!armed || value.action !== "edit") return Effect.void
-+      armed = false
-+      consumed++
-+      return service.assert(listing)
-+    })
-+    yield* service.reply({ requestID: target.request.id, reply: { scope: "session", policy: "U=S*" } })
-+    yield* Fiber.join(target.fiber)
-+    assert.equal(consumed, 1)
-+    assert.equal(yield* service.allows(listing), false, "consumed listing must not be resurrected by candidate commit")
-+    yield* service.reply({ requestID: content.request.id, reply: "once" })
-+    yield* Fiber.join(content.fiber)
-+  }), isolated)
-+})
-+
-+test("durable publication failure after projection must not authorize later requests", async () => {
-+  const isolated = fixture(SessionTable, EventSequenceTable)
-+  isolated.add("ses_durable_notify_failure")
-+  await run(Effect.gen(function* () {
-+    const service = yield* Permission.Service
-+    const request = yield* pending(service, {
-+      ...input("ses_durable_notify_failure"), directories: ["D:/Data/Project/deep"],
-+    })
-+    isolated.publish((value) => value.permissions
-+      ? Effect.die(new Error("durable notification failed after commit")) : Effect.void)
-+    const result = yield* Effect.exit(service.reply({
-+      requestID: request.request.id, reply: { scope: "session", policy: "R=S*" },
-+    }))
-+    assert.ok(Exit.isFailure(result))
-+    assert.equal(request.fiber.pollUnsafe(), undefined)
-+    assert.deepEqual(isolated.records.get("ses_durable_notify_failure").permissions, [],
-+      "a failed durable publication must not leave an authorizing grant")
-+  }), isolated)
-+})
+@@ -0,0 +1,19 @@
++// These adapter tests depend on Node's module hooks. Keep them in ordinary Bun
++// discovery, but run their unchanged assertions in the runtime they exercise.
++if (process.versions.bun) {
++  const { test, expect } = await import("bun:test")
++  const { fileURLToPath } = await import("node:url")
++  test("Node permission service adapters (complete suite)", async () => {
++    const child = Bun.spawn([
++      "node", "--import", fileURLToPath(new URL("../../../../.personalize/node-typescript.mjs", import.meta.url)),
++      "--experimental-transform-types", "--test", fileURLToPath(new URL("./service.node-suite.mjs", import.meta.url)),
++    ], { stdout: "pipe", stderr: "pipe" })
++    const [code, stdout, stderr] = await Promise.all([
++      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
++    ])
++    if (code !== 0) throw new Error(`Node permission suite failed (${code})\n${stdout}\n${stderr}`)
++    expect(stdout).toMatch(/# fail 0/)
++  }, 60000)
++} else {
++  await import("./service.node-suite.mjs")
++}
 diff --git a/packages/core/test/personalize-plugin-registration.test.ts b/packages/core/test/personalize-plugin-registration.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..a652ed4e692fd0d498cbdc19c87a4444e89d70da
@@ -9333,10 +9065,10 @@ index 0000000000000000000000000000000000000000..963785423c1a2b8533400b56d6ff78b2
 +)
 diff --git a/packages/tui/src/personalize/mini-permission-controls.tsx b/packages/tui/src/personalize/mini-permission-controls.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..75ce34d2fdb2532d9c0f0041cc0105e0fe5742a7
+index 0000000000000000000000000000000000000000..d5ee5ca2f7412fde49c19dd43ed6905d25dda1d8
 --- /dev/null
 +++ b/packages/tui/src/personalize/mini-permission-controls.tsx
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,213 @@
 +/** @jsxImportSource @opentui/solid */
 +import { TextAttributes, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 +import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
@@ -9479,17 +9211,35 @@ index 0000000000000000000000000000000000000000..75ce34d2fdb2532d9c0f0041cc0105e0
 +      </box>
 +      <Show when={!editing()} fallback={
 +        <box width="100%" flexGrow={1} minHeight={0} justifyContent="flex-end">
-+          <box backgroundColor={props.theme.line} paddingLeft={compact() ? 0 : 2} paddingRight={compact() ? 0 : 3}
-+            paddingTop={compact() ? 0 : 1} paddingBottom={compact() ? 0 : 1} gap={1}>
-+            <Show when={stage() === "policy"} fallback={
++           <box backgroundColor={props.theme.line} paddingLeft={compact() ? 0 : 2} paddingRight={compact() ? 0 : 3}
++            flexDirection={width() >= 80 ? "row" : "column"}
++            alignItems={width() >= 80 ? "center" : "stretch"} justifyContent="space-between"
++            paddingTop={compact() ? 0 : 1} paddingBottom={compact() ? 0 : 1}
++            gap={compact() ? 0 : 1} flexShrink={0}>
++            <box width={width() >= 80 ? undefined : "100%"} flexGrow={1} flexShrink={1} minWidth={0}>
++             <Show when={stage() === "policy"} fallback={
 +              <RejectField theme={props.theme} text={state().message} disabled={busy()}
 +                onChange={(text) => controller.setMessage(text)} onConfirm={confirm} onCancel={cancel} />
 +            }>
 +              <PolicyField theme={props.theme} text={state().message} disabled={busy()}
 +                placeholder={unknown() ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
 +                onChange={(text) => controller.setMessage(text)} onConfirm={confirm} onCancel={cancel} />
++             </Show>
++            </box>
++            <Show when={!busy()} fallback={
++              <text fg={props.theme.running} height={1} wrapMode="none" truncate flexShrink={0}>
++                {compact() ? "Waiting…" : "Waiting for permission event…"}
++              </text>
++            }>
++              <box flexDirection="row" flexWrap="wrap" columnGap={compact() ? 1 : 2} flexShrink={0}>
++                <text fg={props.theme.text} height={1} wrapMode="none" flexShrink={0}>
++                  enter <span style={{ fg: props.theme.muted }}>{stage() === "policy" ? "apply" : compact() ? "reject" : "confirm"}</span>
++                </text>
++                <text fg={props.theme.text} height={1} wrapMode="none" flexShrink={0}>
++                  esc <span style={{ fg: props.theme.muted }}>{compact() ? "back" : "cancel"}</span>
++                </text>
++              </box>
 +            </Show>
-+            <text fg={props.theme.muted}>{busy() ? "Waiting for permission event…" : "enter confirm  esc cancel"}</text>
 +          </box>
 +        </box>
 +      }>
@@ -9827,10 +9577,10 @@ index 0000000000000000000000000000000000000000..d1221bf3595ce88d4c653a0bc9d3638a
 +})
 diff --git a/packages/tui/test/personalize-permission-render.test.tsx b/packages/tui/test/personalize-permission-render.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..5fb927d61e647bc8e813d9ae5e7e02b50ca67339
+index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d420cf24b64
 --- /dev/null
 +++ b/packages/tui/test/personalize-permission-render.test.tsx
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,202 @@
 +/** @jsxImportSource @opentui/solid */
 +import { expect, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
@@ -9928,9 +9678,10 @@ index 0000000000000000000000000000000000000000..5fb927d61e647bc8e813d9ae5e7e02b5
 +    await using state = await tmpdir()
 +    const view = await mount(surface, state.path)
 +    try {
-+      view.replace(withFacts({ ...request("per_crud"), action: "read", metadata: {}, resources: ["C:/work/file"] }, {
++      const encoded = withFacts({ ...request("per_crud"), action: "read", metadata: {}, resources: ["C:/work/file"] }, {
 +        operations: ["read"], paths: ["C:/work/file"], directories: ["C:/work"],
-+      }))
++      })
++      view.replace({ ...encoded, metadata: JSON.parse(JSON.stringify(encoded.metadata)) })
 +      await view.frame()
 +      view.app.mockInput.pressArrow("right")
 +      view.app.mockInput.pressArrow("left")
@@ -10977,12 +10728,1070 @@ index 0000000000000000000000000000000000000000..a5cdd2a48ace9700c790b0fa0698b685
 +    return false
 +  }
 +}
+diff --git a/packages/core/test/permission/service.node-suite.mjs b/packages/core/test/permission/service.node-suite.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fe7d30ce66a70d737c6e3b5fc86e22d9d5b6e9e
+--- /dev/null
++++ b/packages/core/test/permission/service.node-suite.mjs
+@@ -0,0 +1,524 @@
++// Executed by service.node.test.mjs in Node, including during Bun discovery.
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { registerHooks, createRequire } from "node:module"
++import { pathToFileURL, fileURLToPath } from "node:url"
++import { existsSync } from "node:fs"
++
++// No build, install, Bun, live sessions or production database. Only host I/O/services are replaced;
++// Permission.layer, canonical SessionEvent, SQL declarations, pending handling and CRUD matching
++// are production. SQLite, Bus transaction/dispatch and projector execution remain synthetic adapters.
++const local = createRequire(import.meta.url)
++const effectURL = process.env.PERSONALIZE_EFFECT ?? pathToFileURL(local.resolve("effect")).href
++const fixtureURL = new URL("./service-fixture.mjs", import.meta.url).href
++// Point at an assembled upstream tree; this owned test is also shipped into one.
++const root = process.env.PERSONALIZE_PACKAGES
++  ? pathToFileURL(`${process.env.PERSONALIZE_PACKAGES.replace(/[\\/]$/, "")}/`)
++  : new URL("../../../", import.meta.url)
++const stubs = new Set([
++  "agent.js", "bus.js", "location/index.js", "session/store.js", "session/projector.js", "session/errors.js",
++  "permission/saved.js", "plugin/hooks.js", "database/database.js", "session/sql.js",
++  "layer/location-node.js", "project/schema.js", "location.js", "session/error.js", "session/schema.js",
++])
++registerHooks({
++  resolve(specifier, context, next) {
++    if (specifier === "effect") return { url: effectURL, shortCircuit: true }
++    if (specifier === "@opencode/util/effect/app-node") return { url: fixtureURL, shortCircuit: true }
++    if (specifier === "drizzle-orm") return { url: fixtureURL, shortCircuit: true }
++    if (specifier === "drizzle-orm/sqlite-core") return { url: fixtureURL, shortCircuit: true }
++    if (context.parentURL?.endsWith("/core/src/session/sql.ts") &&
++      ["../database/path.js", "../database/schema.sql.js", "../project/sql.js"].includes(specifier))
++      return { url: fixtureURL, shortCircuit: true }
++    if (context.parentURL?.includes("/core/src/") && specifier.startsWith(".") &&
++      stubs.has(new URL(specifier, context.parentURL).pathname.split("/core/src/")[1]))
++      return { url: fixtureURL, shortCircuit: true }
++    if (specifier.startsWith("@opencode/schema/"))
++      return { url: new URL(`schema/src/${specifier.slice("@opencode/schema/".length)}.ts`, root).href, shortCircuit: true }
++    if (specifier.startsWith("@opencode/util/"))
++      return { url: new URL(`util/src/${specifier.slice("@opencode/util/".length)}.ts`, root).href, shortCircuit: true }
++    if (specifier.startsWith(".") && context.parentURL?.startsWith("file:")) {
++      const url = new URL(specifier, context.parentURL)
++      if (url.pathname.endsWith(".js")) url.pathname = url.pathname.slice(0, -3) + ".ts"
++      if (!/\.[a-z]+$/i.test(url.pathname)) url.pathname += ".ts"
++      if (existsSync(fileURLToPath(url))) return { url: url.href, shortCircuit: true }
++    }
++    return next(specifier, context)
++  },
++  load(url, context, next) {
++    if (/\/schema\/src\/(agent|session)\.ts$/.test(url)) {
++      const name = url.endsWith("/agent.ts") ? "Agent" : "Session"
++      return { format: "module", shortCircuit: true, source:
++        `import {Schema} from "effect"; export const ID=Schema.String; export const ${name}={ID};` }
++    }
++    return next(url, context)
++  },
++})
++const { Effect, Layer, Fiber, Exit } = await import("effect")
++const { fixture, PluginHooks } = await import("./service-fixture.mjs")
++const { SessionTable } = await import(new URL("core/src/session/sql.ts", root))
++const { EventSequenceTable } = await import(new URL("core/src/event/sql.ts", root))
++const Permission = await import(new URL("core/src/permission.ts", root))
++const { SessionEvent } = await import("@opencode/schema/session-event")
++const { readFacts, withFacts } = await import("@opencode/schema/personalize/permission-policy")
++const state = fixture(SessionTable, EventSequenceTable)
++const dependencies = (testState) => Layer.mergeAll(...testState.services.map(([key, value]) => Layer.succeed(key, value)))
++const run = (body, testState = state) => Effect.runPromise(Effect.scoped(body.pipe(
++  Effect.provide(Layer.provide(Permission.node.layer, dependencies(testState))),
++)).pipe(Effect.timeout("10 seconds")))
++const input = (sessionID = "ses_child", operation = "read", paths = ["D:/Data/Project/deep/file"]) => ({
++  sessionID, agent: "build", action: operation === "read" ? "read" : "edit",
++  operations: [operation], paths, resources: paths, access: "content",
++})
++const pending = (service, request) => Effect.gen(function* () {
++  const facts = readFacts(request)
++  const fiber = yield* service.assert(facts ? withFacts(request, facts) : request).pipe(Effect.forkChild)
++  while (true) {
++    const match = (yield* service.list()).find((item) => item.sessionID === request.sessionID && item.action === request.action)
++    if (match) return { fiber, request: match }
++    const status = fiber.pollUnsafe()
++    if (status !== undefined) {
++      if (Exit.isFailure(status)) return yield* status
++      throw new Error("Expected a pending permission request, but assertion completed")
++    }
++    yield* Effect.yieldNow
++  }
++})
++
++test("nested UI rows are mapped exactly once during registration and policy rechecks", async () => {
++  const root = "ses_nested_rows"
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add(root)
++  const entry = isolated.services.find(([key]) => key === PluginHooks.Service)
++  const original = entry[1]
++  const rows = []
++  entry[1] = { trigger: (_domain, _name, input) => Effect.sync(() => {
++    rows.push(input.source?.id)
++    return input
++  }) }
++  try {
++    await run(Effect.gen(function* () {
++      const service = yield* Permission.Service
++      yield* service.nested("outer", "grandparent")
++      yield* service.nested("child", "outer")
++      const request = yield* pending(service, {
++        ...input(root), directories: ["D:/Data/Project/deep"],
++        source: { type: "tool", id: "child", messageID: "msg_nested" },
++      })
++      assert.equal(request.request.source.id, "outer")
++      assert.ok(rows.length >= 2, "initial evaluation and post-registration race check both run")
++      assert.deepEqual([...new Set(rows)], ["outer"])
++      yield* service.reply({ requestID: request.request.id, reply: { scope: "session", policy: "RU=S*" } })
++      yield* Fiber.join(request.fiber)
++      assert.deepEqual([...new Set(rows)], ["outer"])
++    }), isolated)
++  } finally { entry[1] = original }
++})
++
++test("upstream saved approvals only settle asks; unattended hook downgrades require explicit approval", async () => {
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add("ses_policy")
++  isolated.saved.push({ projectID: "prj_test", action: "read", resource: "*" })
++  const request = { sessionID: "ses_policy", agent: "build", action: "read", resources: ["file"] }
++  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
++  let downgrade = false
++  hooks[1] = { trigger: (_domain, _name, input) =>
++    Effect.succeed(downgrade ? { ...input, effect: "ask" } : input) }
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(request)).effect, "allow")
++    isolated.agentRules.push({ action: "read", resource: "*", effect: "deny" })
++    assert.equal((yield* service.ask(request)).effect, "deny", "saved allow cannot override configured deny")
++    isolated.agentRules.push({ action: "read", resource: "*", effect: "allow" })
++    downgrade = true
++    assert.equal((yield* service.ask(request).pipe(Effect.provideService(Permission.Unattended, []))).effect, "deny")
++    assert.equal((yield* service.ask({ ...request, resources: [] })
++      .pipe(Effect.provideService(Permission.Unattended, []))).effect, "deny", "empty resources must not vacuously approve")
++    assert.equal((yield* service.ask(request).pipe(Effect.provideService(Permission.Unattended, [
++      { action: "read", resource: "file", effect: "allow" },
++    ]))).effect, "allow")
++  }), isolated)
++})
++
++test("real Permission service: durable family CRUD, atomic invalid input, denies, unrelated roots, restart and revocation", async () => {
++  state.add("ses_root")
++  const unrelatedRule = { action: "unrelated_tool", resource: "*", effect: "ask" }
++  state.records.set("ses_root", {
++    ...state.records.get("ses_root"), permissions: [unrelatedRule], metadata: { retained: "root annotation" },
++  })
++  state.add("ses_child", "ses_root")
++  state.add("ses_grandchild", "ses_child")
++  state.add("ses_unrelated")
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const first = yield* pending(service, {
++      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project"],
++      resources: ["D:/Data/Project/*"], save: ["D:/Data/*"],
++    })
++    const second = yield* pending(service, input())
++    const unrelated = yield* pending(service, input("ses_unrelated"))
++    const before = JSON.stringify([...state.records])
++    const invalid = yield* service.reply({
++      requestID: first.request.id, reply: { scope: "session", policy: "R=S* R=D*" },
++    }).pipe(Effect.flip)
++    assert.equal(invalid._tag, "Permission.InvalidPolicyError")
++    assert.equal(JSON.stringify([...state.records]), before)
++    assert.equal((yield* service.list()).length, 3)
++    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "RU=S* CD=D*" } })
++    yield* Fiber.join(first.fiber)
++    yield* Fiber.join(second.fiber)
++    state.add("ses_future", "ses_child")
++    assert.equal((yield* service.ask(input("ses_future"))).effect, "allow")
++    assert.deepEqual((yield* service.list()).map((item) => item.id), [unrelated.request.id])
++    for (const op of ["read", "update", "create", "delete"])
++      assert.equal((yield* service.ask(input("ses_grandchild", op))).effect,
++        op === "read" || op === "update" ? "allow" : "deny")
++    assert.equal((yield* service.ask(input("ses_child", "read", ["D:/Data/Project-other/file"]))).effect, "ask")
++    state.agentRules.push({ action: "shell", resource: "*", effect: "allow" })
++    const opaque = yield* service.assert({
++      ...input(), action: "shell", metadata: { filesystemEffects: "unknown" },
++    }).pipe(Effect.flip)
++    assert.equal(opaque._tag, "Permission.BlockedError")
++    assert.match(opaque.reason, /Unknown shell effects lack an exact command/)
++    state.agentRules.push({ action: "read", resource: "*", effect: "deny" })
++    assert.equal((yield* service.ask(input())).effect, "deny")
++    state.agentRules.push({ action: "edit", resource: "*", effect: "deny" })
++    assert.equal((yield* service.ask(input("ses_child", "update"))).effect, "deny")
++    state.agentRules.length = 0
++    assert.equal(state.saved.length, 0)
++    assert.equal(state.durable.length, 1)
++    assert.equal(state.durable[0].type, "session.permissions")
++    assert.equal(state.durable[0].seq, 0)
++    assert.deepEqual(state.durable[0].data.permissions, state.records.get("ses_root").permissions)
++    assert.deepEqual(state.records.get("ses_root").permissions[0], unrelatedRule)
++    assert.deepEqual(state.records.get("ses_root").metadata, { retained: "root annotation" })
++    yield* service.reply({ requestID: unrelated.request.id, reply: "once" })
++    yield* Fiber.join(unrelated.fiber)
++  }))
++  const beforeReplay = JSON.stringify(state.records.get("ses_root"))
++  state.replay()
++  assert.equal(JSON.stringify(state.records.get("ses_root")), beforeReplay)
++  // A fresh scoped Permission.layer must read the replayed projection, not an in-memory policy map.
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(input())).effect, "allow")
++    assert.equal((yield* service.ask(input("ses_child", "create"))).effect, "deny")
++    // Same event used by the existing session permissions PATCH / Session.setPermissions.
++    yield* state.publishDurable(SessionEvent.Permissions, { sessionID: "ses_root", permissions: [unrelatedRule] })
++    assert.equal((yield* service.ask(input())).effect, "ask")
++    assert.deepEqual(state.records.get("ses_root").permissions, [unrelatedRule])
++    state.replay()
++    assert.equal(yield* service.allows(input()), false, "replay must not resurrect revoked grants")
++  }))
++})
++
++test("actual SQL metadata is singular and canonical session permissions events are durable", () => {
++  assert.equal(SessionTable.permission.name, "permission")
++  assert.equal(SessionTable.permissions, undefined)
++  assert.equal(SessionEvent.Permissions.type, "session.permissions")
++  assert.equal(SessionEvent.Permissions.durable.aggregate, "sessionID")
++})
++
++test("stale durable snapshot rolls back, retries and preserves a concurrent approval and unrelated session fields", async () => {
++  const original = { action: "baseline_tool", resource: "*", effect: "deny" }
++  const concurrent = { action: "concurrent_tool", resource: "*", effect: "ask" }
++  state.records.set("ses_root", {
++    ...state.records.get("ses_root"), permissions: [original], metadata: { keep: "not a policy field" },
++  })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const first = yield* pending(service, {
++      ...input("ses_root", "read", ["D:/Data/First/file"]),
++      action: "external_directory", resources: ["D:/Data/First/*"],
++    })
++    const second = yield* pending(service, {
++      ...input("ses_child", "read", ["D:/Data/Second/file"]),
++      action: "external_directory", resources: ["D:/Data/Second/*"],
++    })
++    const logStart = state.durable.length
++    const traceStart = state.trace.length
++    const seq = state.sequences.get("ses_root")
++    state.afterSnapshot(() => Effect.gen(function* () {
++      // Interleave an ordinary Session.setPermissions-style update and a second user approval
++      // after the first snapshot, but before its durable publication acquires the Bus lock.
++      yield* state.publishDurable(SessionEvent.Permissions, {
++        sessionID: "ses_root", permissions: [...state.records.get("ses_root").permissions, concurrent],
++      })
++      yield* service.reply({ requestID: second.request.id, reply: { scope: "session", policy: "R=S*" } })
++    }))
++    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
++    yield* Fiber.join(first.fiber)
++    yield* Fiber.join(second.fiber)
++    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/First/file"])), true)
++    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Second/file"])), true)
++    const root = state.records.get("ses_root")
++    assert.deepEqual(root.permissions.filter((rule) => !rule.action.startsWith("__opencode_")), [original, concurrent])
++    assert.deepEqual(root.metadata, { keep: "not a policy field" })
++    const committed = state.durable.slice(logStart)
++    assert.equal(committed.length, 3, "the stale publication must not append a durable event")
++    assert.deepEqual(committed.map((event) => event.seq), [seq + 1, seq + 2, seq + 3])
++    const trace = state.trace.slice(traceStart)
++    assert.equal(trace.filter((step) => step === "rollback").length, 1)
++    assert.equal(trace.filter((step) => step === "notify:session.permissions").length, 3)
++    assert.equal((yield* service.list()).length, 0)
++    const expected = JSON.stringify(root)
++    state.replay()
++    assert.equal(JSON.stringify(state.records.get("ses_root")), expected)
++  }))
++})
++
++test("real service rechecks a request registered concurrently with a grant", async () => {
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const first = yield* pending(service, {
++      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++    })
++    state.publish((payload) => {
++      if (payload.id && payload.id !== first.request.id) {
++        state.publish(undefined)
++        return service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "R=S*" } })
++      }
++      return Effect.void
++    })
++    yield* service.assert(input())
++    yield* Fiber.join(first.fiber)
++    assert.equal((yield* service.list()).length, 0)
++  }))
++})
++
++test("real service keeps parent-list-only content pending and consumes R=-1 exactly once", async () => {
++  state.records.set("ses_root", { ...state.records.get("ses_root"), permissions: [] })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const content = yield* pending(service, {
++      ...input("ses_root"), action: "external_directory", paths: ["D:/Data/Project/file"],
++      resources: ["D:/Data/Project/*"],
++    })
++    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-1" } })
++    assert.equal((yield* service.list()).length, 1)
++    const listing = { ...input("ses_root", "read", ["D:/Data"]), access: "listing" }
++    assert.equal(yield* service.allows({ ...listing, access: "content" }), false)
++    yield* service.assert(listing)
++    assert.equal(yield* service.allows(listing), false)
++    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-S" } })
++    assert.equal((yield* service.list()).length, 1)
++    assert.equal((yield* service.ask({ ...listing, sessionID: "ses_grandchild" })).effect, "allow")
++    assert.equal((yield* service.ask(input("ses_grandchild", "read", ["D:/Data/sibling/file"]))).effect, "ask")
++    yield* service.reply({ requestID: content.request.id, reply: "once" })
++    yield* Fiber.join(content.fiber)
++  }))
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask({ ...input("ses_child", "read", ["D:/Data"]), access: "listing" })).effect, "allow")
++    assert.equal((yield* service.ask(input("ses_child", "read", ["D:/Data/parent-file"]))).effect, "ask")
++  }))
++})
++
++test("real service =1 settles only the selected request, unlike durable session policy", async () => {
++  state.records.set("ses_root", { ...state.records.get("ses_root"), permissions: [] })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const selected = yield* pending(service, {
++      ...input("ses_root"), directories: ["D:/Data/Project"], // Ordinary read prompts also offer exact directories.
++    })
++    const other = yield* pending(service, input("ses_child"))
++    yield* service.reply({ requestID: selected.request.id, reply: { scope: "session", policy: "R=1*" } })
++    yield* Fiber.join(selected.fiber)
++    assert.deepEqual((yield* service.list()).map((item) => item.id), [other.request.id])
++    assert.equal((yield* service.ask(input())).effect, "ask")
++    assert.deepEqual(state.records.get("ses_root").permissions, [])
++    yield* service.reply({ requestID: other.request.id, reply: "once" })
++    yield* Fiber.join(other.fiber)
++  }))
++})
++
++test("existing persistent always remains project-scoped and survives service recreation", async () => {
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const selected = yield* pending(service, { ...input(), save: ["D:/Data/Project/*"] })
++    yield* service.reply({ requestID: selected.request.id, reply: "always" })
++    yield* Fiber.join(selected.fiber)
++    assert.equal(state.saved.length, 1)
++    assert.deepEqual(state.records.get("ses_root").permissions, [])
++  }))
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(input("ses_unrelated"))).effect, "allow")
++    assert.equal(yield* service.allows(input("ses_child", "read", ["D:/Data/Project-other/file"])), false)
++    assert.equal(yield* service.allows(input("ses_child", "update")), false)
++  }))
++})
++
++test("unknown shell session approval is exact, revocable, and invalidated by changed denies", async () => {
++  state.add("ses_unknown_root")
++  state.add("ses_unknown_child", "ses_unknown_root")
++  const shell = (sessionID = "ses_unknown_root", command = "npm run dev", cwd = "D:/work") => ({
++    sessionID, agent: "build", action: "shell", resources: [command],
++    metadata: { filesystemEffects: "unknown", unknownCommand: command, unknownCwd: cwd, unknownShell: "powershell.exe" },
++  })
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const permission = yield* pending(service, {
++      ...input("ses_unknown_root"), action: "external_directory", directories: ["D:/Data/Project"],
++      paths: ["D:/Data/Project"], resources: ["D:/Data/Project/*"],
++    })
++    yield* service.reply({ requestID: permission.request.id, reply: { scope: "session", policy: "R=S* D=D" } })
++    yield* Fiber.join(permission.fiber)
++    const first = yield* pending(service, shell())
++    const bad = yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S*" } }).pipe(Effect.flip)
++    assert.equal(bad._tag, "Permission.InvalidPolicyError")
++    yield* service.reply({ requestID: first.request.id, reply: { scope: "session", policy: "Unknown=S" } })
++    yield* Fiber.join(first.fiber)
++    assert.equal((yield* service.ask(shell())).effect, "allow")
++    assert.equal((yield* service.ask(shell("ses_unknown_child"))).effect, "ask")
++    assert.equal((yield* service.ask(shell("ses_unknown_root", "npm run build"))).effect, "ask")
++    assert.equal((yield* service.ask(shell("ses_unknown_root", "npm run dev", "D:/other"))).effect, "ask")
++  }))
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    assert.equal((yield* service.ask(shell())).effect, "allow", "session approval survives service recreation")
++    const root = state.records.get("ses_unknown_root")
++    const extraDeny = {
++      action: "__opencode_filesystem_session_v1", effect: "deny",
++      resource: JSON.stringify({ directory: "D:/Other", operation: "delete", effect: "deny", lifetime: "session", recursive: false, scope: "selected" }),
++    }
++    yield* state.publishDurable(SessionEvent.Permissions, {
++      sessionID: "ses_unknown_root", permissions: [...root.permissions, extraDeny],
++    })
++    assert.equal((yield* service.ask(shell())).effect, "ask", "a new deny requires new approval")
++    yield* state.publishDurable(SessionEvent.Permissions, {
++      sessionID: "ses_unknown_root",
++      permissions: root.permissions.filter((rule) => rule.action !== "__opencode_shell_unknown_v1"),
++    })
++    assert.equal((yield* service.ask(shell())).effect, "ask", "removing approval revokes it")
++  }))
++})
++
++test("failed reply publication must not leave a durable session grant", async () => {
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add("ses_publish_failure")
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const request = yield* pending(service, {
++      ...input("ses_publish_failure"), directories: ["D:/Data/Project/deep"],
++    })
++    isolated.publish((payload) => payload.requestID === request.request.id
++      ? Effect.die(new Error("injected Replied publication failure"))
++      : Effect.void)
++    const reply = yield* Effect.exit(service.reply({
++      requestID: request.request.id, reply: { scope: "session", policy: "R=S*" },
++    }))
++    assert.ok(Exit.isFailure(reply), "the failed notification must fail the reply")
++    assert.equal(request.fiber.pollUnsafe(), undefined, "the waiter must remain pending")
++    const renewed = yield* service.list()
++    assert.equal(renewed.length, 1)
++    assert.notEqual(renewed[0].id, request.request.id)
++    assert.ok(Exit.isFailure(yield* Effect.exit(service.reply({ requestID: request.request.id, reply: "once" }))))
++    isolated.publish(undefined)
++    assert.equal((yield* service.ask(input("ses_publish_failure"))).effect, "ask",
++      "a failed notification must not authorize later requests")
++    assert.deepEqual(isolated.records.get("ses_publish_failure").permissions, [],
++      "the projected session must not retain the failed approval")
++    yield* service.reply({ requestID: renewed[0].id, reply: { scope: "session", policy: "R=S*" } })
++    yield* Fiber.join(request.fiber)
++  }), isolated)
++})
++
++test("failed final confirmation must not leave a durable session grant", async () => {
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add("ses_confirm_failure")
++  let confirming = false
++  isolated.publish((value) => Effect.sync(() => { if (value.requestID) confirming = true }))
++  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
++  hooks[1] = { trigger: (_domain, _name, value) => confirming
++    ? Effect.die(new Error("injected confirmation failure")) : Effect.succeed(value) }
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const request = yield* pending(service, {
++      ...input("ses_confirm_failure"), directories: ["D:/Data/Project/deep"],
++    })
++    const result = yield* Effect.exit(service.reply({
++      requestID: request.request.id, reply: { scope: "session", policy: "R=S*" },
++    }))
++    assert.ok(Exit.isFailure(result))
++    assert.equal(request.fiber.pollUnsafe(), undefined)
++    assert.deepEqual(isolated.records.get("ses_confirm_failure").permissions, [],
++      "confirmation failure must not leave an authorizing durable grant")
++  }), isolated)
++})
++
++test("no fallible confirmation hook is called after durable authorization", async () => {
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add("ses_no_postcommit_hook")
++  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
++  let late = 0
++  hooks[1] = { trigger: (_domain, _name, value) => Effect.suspend(() => {
++    if (!isolated.durable.length) return Effect.succeed(value)
++    late++
++    return Effect.die(new Error("confirmation after commit is forbidden"))
++  }) }
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const request = yield* pending(service, {
++      ...input("ses_no_postcommit_hook"), directories: ["D:/Data/Project/deep"],
++    })
++    yield* service.reply({ requestID: request.request.id, reply: { scope: "session", policy: "R=S*" } })
++    yield* Fiber.join(request.fiber)
++    assert.equal(late, 0)
++    assert.equal(isolated.durable.length, 1)
++  }), isolated)
++})
++
++test("candidate validation never restores a one-shot listing consumed reentrantly", async () => {
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add("ses_listing_reentry")
++  let onEvaluate = () => Effect.void
++  const hooks = isolated.services.find(([key]) => key === PluginHooks.Service)
++  hooks[1] = { trigger: (_domain, _name, value) => onEvaluate(value).pipe(Effect.as(value)) }
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const content = yield* pending(service, {
++      ...input("ses_listing_reentry", "read", ["D:/parent/selected/file"]),
++      directories: ["D:/parent/selected"],
++    })
++    yield* service.reply({ requestID: content.request.id, reply: { scope: "session", policy: "R=-1" } })
++    const listing = { ...input("ses_listing_reentry", "read", ["D:/parent"]), access: "listing" }
++    const target = yield* pending(service, {
++      ...input("ses_listing_reentry", "update", ["D:/other/file"]), directories: ["D:/other"],
++    })
++    let armed = false
++    let consumed = 0
++    isolated.afterSnapshot(() => Effect.sync(() => { armed = true }))
++    onEvaluate = (value) => Effect.suspend(() => {
++      if (!armed || value.action !== "edit") return Effect.void
++      armed = false
++      consumed++
++      return service.assert(listing)
++    })
++    yield* service.reply({ requestID: target.request.id, reply: { scope: "session", policy: "U=S*" } })
++    yield* Fiber.join(target.fiber)
++    assert.equal(consumed, 1)
++    assert.equal(yield* service.allows(listing), false, "consumed listing must not be resurrected by candidate commit")
++    yield* service.reply({ requestID: content.request.id, reply: "once" })
++    yield* Fiber.join(content.fiber)
++  }), isolated)
++})
++
++test("durable publication failure after projection must not authorize later requests", async () => {
++  const isolated = fixture(SessionTable, EventSequenceTable)
++  isolated.add("ses_durable_notify_failure")
++  await run(Effect.gen(function* () {
++    const service = yield* Permission.Service
++    const request = yield* pending(service, {
++      ...input("ses_durable_notify_failure"), directories: ["D:/Data/Project/deep"],
++    })
++    isolated.publish((value) => value.permissions
++      ? Effect.die(new Error("durable notification failed after commit")) : Effect.void)
++    const result = yield* Effect.exit(service.reply({
++      requestID: request.request.id, reply: { scope: "session", policy: "R=S*" },
++    }))
++    assert.ok(Exit.isFailure(result))
++    assert.equal(request.fiber.pollUnsafe(), undefined)
++    assert.deepEqual(isolated.records.get("ses_durable_notify_failure").permissions, [],
++      "a failed durable publication must not leave an authorizing grant")
++  }), isolated)
++})
+diff --git a/packages/core/test/personalize/shell-runner-fixture.ts b/packages/core/test/personalize/shell-runner-fixture.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a3b79e599b2880ce7aff6ae7a93a12dc4b60e51
+--- /dev/null
++++ b/packages/core/test/personalize/shell-runner-fixture.ts
+@@ -0,0 +1,409 @@
++import { describe, expect } from "bun:test"
++import { Cause, Effect, Exit } from "effect"
++import fs from "node:fs/promises"
++import path from "node:path"
++import { Agent } from "@opencode/core/agent"
++import { Location } from "@opencode/core/location"
++import { Permission } from "@opencode/core/permission"
++import { PermissionSaved } from "@opencode/core/permission/saved"
++import { ShellSelect } from "@opencode/core/shell/select"
++import { toolIdentity } from "../lib/tool"
++import { Expected } from "../lib/session-message"
++import { hasNoFilesystemEffects } from "../../src/personalize/shell-permission"
++
++type Fixture = Pick<typeof import("../tool-shell.test"),
++  "permissionIt" | "withScanner" | "runPermissionCommand" | "isWindows">
++const sessionApproval = { scope: "session", policy: "Unknown=S" } as const
++const completed = { _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } }
++
++// The scanner scenarios remain end-to-end. Saved shell globs are still inspected,
++// but cannot substitute for v12's explicit unknown-effect consent.
++export function shellRunnerScenarios({ permissionIt, withScanner, runPermissionCommand, isWindows }: Fixture) {
++  describe("ShellTool scanner permissions", () => {
++    const test = isWindows || !Bun.which("sh") ? permissionIt.live.skip : permissionIt.live
++    test("declarations and substitutions retain explicit reject/once/session behavior", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const saved = yield* PermissionSaved.Service
++        const location = yield* Location.Service
++        yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["printf *"] })
++        const marker = path.join(fixture.active, "marker")
++        const declaration = "export SCAN_TEST=hello; unset SCAN_TEST; printf hello > marker"
++        const approved = yield* runPermissionCommand(registry, declaration, marker, ["once"])
++        expect(approved.requests).toMatchObject([{
++          action: "shell", metadata: { filesystemEffects: "unknown", unknownCommand: declaration },
++        }])
++        expect(approved.exit).toMatchObject(completed)
++        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
++        expect((yield* saved.list()).map((item) => item.resource)).toEqual(["printf *"])
++        yield* Effect.forEach(yield* saved.list(), (item) => saved.remove(item.id))
++        const command = 'export SCAN_TEST=$(printf hello); printf %s "$SCAN_TEST" > marker'
++        const prompts: Permission.Request[] = []
++        for (const reply of ["reject", "once", sessionApproval, undefined] as const) {
++          yield* Effect.promise(() => fs.rm(marker, { force: true }))
++          const result = yield* runPermissionCommand(registry, command, marker, reply ? [reply] : [])
++          prompts.push(...result.requests)
++          if (reply === "reject") {
++            expect(Exit.isFailure(result.exit)).toBe(true)
++            if (Exit.isFailure(result.exit)) expect(result.exit.cause.reasons.some(
++              (reason) => Cause.isDieReason(reason) && reason.defect instanceof Permission.DeclinedError,
++            )).toBe(true)
++            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++          } else {
++            expect(result.exit).toMatchObject(completed)
++            expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
++          }
++          // Unknown=S is conversation-local, never a project-wide shell glob.
++          expect(yield* saved.list()).toEqual([])
++        }
++        expect(prompts).toHaveLength(3)
++        for (const request of prompts) expect(request).toMatchObject({
++          action: "shell", resources: ["printf hello", 'printf %s "$SCAN_TEST" > marker'],
++          save: ["printf *", "printf *"],
++          metadata: { filesystemEffects: "unknown", unknownCommand: command },
++        })
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [{ action: "shell", resource: "printf hello", effect: "deny" }]
++        }))
++        yield* Effect.promise(() => fs.rm(marker))
++        const denied = yield* runPermissionCommand(registry, command, marker, [])
++        expect(denied.exit).toMatchObject({
++          _tag: "Success", value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
++        })
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      })))
++
++    test("unanalyzable commands require unknown consent even under allow-all rules", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
++        }))
++        const marker = path.join(fixture.active, "marker")
++        const command = "alias p=true; printf hello > marker"
++        const result = yield* runPermissionCommand(registry, command, marker, ["once"])
++        expect(result.requests).toMatchObject([{ action: "shell", metadata: {
++          filesystemEffects: "unknown", unknownCommand: command,
++        } }])
++        expect(result.exit).toMatchObject(completed)
++        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
++      })))
++
++    test("unanalyzable commands are denied when a shell deny rule could be bypassed", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [
++            { action: "*", resource: "*", effect: "allow" }, { action: "shell", resource: "rm *", effect: "deny" },
++          ]
++        }))
++        const marker = path.join(fixture.active, "marker")
++        const result = yield* runPermissionCommand(registry, "alias p=true; printf hello > marker", marker, [])
++        expect(result.requests).toEqual([])
++        expect(result.exit).toMatchObject({ _tag: "Success", value: { status: "error", error: {
++          message: expect.stringContaining("Portable shell scanner cannot analyze command: dynamic-execution. A shell deny rule is configured"),
++        } } })
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      })))
++
++    test("unanalyzable commands ask for the exact command and any directory without saving", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const saved = yield* PermissionSaved.Service
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [
++            { action: "shell", resource: "alias *", effect: "allow" },
++            { action: "external_directory", resource: path.join(fixture.outside, "*"), effect: "allow" },
++          ]
++        }))
++        const marker = path.join(fixture.active, "marker")
++        const command = "alias p=true; printf hello > marker"
++        const approved = yield* runPermissionCommand(registry, command, marker, ["always", "once"])
++        expect(approved.requests).toMatchObject([
++          { action: "external_directory", resources: ["*"] },
++          { action: "shell", resources: [command], metadata: { filesystemEffects: "unknown" } },
++        ])
++        expect(approved.exit).toMatchObject(completed)
++        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [{ action: "external_directory", resource: "*", effect: "allow" }]
++        }))
++        yield* Effect.promise(() => fs.rm(marker))
++        const asked = yield* runPermissionCommand(registry, command, marker, ["once"])
++        expect(asked.requests).toMatchObject([
++          { action: "shell", resources: [command], metadata: { reason: "dynamic-execution" } },
++        ])
++        expect(asked.requests.map((request) => request.save)).toEqual([undefined])
++        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
++        expect(yield* saved.list()).toEqual([])
++        yield* Effect.promise(() => fs.rm(marker))
++        const repeat = yield* runPermissionCommand(registry, command, marker, ["reject"])
++        expect(repeat.requests).toHaveLength(1)
++        expect(Exit.isFailure(repeat.exit)).toBe(true)
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      })))
++
++    test("pipeline redirect keeps the redirect target visible to exact approval and denial", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const saved = yield* PermissionSaved.Service
++        const location = yield* Location.Service
++        yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["printf hello", "cat"] })
++        const marker = path.join(fixture.active, "marker")
++        const command = "printf hello | cat > marker"
++        const rejected = yield* runPermissionCommand(registry, command, marker, ["reject"])
++        expect(rejected.requests).toMatchObject([
++          { action: "shell", resources: ["printf hello", "cat > marker"], save: ["printf *", "cat *"] },
++        ])
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++        for (const resources of [["cat > marker"], ["printf *", "cat *"]]) {
++          yield* saved.add({ projectID: location.project.id, action: "shell", resources })
++          const result = yield* runPermissionCommand(registry, command, marker, ["once"])
++          expect(result.requests).toMatchObject([{ action: "shell", metadata: { unknownCommand: command } }])
++          expect(result.exit).toMatchObject(completed)
++          expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
++          yield* Effect.promise(() => fs.rm(marker))
++        }
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [{ action: "shell", resource: "* > marker", effect: "deny" }]
++        }))
++        const denied = yield* runPermissionCommand(registry, command, marker, [])
++        expect(denied.requests).toEqual([])
++        expect(denied.exit).toMatchObject({ _tag: "Success", value: {
++          status: "error", error: { message: expect.stringContaining("Permission denied: shell") },
++        } })
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      })))
++
++    test("external-directory rejection stops execution before a workspace marker is written", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [{ action: "shell", resource: "*", effect: "allow" }]
++        }))
++        const marker = path.join(fixture.active, "marker")
++        const command = `cd '${fixture.outside}' && pwd -P && printf reached > '${marker}'`
++        for (const reply of ["reject", "once"] as const) {
++          const result = yield* runPermissionCommand(registry, command, marker, reply === "reject" ? [reply] : [reply, "once"])
++          expect(result.requests[0]).toMatchObject({
++            action: "external_directory", resources: [path.join(fixture.outside, "*")],
++          })
++          expect(result.requests).toHaveLength(reply === "reject" ? 1 : 2)
++          if (reply === "reject") {
++            expect(Exit.isFailure(result.exit)).toBe(true)
++            if (Exit.isFailure(result.exit)) expect(result.exit.cause.reasons.some(
++              (reason) => Cause.isDieReason(reason) && reason.defect instanceof Permission.DeclinedError,
++            )).toBe(true)
++            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++          } else {
++            expect(result.requests[1]).toMatchObject({ action: "shell", metadata: { unknownCommand: command } })
++            expect(result.exit).toMatchObject({ ...completed, value: {
++              ...completed.value, content: [{ type: "text", text: `${fixture.outside}\n` }],
++            } })
++            expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
++          }
++        }
++      })))
++
++    test("a numeric symlink operand requires explicit unknown consent before reaching outside", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        yield* Effect.promise(() => fs.symlink(fixture.outside, path.join(fixture.active, "123")))
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [
++            { action: "shell", resource: "*", effect: "allow" },
++            { action: "external_directory", resource: "*", effect: "deny" },
++          ]
++        }))
++        const marker = path.join(fixture.active, "marker")
++        const command = `cd 123 && pwd -P && printf reached > '${marker}'`
++        const rejected = yield* runPermissionCommand(registry, command, marker, ["reject"])
++        expect(Exit.isFailure(rejected.exit)).toBe(true)
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++        const result = yield* runPermissionCommand(registry, command, marker, ["once"])
++        expect(result.requests).toMatchObject([{ action: "shell", metadata: { unknownCommand: command } }])
++        expect(result.exit).toMatchObject({ ...completed, value: {
++          ...completed.value, content: [{ type: "text", text: `${fixture.outside}\n` }],
++        } })
++        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
++      })))
++
++    test("a continued directory operand resolves to the destination and enforces external-directory deny", () =>
++      withScanner((registry, fixture) => Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [
++            { action: "shell", resource: "*", effect: "allow" },
++            { action: "external_directory", resource: path.join(fixture.outside, "*"), effect: "deny" },
++          ]
++        }))
++        const marker = path.join(fixture.active, "marker")
++        const denied = yield* runPermissionCommand(registry, `cd ../out\\\nside && pwd -P && printf reached > '${marker}'`, marker, [])
++        expect(denied.requests).toEqual([])
++        expect(denied.exit).toMatchObject({ _tag: "Success", value: { status: "error", error: {
++          message: expect.stringContaining("Permission denied: external_directory"),
++        } } })
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      })))
++  })
++
++  describe("ShellTool conditional process substitution", () => {
++    const test = isWindows || !Bun.which("bash") ? permissionIt.live.skip : permissionIt.live
++    test("a nested deny prevents the substitution from running", () =>
++      withScanner((registry, directory) => Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++          agent.permissions = [
++            { action: "shell", resource: "*", effect: "allow" },
++            { action: "shell", resource: "printf *", effect: "deny" },
++          ]
++        }))
++        const marker = path.join(directory.active, "marker")
++        const result = yield* runPermissionCommand(registry, '[[ -n <(printf reached > marker) ]]; wait "$!"', marker, [])
++        expect(result.exit).toMatchObject({ _tag: "Success", value: { status: "error", error: {
++          message: expect.stringContaining("Permission denied: shell"),
++        } } })
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      }), "bash"))
++    for (const reply of ["reject", sessionApproval] as const) {
++      test(`conditional substitutions respect ${reply === "reject" ? "reject" : "Unknown=S"}`, () =>
++        withScanner((registry, directory) => Effect.gen(function* () {
++          const saved = yield* PermissionSaved.Service
++          const location = yield* Location.Service
++          yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["wait *"] })
++          const marker = path.join(directory.active, "marker")
++          const command = '[[ -n <(printf reached > marker) ]]; wait "$!"'
++          const result = yield* runPermissionCommand(registry, command, marker, [reply])
++          expect(result.requests).toMatchObject([
++            { action: "shell", resources: ["printf reached > marker", 'wait "$!"'], save: ["printf *", "wait *"] },
++          ])
++          if (reply === "reject") {
++            expect(Exit.isFailure(result.exit)).toBe(true)
++            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++            return
++          }
++          expect(result.exit).toMatchObject(completed)
++          expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
++          yield* Effect.promise(() => fs.unlink(marker))
++          const repeat = yield* runPermissionCommand(registry, command, marker, [])
++          expect(repeat.requests).toEqual([])
++          expect(repeat.exit).toMatchObject(completed)
++          expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(true)
++        }), "bash"))
++    }
++  })
++
++  describe("ShellTool compound syntax approval compatibility", () => {
++    for (const fixture of [
++      { shell: "zsh", command: 'for value ($(printf a)) do printf %s "$value"; done', output: "a", saved: ["printf *"] },
++      { shell: "bash", command: 'printf %s "$(probe() case value in (value) printf hello;; esac; probe)"',
++        output: "hello", saved: ["printf *", "probe *"] },
++    ]) {
++      const test = isWindows || !Bun.which(fixture.shell) ? permissionIt.live.skip : permissionIt.live
++      test(`${fixture.shell}: ${fixture.command}`, () =>
++        withScanner((registry, directory) => Effect.gen(function* () {
++          const saved = yield* PermissionSaved.Service
++          const location = yield* Location.Service
++          yield* saved.add({ projectID: location.project.id, action: "shell", resources: fixture.saved })
++          const result = yield* runPermissionCommand(registry, fixture.command, path.join(directory.active, "marker"), ["once"])
++          expect(result.requests).toMatchObject([{ action: "shell", metadata: { unknownCommand: fixture.command } }])
++          expect(result.exit).toMatchObject({ ...completed, value: {
++            ...completed.value, content: [{ type: "text", text: fixture.output }],
++          } })
++        }), fixture.shell))
++    }
++  })
++
++  describe("ShellTool ordinary shell syntax", () => {
++    for (const shell of ["bash", "zsh"]) {
++      const test = isWindows || !Bun.which(shell) ? permissionIt.live.skip : permissionIt.live
++      for (const fixture of [
++        { name: "heredoc substitution", command: "cat <<EOF\n$(printf hello)\nEOF", output: "hello\n", saved: ["cat *", "printf *"] },
++        { name: "function and case", command: 'greet() { case "$1" in a) printf hello;; *) printf other;; esac; }; greet a',
++          output: "hello", saved: ["greet *", "printf *"] },
++        { name: "arithmetic statement", command: 'count=1; ((count += 1)); printf %s "$count"',
++          output: "2", saved: ["((count += 1)) *", "printf *"] },
++      ]) {
++        test(`${shell}: ${fixture.name} reuses exact session approval, not shell globs`, () =>
++          withScanner((registry, directory) => Effect.gen(function* () {
++            const saved = yield* PermissionSaved.Service
++            const location = yield* Location.Service
++            yield* saved.add({ projectID: location.project.id, action: "shell", resources: fixture.saved })
++            const marker = path.join(directory.active, "marker")
++            for (const replies of [["once"], [sessionApproval], []] as const) {
++              const result = yield* runPermissionCommand(registry, fixture.command, marker, replies)
++              expect(result.requests).toHaveLength(replies.length)
++              if (replies.length) expect(result.requests[0]).toMatchObject({
++                action: "shell", metadata: { unknownCommand: fixture.command },
++              })
++              expect(result.exit).toMatchObject({ ...completed, value: {
++                ...completed.value, content: [{ type: "text", text: fixture.output }],
++              } })
++            }
++          }), shell))
++      }
++      test(`${shell}: a loop body deny prevents execution`, () =>
++        withScanner((registry, directory) => Effect.gen(function* () {
++          const agents = yield* Agent.Service
++          yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++            agent.permissions = [
++              { action: "shell", resource: "*", effect: "allow" },
++              { action: "shell", resource: "printf *", effect: "deny" },
++            ]
++          }))
++          const marker = path.join(directory.active, "marker")
++          const result = yield* runPermissionCommand(registry, "for value in a; do printf body > marker; done", marker, [])
++          expect(result.exit).toMatchObject({ _tag: "Success", value: { status: "error", error: {
++            message: expect.stringContaining("Permission denied: shell"),
++          } } })
++          expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++        }), shell))
++    }
++    const pwsh = process.env.SHELL_SCAN_PWSH ?? Bun.which("pwsh") ?? Bun.which("powershell")
++    const test = pwsh ? permissionIt.live : permissionIt.live.skip
++    for (const command of [
++      'Write-Output "$(Write-Output hello)"',
++      "function Show-Value { Write-Output hello }; Show-Value",
++      "Write-Output @'\nhello\n'@",
++    ]) {
++      test(`PowerShell: ordinary syntax requires explicit unknown approval: ${command}`, () =>
++        withScanner((registry, directory) => Effect.gen(function* () {
++          const saved = yield* PermissionSaved.Service
++          const location = yield* Location.Service
++          yield* saved.add({ projectID: location.project.id, action: "shell",
++            resources: ["Write-Output *", "Show-Value *"] })
++          const result = yield* runPermissionCommand(registry, command, path.join(directory.active, "marker"), ["once"])
++          expect(result.requests).toMatchObject([{ action: "shell", metadata: { unknownCommand: command } }])
++          expect(result.exit).toMatchObject(completed)
++          if (Exit.isSuccess(result.exit))
++            expect(result.exit.value.content?.[0]).toEqual(Expected.text(isWindows ? "hello\r\n" : "hello\n"))
++        }), pwsh ?? "pwsh"))
++    }
++    for (const [command, pattern] of [
++      ["Write-Output\thello", "Write-Output\t*"],
++      ["& 'Write-Output' hello", "& 'Write-Output' *"],
++      ["Write-Output `\n  hello", "Write-Output *"],
++    ]) {
++      test(`PowerShell: session approval covers repeat execution and preserves exact deny: ${command}`, () =>
++        withScanner((registry, directory) => Effect.gen(function* () {
++          const marker = path.join(directory.active, "marker")
++          const shell = yield* (yield* ShellSelect.Service).resolve({ priority: "compat" })
++          const reply = hasNoFilesystemEffects(command, shell) ? "always" : sessionApproval
++          const first = yield* runPermissionCommand(registry, command, marker, [reply])
++          expect(first.requests).toMatchObject([{ action: "shell", resources: [command], save: [pattern] }])
++          expect(first.exit).toMatchObject(completed)
++          const repeat = yield* runPermissionCommand(registry, command, marker, [])
++          expect(repeat.requests).toEqual([])
++          expect(repeat.exit).toMatchObject(completed)
++          const agents = yield* Agent.Service
++          yield* agents.transform((editor) => editor.update(toolIdentity.agent, (agent) => {
++            agent.permissions = [{ action: "shell", resource: command, effect: "deny" }]
++          }))
++          const denied = yield* runPermissionCommand(registry, command, marker, [])
++          expect(denied.exit).toMatchObject({ _tag: "Success", value: { status: "error", error: {
++            message: expect.stringContaining("Permission denied: shell"),
++          } } })
++        }), pwsh ?? "pwsh"))
++    }
++  })
++}
+diff --git a/packages/core/test/personalize/title-runner-fixture.ts b/packages/core/test/personalize/title-runner-fixture.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f49ee2a8a02cbfe5c9403d4239190ae44c776460
+--- /dev/null
++++ b/packages/core/test/personalize/title-runner-fixture.ts
+@@ -0,0 +1,107 @@
++import { expect } from "bun:test"
++import { Deferred, Effect, Fiber, Stream } from "effect"
++import { TestLLM } from "@opencode/ai/testing"
++import { Bus } from "@opencode/core/bus"
++import { SessionEvent } from "@opencode/core/session/event"
++import { SessionRunner } from "@opencode/core/session/runner/index"
++import { dateTitle } from "../../src/personalize/session-naming"
++
++type Fixture = Pick<typeof import("../session-runner.test"),
++  "scenario" | "prepareTitleGeneration" | "sessionID" | "invalidRequest" | "providerRejected">
++
++// These four upstream scenarios retain their concurrency, coalescing, retry and
++// manual-title assertions, with v12's date-first / five-character title contract.
++export function titleRunnerScenarios({
++  scenario, prepareTitleGeneration, sessionID, invalidRequest, providerRejected,
++}: Fixture) {
++  const watchPseudonym = Effect.gen(function* () {
++    const bus = yield* Bus.Service
++    return yield* bus.subscribe(SessionEvent.Renamed).pipe(
++      Stream.filter((event) => event.data.sessionID === sessionID && event.data.title.endsWith("-Brief")),
++      Stream.take(1), Stream.runDrain,
++      Effect.forkScoped({ startImmediately: true }),
++    )
++  })
++  scenario("generates the title while the first model step is still running", function* (s) {
++    yield* prepareTitleGeneration
++    yield* s.admit("First prompt")
++    yield* s.llm.push(TestLLM.text("Brief", "text-title"), Stream.never)
++    const renamed = yield* watchPseudonym
++    const runner = yield* SessionRunner.Service
++    const fiber = yield* runner.drain({ sessionID, force: true }).pipe(Effect.forkChild)
++    yield* Fiber.join(renamed)
++    const session = yield* s.session.get(sessionID)
++    expect(session.title).toBe(`${dateTitle(session.time.created)}-Brief`)
++    expect(fiber.pollUnsafe()).toBeUndefined()
++    yield* Fiber.interrupt(fiber)
++  })
++  scenario("does not automatically replace an existing session title", function* (s) {
++    yield* prepareTitleGeneration
++    yield* s.session.rename({ sessionID, title: "Manual title" })
++    yield* s.admit("Follow-up prompt")
++    yield* s.llm.push(TestLLM.text("Assistant response", "text-response"))
++    yield* s.resume
++    expect(s.requests).toHaveLength(1)
++    expect((yield* s.session.get(sessionID)).title).toBe("Manual title")
++  })
++  scenario("coalesces title generation while a request is active", function* (s) {
++    yield* prepareTitleGeneration
++    const titleStarted = yield* Deferred.make<void>()
++    const releaseTitle = yield* Deferred.make<void>()
++    yield* Effect.gen(function* () {
++      yield* s.admit("First prompt")
++      yield* s.llm.push(
++        Stream.unwrap(Deferred.succeed(titleStarted, undefined).pipe(
++          Effect.andThen(Deferred.await(releaseTitle)),
++          Effect.as(Stream.fromIterable(TestLLM.text("Brief", "text-title"))),
++        )),
++        TestLLM.text("First response", "text-first"),
++        TestLLM.text("Second response", "text-second"),
++      )
++      const first = yield* s.resume.pipe(Effect.forkChild)
++      yield* Deferred.await(titleStarted).pipe(Effect.timeout("5 seconds"))
++      expect(s.requests[0]?.system.map((part) => part.text))
++        .toContain("Summarize: one word, max 5 chars, no spaces.")
++      const pending = yield* s.session.get(sessionID)
++      expect(pending.title).toBe(dateTitle(pending.time.created))
++      yield* Fiber.join(first)
++      yield* s.admit("Second prompt")
++      yield* s.resume
++      expect(s.requests).toHaveLength(3)
++      const renamed = yield* watchPseudonym
++      yield* Deferred.succeed(releaseTitle, undefined)
++      yield* Fiber.join(renamed)
++      expect((yield* s.session.get(sessionID)).title).toBe(`${dateTitle(pending.time.created)}-Brief`)
++    }).pipe(Effect.ensuring(Deferred.succeed(releaseTitle, undefined)))
++  })
++  scenario("retries title generation from the first prompt after title and execution failures", function* (s) {
++    yield* prepareTitleGeneration
++    yield* s.admit("First prompt")
++    yield* s.llm.push(Stream.fail(invalidRequest()), Stream.fail(invalidRequest()))
++    expect((yield* s.resume.pipe(Effect.exit))._tag).toBe("Failure")
++    yield* s.admit("Second prompt")
++    const titleFailed = yield* Deferred.make<void>()
++    yield* s.llm.push(
++      Stream.fail(providerRejected({ message: "Title provider unavailable" })).pipe(
++        Stream.ensuring(Deferred.succeed(titleFailed, undefined)),
++      ),
++      TestLLM.text("Recovered", "text-recovered"),
++    )
++    yield* s.resume
++    yield* Deferred.await(titleFailed)
++    yield* Effect.yieldNow
++    const pending = yield* s.session.get(sessionID)
++    expect(pending.title).toBe(dateTitle(pending.time.created))
++    const renamed = yield* watchPseudonym
++    yield* s.admit("Third prompt")
++    yield* s.llm.push(TestLLM.text("Brief", "text-title"), TestLLM.text("Recovered again", "text-recovered-again"))
++    yield* s.resume
++    yield* Fiber.join(renamed)
++    expect(s.requests).toHaveLength(6)
++    expect(JSON.stringify(s.requests[2]?.messages)).toContain("First prompt")
++    expect(JSON.stringify(s.requests[2]?.messages)).not.toContain("Second prompt")
++    expect(JSON.stringify(s.requests[4]?.messages)).toContain("First prompt")
++    expect(JSON.stringify(s.requests[4]?.messages)).not.toContain("Third prompt")
++    expect((yield* s.session.get(sessionID)).title).toBe(`${dateTitle(pending.time.created)}-Brief`)
++  })
++}
 diff --git a/packages/app/src/session/requests/permission-machine.node.test.mjs b/packages/app/src/session/requests/permission-machine.node.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c1a907103d28d3c39c566c9783b004a771ea5bf4
+index 0000000000000000000000000000000000000000..415857d118d89c15b3f8319b28782ba2587228eb
 --- /dev/null
 +++ b/packages/app/src/session/requests/permission-machine.node.test.mjs
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,43 @@
 +import { test } from "node:test"
 +import assert from "node:assert/strict"
 +import {
@@ -11012,11 +11821,25 @@ index 0000000000000000000000000000000000000000..c1a907103d28d3c39c566c9783b004a7
 +  assert.equal(isPermissionResponding(failed.state), false)
 +  assert.equal(failed.effects.find((effect) => effect.type === "toast-failed").error, error)
 +})
++
++test("resolution preserves ordinary idle, failed and terminal states while partial policies remain resolvable", () => {
++  assert.strictEqual(transitionPermissionReply(INITIAL_PERMISSION_REPLY_STATE, { type: "resolved" }).state,
++    INITIAL_PERMISSION_REPLY_STATE)
++  const started = transitionPermissionReply(INITIAL_PERMISSION_REPLY_STATE, {
++    type: "decide", sessionID: "ses_test", decision: "once",
++  }).state
++  const failed = transitionPermissionReply(started, {
++    type: "reply.failed", attempt: started.attempt, error: "retry explicitly",
++  }).state
++  assert.strictEqual(transitionPermissionReply(failed, { type: "resolved" }).state, failed)
++  const replied = transitionPermissionReply(started, { type: "reply.succeeded", attempt: started.attempt }).state
++  assert.strictEqual(transitionPermissionReply(replied, { type: "resolved" }).state, replied)
++})
 diff --git a/packages/app/src/session/requests/permission-machine.ts b/packages/app/src/session/requests/permission-machine.ts
-index 3a9726624067620cbd97fae948f20eccfce40726..5e5713d26b9b61952068005500c05664ea614038 100644
+index 3a9726624067620cbd97fae948f20eccfce40726..5b738363d4eebd45fc53f1f536fa012b9dc8de3f 100644
 --- a/packages/app/src/session/requests/permission-machine.ts
 +++ b/packages/app/src/session/requests/permission-machine.ts
-@@ -1,8 +1,11 @@
+@@ -1,14 +1,17 @@
 +import type { Permission } from "@opencode/schema/permission"
 +import { isPolicyReply } from "@opencode/schema/personalize/permission-policy"
 +
@@ -11029,16 +11852,26 @@ index 3a9726624067620cbd97fae948f20eccfce40726..5e5713d26b9b61952068005500c05664
  
  // One permission request's manual reply from the dock. `attempt` advances on each try, so a late failure or timeout
  // from an earlier click cannot move a newer one. `replied` is terminal: an answered request never re-enables or
-@@ -71,15 +74,21 @@ export function transitionPermissionReply(
+ // resurfaces before `permission.replied` removes it from the store.
+ export type PermissionReplyState =
+-  | { readonly status: "idle"; readonly attempt: number }
++  | { readonly status: "idle"; readonly attempt: number; readonly awaitingResolution?: true }
+   | {
+       readonly status: "responding"
+       readonly attempt: number
+@@ -71,15 +74,24 @@ export function transitionPermissionReply(
      }
    }
  
 -  if (state.status !== "responding") return unchanged(state)
--
-   if (event.type === "resolved") return { state: { status: "replied" }, effects: ABORT }
++  if (event.type === "resolved") {
++    if (state.status !== "responding" && !(state.status === "idle" && state.awaitingResolution)) return unchanged(state)
++    return { state: { status: "replied" }, effects: ABORT }
++  }
  
+-  if (event.type === "resolved") return { state: { status: "replied" }, effects: ABORT }
 +  if (state.status !== "responding") return unchanged(state)
-+
+ 
    if (event.type === "disposed") return { state: { status: "idle", attempt: state.attempt }, effects: ABORT }
  
    if (event.attempt !== state.attempt) return unchanged(state)
@@ -11047,7 +11880,7 @@ index 3a9726624067620cbd97fae948f20eccfce40726..5e5713d26b9b61952068005500c05664
 +  if (event.type === "reply.succeeded") {
 +    // A partial policy can succeed without answering the original request.
 +    if (isPolicyReply(state.decision)) {
-+      return { state: { status: "idle", attempt: state.attempt }, effects: ABORT }
++      return { state: { status: "idle", attempt: state.attempt, awaitingResolution: true }, effects: ABORT }
 +    }
 +    return { state: { status: "replied" }, effects: ABORT }
 +  }
@@ -11105,7 +11938,7 @@ index bb4ca07d4451ab2cda75aa2f7b00366acecaa18f..4adfe26e1671d374986f0a68aab22737
        }
      >
 diff --git a/packages/client/src/promise/generated/types.ts b/packages/client/src/promise/generated/types.ts
-index 42b4dc3f686dab955771ef9155cdc8d2e5586293..1d0583917fb8338c42be2ba25e4f28167e67d60c 100644
+index 38036e04db536d6dd8b7e1c7460c91ab932e32d2..42b3327a253c6816466e8e3f7a8f8b11547a93f5 100644
 --- a/packages/client/src/promise/generated/types.ts
 +++ b/packages/client/src/promise/generated/types.ts
 @@ -306,7 +306,34 @@ export type CommandInfo = { name: string; description?: string }
@@ -11152,7 +11985,7 @@ index 42b4dc3f686dab955771ef9155cdc8d2e5586293..1d0583917fb8338c42be2ba25e4f2816
            portable_shell_scanner?: boolean
            codemode_vm?: boolean
            all_flags?: boolean
-@@ -4509,8 +4537,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
+@@ -4511,8 +4539,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
  export type PermissionReplyInput = {
    readonly sessionID: string
    readonly requestID: string
@@ -11580,10 +12413,10 @@ index e5f2c590f3413b29f50eb0e6c6d7d7bcb8f0b33b..9632d7e5cf3b2e8626b782e7623d9305
                yield* Effect.forEach(
                  prepared,
 diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
-index 09871a72de3ec8252477ca44151aacfd6a7ed383..1746c3dc9c1a84c40ef7cee5c33038a51f897583 100644
+index ccccf26faf0ab0253265e4eabf719f028ead629e..c873f945a19159827db6ac27b7128a5299c7418f 100644
 --- a/packages/core/src/tool/plugin/shell.ts
 +++ b/packages/core/src/tool/plugin/shell.ts
-@@ -21,6 +21,7 @@ import { SessionMessage } from "../../session/message.js"
+@@ -22,6 +22,7 @@ import { SessionMessage } from "../../session/message.js"
  import { SessionSchema } from "../../session/schema.js"
  import { Shell } from "../../shell.js"
  import { ShellPermissions } from "../../shell/permissions.js"
@@ -11591,7 +12424,7 @@ index 09871a72de3ec8252477ca44151aacfd6a7ed383..1746c3dc9c1a84c40ef7cee5c33038a5
  import { ShellSelect } from "../../shell/select.js"
  import { ShellResult } from "../../shell/result.js"
  import { toolFailure } from "../runtime.js"
-@@ -351,11 +352,7 @@ export const Plugin = {
+@@ -352,11 +353,7 @@ export const Plugin = {
            return Permission.Policy.fromRules(agent?.permissions ?? [], session.permissions ?? [])
          }),
        })
@@ -12417,10 +13250,10 @@ index 3618f19e0f852e3f649118485bb8ab460650ae05..9c72f01e2686a3b3e2d08f892573b965
  }
  
 diff --git a/packages/core/src/bus.ts b/packages/core/src/bus.ts
-index 42247d2768cebab03cf9408c7acb3d19a9a4081d..9eccfdc1ba4b84742efb704d4509fc537b53efe6 100644
+index b2051517a87dae26ede1caef458fd71632dc0ebd..90b1a2589ace99606360e84b0527a4e60d71c4bf 100644
 --- a/packages/core/src/bus.ts
 +++ b/packages/core/src/bus.ts
-@@ -15,6 +15,10 @@ import { SessionEvent } from "@opencode/schema/session-event"
+@@ -16,6 +16,10 @@ import { SessionEvent } from "@opencode/schema/session-event"
  import { SessionLegacy } from "@opencode/schema/session-legacy"
  import type { SessionID } from "@opencode/schema/session-id"
  import { AbsolutePath } from "@opencode/schema/schema"
@@ -12431,15 +13264,15 @@ index 42247d2768cebab03cf9408c7acb3d19a9a4081d..9eccfdc1ba4b84742efb704d4509fc53
  
  export type Subscriber<D extends Event.Definition = Event.Definition> = (event: Event.Payload<D>) => Effect.Effect<void>
  export type Unsubscribe = Effect.Effect<void>
-@@ -435,6 +439,7 @@ export function configured(options?: Options) {
+@@ -449,6 +453,7 @@ export function configured(options?: Options) {
                    )
-                   .pipe(Effect.orDie)
+                   .pipe(Effect.catchIf(isSqlError, Effect.die))
                  if (committed) {
 +                  yield* acknowledgeCommit(event, committed.event)
                    committed.route()
                    yield* Effect.forEach(
                      pubsub.durable.get(committed.aggregateID) ?? [],
-@@ -892,6 +897,10 @@ export function configured(options?: Options) {
+@@ -915,6 +920,10 @@ export function configured(options?: Options) {
  
          return Service.of({
            publish,
@@ -12825,3 +13658,946 @@ index baf79443b8d6cd2ffa9ba7d8df41214eb1ba063f..e8458d4c82133f0aae83d8431e303c3a
        const access = yield* FileAccess.Service
        const fileMutation = yield* FileMutation.Service
        // The resolved target keeps the symlinked text; the typed path names the real directory.
+diff --git a/packages/core/test/tool-shell.test.ts b/packages/core/test/tool-shell.test.ts
+index ac6e806fc92ea292d30731cb116619e634c97dbb..a5bd4ca92d2a0db36424269aca420370b1c3441b 100644
+--- a/packages/core/test/tool-shell.test.ts
++++ b/packages/core/test/tool-shell.test.ts
+@@ -63,6 +63,9 @@ let denyAction: string | undefined
+ let afterPermission = (_input: Permission.AssertInput): Effect.Effect<void> => Effect.void
+ 
+ const permission = permissionLayer({
++  assertNotDenied: (input) => input.action === denyAction
++    ? Effect.fail(new Permission.BlockedError({ rules: [], permission: input.action, resources: input.resources }))
++    : Effect.void,
+   assert: (input) =>
+     Effect.sync(() => assertions.push(input)).pipe(
+       Effect.andThen(Effect.suspend(() => afterPermission(input))),
+@@ -349,572 +352,9 @@ const runPermissionCommand = (
+     return { exit, requests }
+   }).pipe(Effect.scoped, Effect.timeout(Duration.seconds(15)))
+ 
+-describe("ShellTool scanner permissions", () => {
+-  const test = isWindows || !Bun.which("sh") ? permissionIt.live.skip : permissionIt.live
+-
+-  test("declarations reuse approvals while substitutions retain reject/once/always behavior", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const saved = yield* PermissionSaved.Service
+-        const location = yield* Location.Service
+-        yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["printf *"] })
+-        const marker = path.join(fixture.active, "marker")
+-        const approved = yield* runPermissionCommand(
+-          registry,
+-          "export SCAN_TEST=hello; unset SCAN_TEST; printf hello > marker",
+-          marker,
+-          [],
+-        )
+-        expect(approved.requests).toEqual([])
+-        expect(approved.exit).toMatchObject({
+-          _tag: "Success",
+-          value: { status: "completed", metadata: { exit: 0 } },
+-        })
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-        expect((yield* saved.list()).map((item) => item.resource)).toEqual(["printf *"])
+-
+-        yield* Effect.forEach(yield* saved.list(), (item) => saved.remove(item.id))
+-        const command = 'export SCAN_TEST=$(printf hello); printf %s "$SCAN_TEST" > marker'
+-        const prompts: Permission.Request[] = []
+-        for (const reply of ["reject", "once", "always", undefined] as const) {
+-          yield* Effect.promise(() => fs.rm(marker, { force: true }))
+-          const result = yield* runPermissionCommand(registry, command, marker, reply ? [reply] : [])
+-          prompts.push(...result.requests)
+-          if (reply === "reject") {
+-            expect(Exit.isFailure(result.exit)).toBe(true)
+-            if (Exit.isFailure(result.exit))
+-              expect(
+-                result.exit.cause.reasons.some(
+-                  (reason) => Cause.isDieReason(reason) && reason.defect instanceof Permission.DeclinedError,
+-                ),
+-              ).toBe(true)
+-            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-            continue
+-          }
+-          expect(result.exit).toMatchObject({
+-            _tag: "Success",
+-            value: { status: "completed", metadata: { exit: 0 } },
+-          })
+-          expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-          if (reply === "once") expect(yield* saved.list()).toEqual([])
+-        }
+-        expect(prompts).toHaveLength(3)
+-        for (const request of prompts) {
+-          expect(request).toMatchObject({
+-            action: "shell",
+-            resources: ["printf hello", 'printf %s "$SCAN_TEST" > marker'],
+-            save: ["printf *", "printf *"],
+-          })
+-        }
+-        expect((yield* saved.list()).map((item) => item.resource)).toEqual(["printf *"])
+-
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [{ action: "shell", resource: "printf hello", effect: "deny" }]
+-          }),
+-        )
+-        yield* Effect.promise(() => fs.rm(marker))
+-        const denied = yield* runPermissionCommand(registry, command, marker, [])
+-        expect(denied.exit).toMatchObject({
+-          _tag: "Success",
+-          value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
+-        })
+-        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-      }),
+-    ))
+-
+-  test("unanalyzable commands run under allow-all rules", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
+-          }),
+-        )
+-        const marker = path.join(fixture.active, "marker")
+-        const result = yield* runPermissionCommand(registry, "alias p=true; printf hello > marker", marker, [])
+-        expect(result.requests).toEqual([])
+-        expect(result.exit).toMatchObject({ _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } })
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-      }),
+-    ))
+-
+-  test("unanalyzable commands are denied when a shell deny rule could be bypassed", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [
+-              { action: "*", resource: "*", effect: "allow" },
+-              { action: "shell", resource: "rm *", effect: "deny" },
+-            ]
+-          }),
+-        )
+-        const marker = path.join(fixture.active, "marker")
+-        const result = yield* runPermissionCommand(registry, "alias p=true; printf hello > marker", marker, [])
+-        expect(result.requests).toEqual([])
+-        expect(result.exit).toMatchObject({
+-          _tag: "Success",
+-          value: {
+-            status: "error",
+-            error: {
+-              message: expect.stringContaining(
+-                "Portable shell scanner cannot analyze command: dynamic-execution. A shell deny rule is configured",
+-              ),
+-            },
+-          },
+-        })
+-        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-      }),
+-    ))
+-
+-  test("unanalyzable commands ask for the exact command and any directory without saving", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const saved = yield* PermissionSaved.Service
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [
+-              { action: "shell", resource: "alias *", effect: "allow" },
+-              { action: "external_directory", resource: path.join(fixture.outside, "*"), effect: "allow" },
+-            ]
+-          }),
+-        )
+-        const marker = path.join(fixture.active, "marker")
+-        const command = "alias p=true; printf hello > marker"
+-        const approved = yield* runPermissionCommand(registry, command, marker, ["always"])
+-
+-        expect(approved.requests).toMatchObject([{ action: "external_directory", resources: ["*"] }])
+-        expect(approved.exit).toMatchObject({ _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } })
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [{ action: "external_directory", resource: "*", effect: "allow" }]
+-          }),
+-        )
+-        yield* Effect.promise(() => fs.rm(marker))
+-        const asked = yield* runPermissionCommand(registry, command, marker, ["always"])
+-        expect(asked.requests).toMatchObject([
+-          { action: "shell", resources: [command], metadata: { reason: "dynamic-execution" } },
+-        ])
+-        expect(asked.requests.map((request) => request.save)).toEqual([undefined])
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-        expect(yield* saved.list()).toEqual([])
+-
+-        yield* Effect.promise(() => fs.rm(marker))
+-        const repeat = yield* runPermissionCommand(registry, command, marker, ["reject"])
+-        expect(repeat.requests).toHaveLength(1)
+-        expect(Exit.isFailure(repeat.exit)).toBe(true)
+-        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-      }),
+-    ))
+-
+-  test("pipeline redirect keeps the redirect target visible to exact approval and denial", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const saved = yield* PermissionSaved.Service
+-        const location = yield* Location.Service
+-        yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["printf hello", "cat"] })
+-        const marker = path.join(fixture.active, "marker")
+-        const command = "printf hello | cat > marker"
+-        const unapprovedRedirect = yield* runPermissionCommand(registry, command, marker, ["reject"])
+-        expect(unapprovedRedirect.requests).toMatchObject([
+-          { action: "shell", resources: ["printf hello", "cat > marker"], save: ["printf *", "cat *"] },
+-        ])
+-        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-
+-        yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["cat > marker"] })
+-        const exact = yield* runPermissionCommand(registry, command, marker, [])
+-        expect(exact.requests).toEqual([])
+-        expect(exact.exit).toMatchObject({ _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } })
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-
+-        yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["printf *", "cat *"] })
+-        yield* Effect.promise(() => fs.rm(marker))
+-        const broad = yield* runPermissionCommand(registry, command, marker, [])
+-        expect(broad.requests).toEqual([])
+-        expect(broad.exit).toMatchObject({ _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } })
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello")
+-
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [{ action: "shell", resource: "* > marker", effect: "deny" }]
+-          }),
+-        )
+-        yield* Effect.promise(() => fs.rm(marker))
+-        const denied = yield* runPermissionCommand(registry, command, marker, [])
+-        expect(denied.requests).toEqual([])
+-        expect(denied.exit).toMatchObject({
+-          _tag: "Success",
+-          value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
+-        })
+-        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-      }),
+-    ))
+-
+-  test("external-directory rejection stops execution before a workspace marker is written", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [{ action: "shell", resource: "*", effect: "allow" }]
+-          }),
+-        )
+-        const marker = path.join(fixture.active, "marker")
+-        const command = `cd '${fixture.outside}' && pwd -P && printf reached > '${marker}'`
+-        for (const reply of ["reject", "once"] as const) {
+-          const result = yield* runPermissionCommand(registry, command, marker, [reply])
+-          expect(result.requests).toMatchObject([
+-            { action: "external_directory", resources: [path.join(fixture.outside, "*")] },
+-          ])
+-          if (reply === "reject") {
+-            expect(Exit.isFailure(result.exit)).toBe(true)
+-            if (Exit.isFailure(result.exit))
+-              expect(
+-                result.exit.cause.reasons.some(
+-                  (reason) => Cause.isDieReason(reason) && reason.defect instanceof Permission.DeclinedError,
+-                ),
+-              ).toBe(true)
+-            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-            continue
+-          }
+-          expect(result.exit).toMatchObject({
+-            _tag: "Success",
+-            value: {
+-              status: "completed",
+-              metadata: { exit: 0 },
+-              content: [{ type: "text", text: `${fixture.outside}\n` }],
+-            },
+-          })
+-          expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
+-        }
+-      }),
+-    ))
+-
+-  test("a numeric symlink operand still reaches outside without an external-directory prompt", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        yield* Effect.promise(() => fs.symlink(fixture.outside, path.join(fixture.active, "123")))
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [
+-              { action: "shell", resource: "*", effect: "allow" },
+-              { action: "external_directory", resource: "*", effect: "deny" },
+-            ]
+-          }),
+-        )
+-        const marker = path.join(fixture.active, "marker")
+-        const result = yield* runPermissionCommand(
+-          registry,
+-          `cd 123 && pwd -P && printf reached > '${marker}'`,
+-          marker,
+-          [],
+-        )
+-        expect(result.requests).toEqual([])
+-        expect(result.exit).toMatchObject({
+-          _tag: "Success",
+-          value: {
+-            status: "completed",
+-            metadata: { exit: 0 },
+-            content: [{ type: "text", text: `${fixture.outside}\n` }],
+-          },
+-        })
+-        expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
+-      }),
+-    ))
+-
+-  test("a continued directory operand resolves to the destination and enforces external-directory deny", () =>
+-    withScanner((registry, fixture) =>
+-      Effect.gen(function* () {
+-        const agents = yield* Agent.Service
+-        yield* agents.transform((editor) =>
+-          editor.update(toolIdentity.agent, (agent) => {
+-            agent.permissions = [
+-              { action: "shell", resource: "*", effect: "allow" },
+-              { action: "external_directory", resource: path.join(fixture.outside, "*"), effect: "deny" },
+-            ]
+-          }),
+-        )
+-        const marker = path.join(fixture.active, "marker")
+-        const command = `cd ../out\\\nside && pwd -P && printf reached > '${marker}'`
+-        const denied = yield* runPermissionCommand(registry, command, marker, [])
+-        expect(denied.requests).toEqual([])
+-        expect(denied.exit).toMatchObject({
+-          _tag: "Success",
+-          value: {
+-            status: "error",
+-            error: { message: expect.stringContaining("Permission denied: external_directory") },
+-          },
+-        })
+-        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-      }),
+-    ))
+-})
+-
+-describe("ShellTool conditional process substitution", () => {
+-  const test = isWindows || !Bun.which("bash") ? permissionIt.live.skip : permissionIt.live
+-  test("a nested deny prevents the substitution from running", () =>
+-    withScanner(
+-      (registry, directory) =>
+-        Effect.gen(function* () {
+-          const agents = yield* Agent.Service
+-          yield* agents.transform((editor) =>
+-            editor.update(toolIdentity.agent, (agent) => {
+-              agent.permissions = [
+-                { action: "shell", resource: "*", effect: "allow" },
+-                { action: "shell", resource: "printf *", effect: "deny" },
+-              ]
+-            }),
+-          )
+-          const marker = path.join(directory.active, "marker")
+-          const result = yield* runPermissionCommand(
+-            registry,
+-            '[[ -n <(printf reached > marker) ]]; wait "$!"',
+-            marker,
+-            [],
+-          )
+-          expect(result.exit).toMatchObject({
+-            _tag: "Success",
+-            value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
+-          })
+-          expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-        }),
+-      "bash",
+-    ))
+-
+-  for (const reply of ["reject", "always"] as const) {
+-    test(`conditional substitutions respect ${reply}`, () =>
+-      withScanner(
+-        (registry, directory) =>
+-          Effect.gen(function* () {
+-            const saved = yield* PermissionSaved.Service
+-            const location = yield* Location.Service
+-            yield* saved.add({ projectID: location.project.id, action: "shell", resources: ["wait *"] })
+-            const marker = path.join(directory.active, "marker")
+-            const command = '[[ -n <(printf reached > marker) ]]; wait "$!"'
+-            const result = yield* runPermissionCommand(registry, command, marker, [reply])
+-            expect(result.requests).toMatchObject([
+-              { action: "shell", resources: ["printf reached > marker", 'wait "$!"'], save: ["printf *", "wait *"] },
+-            ])
+-            if (reply === "reject") {
+-              expect(Exit.isFailure(result.exit)).toBe(true)
+-              expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-              return
+-            }
+-            expect(result.exit).toMatchObject({
+-              _tag: "Success",
+-              value: { status: "completed", metadata: { exit: 0 } },
+-            })
+-            expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
+-            yield* Effect.promise(() => fs.unlink(marker))
+-            const repeat = yield* runPermissionCommand(registry, command, marker, reply === "always" ? [] : ["reject"])
+-            expect(repeat.requests).toHaveLength(reply === "always" ? 0 : 1)
+-            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(reply === "always")
+-          }),
+-        "bash",
+-      ))
+-  }
+-})
+-
+-describe("ShellTool compound syntax approval compatibility", () => {
+-  for (const fixture of [
+-    {
+-      shell: "zsh",
+-      command: 'for value ($(printf a)) do printf %s "$value"; done',
+-      output: "a",
+-      saved: ["printf *"],
+-    },
+-    {
+-      shell: "bash",
+-      command: 'printf %s "$(probe() case value in (value) printf hello;; esac; probe)"',
+-      output: "hello",
+-      saved: ["printf *", "probe *"],
+-    },
+-  ]) {
+-    const test = isWindows || !Bun.which(fixture.shell) ? permissionIt.live.skip : permissionIt.live
+-    test(`${fixture.shell}: ${fixture.command}`, () =>
+-      withScanner(
+-        (registry, directory) =>
+-          Effect.gen(function* () {
+-            const saved = yield* PermissionSaved.Service
+-            const location = yield* Location.Service
+-            yield* saved.add({ projectID: location.project.id, action: "shell", resources: fixture.saved })
+-            const result = yield* runPermissionCommand(
+-              registry,
+-              fixture.command,
+-              path.join(directory.active, "marker"),
+-              [],
+-            )
+-            expect(result.requests).toEqual([])
+-            expect(result.exit).toMatchObject({
+-              _tag: "Success",
+-              value: {
+-                status: "completed",
+-                metadata: { exit: 0 },
+-                content: [{ type: "text", text: fixture.output }],
+-              },
+-            })
+-          }),
+-        fixture.shell,
+-      ))
+-  }
+-})
+-
+-describe("ShellTool ordinary shell syntax", () => {
+-  for (const shell of ["bash", "zsh"]) {
+-    const test = isWindows || !Bun.which(shell) ? permissionIt.live.skip : permissionIt.live
+-    for (const fixture of [
+-      {
+-        name: "heredoc substitution",
+-        command: "cat <<EOF\n$(printf hello)\nEOF",
+-        output: "hello\n",
+-        saved: ["cat *", "printf *"],
+-      },
+-      {
+-        name: "function and case",
+-        command: 'greet() { case "$1" in a) printf hello;; *) printf other;; esac; }; greet a',
+-        output: "hello",
+-        saved: ["greet *", "printf *"],
+-      },
+-      {
+-        name: "arithmetic statement",
+-        command: 'count=1; ((count += 1)); printf %s "$count"',
+-        output: "2",
+-        saved: ["((count += 1)) *", "printf *"],
+-      },
+-    ]) {
+-      test(`${shell}: ${fixture.name} reuses existing approvals`, () =>
+-        withScanner(
+-          (registry, directory) =>
+-            Effect.gen(function* () {
+-              const saved = yield* PermissionSaved.Service
+-              const location = yield* Location.Service
+-              yield* saved.add({ projectID: location.project.id, action: "shell", resources: fixture.saved })
+-              const result = yield* runPermissionCommand(
+-                registry,
+-                fixture.command,
+-                path.join(directory.active, "marker"),
+-                [],
+-              )
+-              expect(result.requests).toEqual([])
+-              expect(result.exit).toMatchObject({
+-                _tag: "Success",
+-                value: {
+-                  status: "completed",
+-                  metadata: { exit: 0 },
+-                  content: [{ type: "text", text: fixture.output }],
+-                },
+-              })
+-            }),
+-          shell,
+-        ))
+-    }
+-
+-    test(`${shell}: a loop body deny prevents execution`, () =>
+-      withScanner(
+-        (registry, directory) =>
+-          Effect.gen(function* () {
+-            const agents = yield* Agent.Service
+-            yield* agents.transform((editor) =>
+-              editor.update(toolIdentity.agent, (agent) => {
+-                agent.permissions = [
+-                  { action: "shell", resource: "*", effect: "allow" },
+-                  { action: "shell", resource: "printf *", effect: "deny" },
+-                ]
+-              }),
+-            )
+-            const marker = path.join(directory.active, "marker")
+-            const result = yield* runPermissionCommand(
+-              registry,
+-              "for value in a; do printf body > marker; done",
+-              marker,
+-              [],
+-            )
+-            expect(result.exit).toMatchObject({
+-              _tag: "Success",
+-              value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
+-            })
+-            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+-          }),
+-        shell,
+-      ))
+-  }
+-
+-  const pwsh = process.env.SHELL_SCAN_PWSH ?? Bun.which("pwsh") ?? Bun.which("powershell")
+-  const test = pwsh ? permissionIt.live : permissionIt.live.skip
+-  for (const command of [
+-    'Write-Output "$(Write-Output hello)"',
+-    "function Show-Value { Write-Output hello }; Show-Value",
+-    "Write-Output @'\nhello\n'@",
+-  ]) {
+-    test(`PowerShell: ordinary syntax reuses approvals: ${command}`, () =>
+-      withScanner(
+-        (registry, directory) =>
+-          Effect.gen(function* () {
+-            const saved = yield* PermissionSaved.Service
+-            const location = yield* Location.Service
+-            yield* saved.add({
+-              projectID: location.project.id,
+-              action: "shell",
+-              resources: ["Write-Output *", "Show-Value *"],
+-            })
+-            const result = yield* runPermissionCommand(registry, command, path.join(directory.active, "marker"), [])
+-            expect(result.requests).toEqual([])
+-            expect(result.exit).toMatchObject({
+-              _tag: "Success",
+-              value: { status: "completed", metadata: { exit: 0 } },
+-            })
+-            if (Exit.isSuccess(result.exit))
+-              expect(result.exit.value.content?.[0]).toEqual(Expected.text(isWindows ? "hello\r\n" : "hello\n"))
+-          }),
+-        pwsh ?? "pwsh",
+-      ))
+-  }
+-
+-  for (const [command, pattern] of [
+-    ["Write-Output\thello", "Write-Output\t*"],
+-    ["& 'Write-Output' hello", "& 'Write-Output' *"],
+-    ["Write-Output `\n  hello", "Write-Output *"],
+-  ]) {
+-    test(`PowerShell: always allow covers repeat execution and preserves exact deny: ${command}`, () =>
+-      withScanner(
+-        (registry, directory) =>
+-          Effect.gen(function* () {
+-            const marker = path.join(directory.active, "marker")
+-            const first = yield* runPermissionCommand(registry, command, marker, ["always"])
+-            expect(first.requests).toMatchObject([{ action: "shell", resources: [command], save: [pattern] }])
+-            expect(first.exit).toMatchObject({ _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } })
+-            const repeat = yield* runPermissionCommand(registry, command, marker, [])
+-            expect(repeat.requests).toEqual([])
+-            expect(repeat.exit).toMatchObject({
+-              _tag: "Success",
+-              value: { status: "completed", metadata: { exit: 0 } },
+-            })
+-
+-            const agents = yield* Agent.Service
+-            yield* agents.transform((editor) =>
+-              editor.update(toolIdentity.agent, (agent) => {
+-                agent.permissions = [{ action: "shell", resource: command, effect: "deny" }]
+-              }),
+-            )
+-            const denied = yield* runPermissionCommand(registry, command, marker, [])
+-            expect(denied.exit).toMatchObject({
+-              _tag: "Success",
+-              value: { status: "error", error: { message: expect.stringContaining("Permission denied: shell") } },
+-            })
+-          }),
+-        pwsh ?? "pwsh",
+-      ))
+-  }
+-})
++export { permissionIt, withScanner, runPermissionCommand, isWindows }
++import { shellRunnerScenarios } from "./personalize/shell-runner-fixture"
++shellRunnerScenarios({ permissionIt, withScanner, runPermissionCommand, isWindows })
+ 
+ describe("ShellTool", () => {
+   it.live(
+@@ -1371,10 +811,8 @@ describe("ShellTool", () => {
+               status: "error",
+               error: { message: expect.stringContaining("Permission denied: shell") },
+             })
+-            expect(assertions).toMatchObject([
+-              { action: "external_directory", resources: ["*"], save: undefined },
+-              { action: "shell", resources: [command], save: undefined, metadata: { reason: "unterminated-quote" } },
+-            ])
++            // The deny-only precheck rejects before any approval is requested.
++            expect(assertions).toEqual([])
+             expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "marker")).exists())).toBe(false)
+           }).pipe(
+             Effect.provide(
+diff --git a/packages/core/test/mcp.test.ts b/packages/core/test/mcp.test.ts
+index de8b57bea4e83f6ba9114363ae1112920f480ca5..bc2108bd7d2494ee25b3cae8c20e191cc8e94a4e 100644
+--- a/packages/core/test/mcp.test.ts
++++ b/packages/core/test/mcp.test.ts
+@@ -1622,7 +1622,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
+         action: "opencode_read_mcp_resource",
+         resources: ["resources:docs://readme"],
+         save: ["resources:*"],
+-        metadata: { server: "resources", uri: "docs://readme" },
++        metadata: { server: "resources", uri: "docs://readme", filesystemEffects: "unknown" },
+         sessionID,
+         agent: toolIdentity.agent,
+         // The call's own ID. The real service shows the request on the execute call's row.
+@@ -2889,7 +2889,7 @@ it.effect("waits for permission before calling an MCP tool", () =>
+       action: "demo_search",
+       resources: ["*"],
+       save: ["*"],
+-      metadata: { input: { query: "open issues" } },
++      metadata: { input: { query: "open issues" }, filesystemEffects: "unknown" },
+       sessionID: Session.ID.make("ses_mcp_permission"),
+       agent: toolIdentity.agent,
+       source: {
+diff --git a/packages/core/test/automation.test.ts b/packages/core/test/automation.test.ts
+index b44f325443fa2c21b19ec016880f307d31c89fa1..69408d4fa0f4759804ee1d6120752d2ddfe169d3 100644
+--- a/packages/core/test/automation.test.ts
++++ b/packages/core/test/automation.test.ts
+@@ -191,6 +191,7 @@ const locations = makeGlobalNode({
+     Effect.gen(function* () {
+       const app = yield* App.Service
+       const bus = yield* Bus.Service
++      const permissionDatabase = yield* Database.Service
+       const store = yield* SessionStore.Service
+       const saved = yield* PermissionSaved.Service
+       const projects = yield* Project.Service
+@@ -234,6 +235,7 @@ const locations = makeGlobalNode({
+                     replacements: [
+                       App.node.replace(Layer.succeed(App.Service, app)),
+                       Bus.node.replace(Layer.succeed(Bus.Service, bus)),
++                      Database.node.replace(Layer.succeed(Database.Service, permissionDatabase)),
+                       Config.node.replace(
+                         ref.directory === enabledDirectory || ref.directory === missingDirectory
+                           ? enabled
+@@ -259,7 +261,7 @@ const locations = makeGlobalNode({
+       )
+     }),
+   ),
+-  deps: [App.node, Bus.node, SessionStore.node, PermissionSaved.node, Project.node],
++  deps: [App.node, Bus.node, Database.node, SessionStore.node, PermissionSaved.node, Project.node],
+ })
+ const it = testEffect(
+   AppNodeBuilder.build(
+diff --git a/packages/core/test/shell-restart.test.ts b/packages/core/test/shell-restart.test.ts
+index edc22f48ba233a66244ddcb1a48a14c19c4b9a0f..99f68ebfb68cb5d23b5b690eb2e71bdcfa4c4c6d 100644
+--- a/packages/core/test/shell-restart.test.ts
++++ b/packages/core/test/shell-restart.test.ts
+@@ -89,7 +89,7 @@ const world = Effect.gen(function* () {
+           LayerNodePlatform.llmClient.replace(Layer.succeedContext(Context.pick(LLMClient.Service)(llm))),
+           PersistentPty.node.replace(PersistentPty.configured(daemon.options)),
+           Environment.node.replace(recordingEnvironmentLayer(spawns)),
+-          Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
++          Permission.node.replace(permissionLayer({ assert: () => Effect.void, assertNotDenied: () => Effect.void })),
+           Watcher.node.replace(Watcher.configured({ enabled: false })),
+           offlineModels,
+           model,
+diff --git a/packages/core/test/session-cwd.test.ts b/packages/core/test/session-cwd.test.ts
+index 205e8a5915c67cbba44c3f58e879ff6895bd16c0..06f098459d879f026521d7dbcc91af0694bbb955 100644
+--- a/packages/core/test/session-cwd.test.ts
++++ b/packages/core/test/session-cwd.test.ts
+@@ -246,6 +246,7 @@ const graph = (fixture: Fixture, realPermissions = false) =>
+             Permission.node.replace(
+               permissionLayer({
+                 assert: (input) => Effect.sync(() => void fixture.assertions.push(input)),
++                assertNotDenied: () => Effect.void,
+               }),
+             ),
+           ]),
+diff --git a/packages/cli/test/acp/subprocess.ts b/packages/cli/test/acp/subprocess.ts
+index c1c0735f57e4bf3058aada981c2b994d40060e3c..cc684bb573260ad4899f261f5792f57b9baed14c 100644
+--- a/packages/cli/test/acp/subprocess.ts
++++ b/packages/cli/test/acp/subprocess.ts
+@@ -38,6 +38,7 @@ type AcpProcess = {
+   readonly exited: Promise<number>
+   readonly request: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<JsonRpcResponse<T>>
+   readonly waitForMessage: (predicate: Waiter["predicate"], description: string) => Promise<JsonRpcMessage>
++  readonly respond: (id: number, result: unknown) => Promise<void>
+   readonly close: () => Promise<number>
+   readonly stderr: () => string
+   readonly [Symbol.asyncDispose]: () => Promise<void>
+@@ -296,7 +297,7 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }):
+     })
+   }
+ 
+-  const write = async (message: JsonRpcRequest) => {
++  const write = async (message: JsonRpcRequest | JsonRpcResponse<unknown>) => {
+     if (inputClosed) throw new Error("ACP stdin is closed")
+     await child.stdin.write(encoder.encode(`${JSON.stringify(message)}\n`))
+     await child.stdin.flush()
+@@ -322,6 +323,7 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }):
+     exited: child.exited,
+     request,
+     waitForMessage: (predicate, description) => take(predicate, 10_000, description),
++    respond: (id, result) => write({ jsonrpc: "2.0", id, result }),
+     async close() {
+       if (!inputClosed) {
+         inputClosed = true
+diff --git a/packages/cli/test/acp/background-turn.subprocess.test.ts b/packages/cli/test/acp/background-turn.subprocess.test.ts
+index e09ef9bb286bb9db445daf42c86d8b12af92cf5e..b765aa335a280208e35021d449fa25ef7d550508 100644
+--- a/packages/cli/test/acp/background-turn.subprocess.test.ts
++++ b/packages/cli/test/acp/background-turn.subprocess.test.ts
+@@ -37,8 +37,29 @@ test("streams turns woken by background shells and keeps the session usable", as
+   const acp = fixture.spawn()
+   await initialize(acp)
+   const { sessionId } = await newSession(acp, fixture.home)
+-  const prompt = (text: string) =>
+-    acp.request<PromptResponse>("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).then(expectOk)
++  const prompt = async (text: string) => {
++    const response = acp.request<PromptResponse>("session/prompt", {
++      sessionId, prompt: [{ type: "text", text }],
++    }).then(expectOk)
++    // v12 deliberately asks even when stock shell rules allow unknown effects.
++    // Exercise the actual client response instead of bypassing that approval.
++    if (text === "run the slow shell" || text === "run the fast shell") {
++      const request = await acp.waitForMessage(
++        (message) => message.method === "session/request_permission",
++        "the explicit unknown-shell approval",
++      )
++      expect(typeof request.id).toBe("number")
++      expect(request.params).toMatchObject({
++        sessionId,
++        toolCall: { rawInput: { command: text === "run the slow shell" ? releasedCommand : fastCommand } },
++        options: expect.arrayContaining([expect.objectContaining({ optionId: "once", kind: "allow_once" })]),
++      })
++      await acp.respond(request.id as number, {
++        outcome: { outcome: "selected", optionId: "once" },
++      })
++    }
++    return await response
++  }
+   const update = (description: string, match: (update: Record<string, unknown>) => boolean) =>
+     acp
+       .waitForMessage(
+diff --git a/packages/core/test/subagent-idle-e2e.test.ts b/packages/core/test/subagent-idle-e2e.test.ts
+index ee73226c7fd7c749f397ef8cb2fb466631eacc55..8f35df16a72fd61f93404c545a86907e40999304 100644
+--- a/packages/core/test/subagent-idle-e2e.test.ts
++++ b/packages/core/test/subagent-idle-e2e.test.ts
+@@ -58,6 +58,22 @@ const pluginSupervisor = makeLocationNode({
+   layer: Layer.effectDiscard(
+     Effect.gen(function* () {
+       const hooks = yield* PluginHooks.Service
++      const bus = yield* Bus.Service
++      const permission = yield* Permission.Service
++      // A scripted client grants only the two shell calls used by these report
++      // fixtures. Allow-all agent rules are not unknown-effect consent in v12.
++      yield* bus.subscribe(Permission.Event.Asked).pipe(
++        Stream.runForEach((event) => Effect.gen(function* () {
++          const request = event.data
++          expect(request.action).toBe("shell")
++          expect(request.metadata?.filesystemEffects).toBe("unknown")
++          expect(["call-shell", "call-grandchild-shell"]).toContain(request.source?.id)
++          expect(request.metadata?.unknownCommand).toContain("release")
++          expect(request.metadata?.unknownCommand).toContain("done")
++          yield* permission.reply({ requestID: request.id, reply: "once" })
++        })),
++        Effect.forkScoped({ startImmediately: true }),
++      )
+       yield* registerToolPlugin(SubagentTool.Plugin, {}, (name, callback) => hooks.register("tool", name, callback))
+       yield* registerToolPlugin(ShellTool.Plugin)
+     }),
+diff --git a/packages/sdk/test/embedded.test.ts b/packages/sdk/test/embedded.test.ts
+index 774d04d6089319b7b935509606a0e204bef7233e..f64cff83f08705f3d2d33f484898150b7ba722a5 100644
+--- a/packages/sdk/test/embedded.test.ts
++++ b/packages/sdk/test/embedded.test.ts
+@@ -663,6 +663,18 @@ it.live(
+         expect(calls).toEqual([])
+ 
+         yield* opencode.sessions.prompt({ sessionID: session.id, text: "Run echo" })
++        const requests = yield* loaded("unknown-shell approval",
++          opencode.permission.list({ sessionID: session.id }), (items) => items.length > 0)
++        expect(requests).toMatchObject([{
++          action: "shell",
++          metadata: { filesystemEffects: "unknown", unknownCommand: "echo hi" },
++        }])
++        // Authorization precedes the execution-plane demand. Grant through the
++        // SDK, then retain the original lazy-provisioning and blocking checks.
++        expect(calls).toEqual([])
++        yield* opencode.permission.reply({
++          sessionID: session.id, requestID: requests[0]!.id, decision: "once",
++        })
+         // The model-selected shell tool is the first execution-plane demand: it alone
+         // starts provisioning and blocks inside the tool call until the provider is ready.
+         yield* Deferred.await(createStarted).pipe(
+diff --git a/packages/core/test/automation-shell.test.ts b/packages/core/test/automation-shell.test.ts
+index e3efb3a15f9bec8a0e665f8bd5d4502615a38ce0..77d8ac71c3a8a620eb51447b1fa67c7972b40fc1 100644
+--- a/packages/core/test/automation-shell.test.ts
++++ b/packages/core/test/automation-shell.test.ts
+@@ -15,6 +15,7 @@ import { SessionExecution } from "@opencode/core/session/execution"
+ import { SessionMessage } from "@opencode/core/session/message"
+ import { SessionInboxTable } from "@opencode/core/session/sql"
+ import { AbsolutePath } from "@opencode/schema/schema"
++import { ShellSelect } from "@opencode/core/shell/select"
+ import { Tool } from "@opencode/schema/tool"
+ import { LayerNode } from "@opencode/util/effect/layer-node"
+ import { eq } from "drizzle-orm"
+@@ -275,6 +276,26 @@ it.live("scheduled code uses session capabilities after one-time approval", () =
+     }).pipe(instances.provide(session))
+     // An unexpected extra request would keep creation waiting for approval.
+     const created = yield* Fiber.join(creating).pipe(Effect.timeout("10 seconds"))
++    yield* Effect.gen(function* () {
++      const permission = yield* Permission.Service
++      const shell = yield* (yield* ShellSelect.Service).resolve({ priority: "compat" })
++      const input = {
++        sessionID: session.id, action: "shell", resources: ["echo automation-output"],
++        metadata: {
++          filesystemEffects: "unknown", unknownCommand: "echo automation-output",
++          unknownCwd: directory, unknownShell: shell,
++        },
++      }
++      const unattended = [{ action: "*", resource: "*", effect: "allow" }] as const
++      // Broad unattended capability approval is not exact unknown-shell consent.
++      expect(yield* permission.allows(input).pipe(Effect.provideService(Permission.Unattended, unattended))).toBe(false)
++      const request = yield* permission.ask(input)
++      expect(request.effect).toBe("ask")
++      yield* permission.reply({
++        requestID: request.id, reply: { scope: "session", policy: "Unknown=S" },
++      })
++      expect(yield* permission.allows(input).pipe(Effect.provideService(Permission.Unattended, unattended))).toBe(true)
++    }).pipe(instances.provide(session))
+     // Run now instead of waiting for the one-hour interval.
+     const database = yield* Database.Service
+     yield* database.db
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+index cb86d5b96f791dcf5757924b9b566a018dbdaa43..140deca2fbc43ddf29e0f0ebd5bbadc56614f087 100644
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1037,102 +1037,10 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
+   )
+ })
+ 
++export { scenario, prepareTitleGeneration, sessionID, invalidRequest, providerRejected }
++import { titleRunnerScenarios } from "./personalize/title-runner-fixture"
+ describe("SessionRunnerLLM", () => {
+-  scenario("generates the title while the first model step is still running", function* (s) {
+-    yield* prepareTitleGeneration
+-
+-    yield* s.admit("First prompt")
+-    yield* s.llm.push(TestLLM.text("Generated title", "text-title"), Stream.never)
+-    const renamed = yield* watchRename(sessionID)
+-    const runner = yield* SessionRunner.Service
+-    const fiber = yield* runner.drain({ sessionID, force: true }).pipe(Effect.forkChild)
+-    yield* Fiber.join(renamed)
+-
+-    expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
+-    yield* Fiber.interrupt(fiber)
+-  })
+-
+-  scenario("does not automatically replace an existing session title", function* (s) {
+-    yield* prepareTitleGeneration
+-    yield* s.session.rename({ sessionID, title: "Manual title" })
+-    yield* s.admit("Follow-up prompt")
+-    yield* s.llm.push(TestLLM.text("Assistant response", "text-response"))
+-
+-    yield* s.resume
+-
+-    expect(s.requests).toHaveLength(1)
+-    expect((yield* s.session.get(sessionID)).title).toBe("Manual title")
+-  })
+-
+-  scenario("coalesces title generation while a request is active", function* (s) {
+-    yield* prepareTitleGeneration
+-
+-    const titleStarted = yield* Deferred.make<void>()
+-    const releaseTitle = yield* Deferred.make<void>()
+-    yield* Effect.gen(function* () {
+-      yield* s.admit("First prompt")
+-      yield* s.llm.push(
+-        Stream.unwrap(
+-          Deferred.succeed(titleStarted, undefined).pipe(
+-            Effect.andThen(Deferred.await(releaseTitle)),
+-            Effect.as(Stream.fromIterable(TestLLM.text("Generated title", "text-title"))),
+-          ),
+-        ),
+-        TestLLM.text("First response", "text-first"),
+-        TestLLM.text("Second response", "text-second"),
+-      )
+-
+-      const first = yield* s.resume.pipe(Effect.forkChild)
+-      yield* Deferred.await(titleStarted).pipe(Effect.timeout("5 seconds"))
+-      expect(s.requests[0]?.system.map((part) => part.text)).toContain("Generate a title.")
+-      yield* Fiber.join(first)
+-      yield* s.admit("Second prompt")
+-      yield* s.resume
+-
+-      expect(s.requests).toHaveLength(3)
+-      const renamed = yield* watchRename(sessionID)
+-      yield* Deferred.succeed(releaseTitle, undefined)
+-      yield* Fiber.join(renamed)
+-      expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
+-    }).pipe(Effect.ensuring(Deferred.succeed(releaseTitle, undefined)))
+-  })
+-
+-  scenario("retries title generation from the first prompt after title and execution failures", function* (s) {
+-    yield* prepareTitleGeneration
+-
+-    yield* s.admit("First prompt")
+-    yield* s.llm.push(Stream.fail(invalidRequest()), Stream.fail(invalidRequest()))
+-    expect((yield* s.resume.pipe(Effect.exit))._tag).toBe("Failure")
+-
+-    yield* s.admit("Second prompt")
+-    const titleFailed = yield* Deferred.make<void>()
+-    yield* s.llm.push(
+-      Stream.fail(providerRejected({ message: "Title provider unavailable" })).pipe(
+-        Stream.ensuring(Deferred.succeed(titleFailed, undefined)),
+-      ),
+-      TestLLM.text("Recovered", "text-recovered"),
+-    )
+-    yield* s.resume
+-    yield* Deferred.await(titleFailed)
+-    yield* Effect.yieldNow
+-    expect((yield* s.session.get(sessionID)).title).toBeUndefined()
+-
+-    const renamed = yield* watchRename(sessionID)
+-    yield* s.admit("Third prompt")
+-    yield* s.llm.push(
+-      TestLLM.text("Generated title", "text-title"),
+-      TestLLM.text("Recovered again", "text-recovered-again"),
+-    )
+-    yield* s.resume
+-    yield* Fiber.join(renamed)
+-
+-    expect(s.requests).toHaveLength(6)
+-    expect(JSON.stringify(s.requests[2]?.messages)).toContain("First prompt")
+-    expect(JSON.stringify(s.requests[2]?.messages)).not.toContain("Second prompt")
+-    expect(JSON.stringify(s.requests[4]?.messages)).toContain("First prompt")
+-    expect(JSON.stringify(s.requests[4]?.messages)).not.toContain("Third prompt")
+-    expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
+-  })
++  titleRunnerScenarios({ scenario, prepareTitleGeneration, sessionID, invalidRequest, providerRejected })
+ 
+   scenario("advertises and executes a location registered tool", function* (s) {
+     const registry = yield* Tool.Service
