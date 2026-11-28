@@ -1,0 +1,268 @@
+diff --git a/.personalize/X.json b/.personalize/X.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1de0148b2d79d74e7a69f6e788f4a3a52d45fe5
+--- /dev/null
++++ b/.personalize/X.json
+@@ -0,0 +1,8 @@
++{
++  "modules": [
++    { "target": "packages/tui/src/config/keybind.ts", "factory": "packages/tui/src/personalize/keybind.ts", "exports": ["Definitions", "Descriptions", "KeybindOverrides", "parse", "unknownKeys"] },
++    { "target": "packages/tui/src/context/theme.tsx", "factory": "packages/tui/src/personalize/theme.ts", "exports": ["useThemes", "useTheme"] },
++    { "target": "packages/tui/src/plugin/builtins.ts", "factory": "packages/tui/src/personalize/keymap.ts", "exports": ["builtins"] },
++    { "target": "packages/tui/src/ui/dialog-select.tsx", "factory": "packages/tui/src/personalize/dialog-select.ts", "exports": ["DialogSelect"] }
++  ]
++}
+diff --git a/packages/tui/src/personalize/dialog-select.ts b/packages/tui/src/personalize/dialog-select.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..99a68c2714f5e69f6c94cd5c2ecbd27487c873bb
+--- /dev/null
++++ b/packages/tui/src/personalize/dialog-select.ts
+@@ -0,0 +1,23 @@
++import { InputRenderable, type KeyBinding } from "@opentui/core"
++import { extend } from "@opentui/solid"
++import { createComponent, createContext, useContext } from "solid-js"
++
++const Filter = createContext(false)
++class FilterInput extends InputRenderable {
++  constructor(...[renderer, options]: ConstructorParameters<typeof InputRenderable>) {
++    super(renderer, useContext(Filter) ? { ...options, keyBindings: [
++      ...(options.keyBindings ?? []),
++      { name: "a", ctrl: true, action: "opencode:pass-through" },
++    ] as unknown as KeyBinding[] } : options)
++  }
++}
++// Public Solid extension API; non-dialog input behavior is left byte-identical.
++extend({ input: FilterInput })
++
++export function decorate(stock: typeof import("../ui/dialog-select")) {
++  const DialogSelect: typeof stock.DialogSelect = (props) => createComponent(Filter.Provider, {
++    value: true,
++    get children() { return createComponent(stock.DialogSelect, props) },
++  })
++  return { DialogSelect }
++}
+diff --git a/packages/tui/src/personalize/keybind.ts b/packages/tui/src/personalize/keybind.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..06fb194f15bc64f5941c16e51e993b213d86267b
+--- /dev/null
++++ b/packages/tui/src/personalize/keybind.ts
+@@ -0,0 +1,21 @@
++import { Schema } from "effect"
++
++export function decorate(stock: typeof import("../config/keybind")) {
++  // Definitions are an explicitly exported data table, not an ESM binding rewrite.
++  // The original parse/defaultValue functions keep reading this same table.
++  Object.assign(stock.Definitions, { "theme.transparent": {
++    default: "alt+t", description: "Toggle transparency",
++  } })
++  Object.assign(stock.Definitions["model.dialog.provider"], { default: "alt+p,ctrl+a" })
++  Object.assign(stock.Descriptions, { "theme.transparent": "Toggle transparency" })
++  const unknownKeys: typeof stock.unknownKeys = (value) => stock.unknownKeys(value).filter((name) => name !== "theme.transparent")
++  const KeybindOverrides = Schema.Struct({ ...stock.KeybindOverrides.fields,
++    "theme.transparent": Schema.optional(stock.BindingValueSchema).annotate({ description: "Toggle transparency" }),
++  })
++  const decode = Schema.decodeUnknownSync(stock.BindingValueSchema)
++  const parse: typeof stock.parse = (input) => {
++    const { ["theme.transparent"]: toggle, ...rest } = input as typeof input & { "theme.transparent"?: unknown }
++    return { ...stock.parse(rest), "theme.transparent": decode(toggle ?? "alt+t") }
++  }
++  return { Definitions: stock.Definitions, Descriptions: stock.Descriptions, KeybindOverrides, parse, unknownKeys }
++}
+diff --git a/packages/tui/src/personalize/keymap.ts b/packages/tui/src/personalize/keymap.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a0ac1e84653985b10981d75ffac95718f6ce882
+--- /dev/null
++++ b/packages/tui/src/personalize/keymap.ts
+@@ -0,0 +1,22 @@
++import { Plugin } from "@opencode/plugin/tui"
++import { useThemes } from "../context/theme"
++import { registerTransparency } from "./transparency-registration"
++export { registerTransparency } from "./transparency-registration"
++
++const plugin = Plugin.define({
++  id: "opencode.personalize.transparency",
++  setup(context) {
++    context.ui.slot({
++      append: "app",
++      render() {
++        const theme = useThemes() as ReturnType<typeof useThemes> & { toggleTransparent: () => void }
++        registerTransparency(context, () => theme.toggleTransparent())
++        return null
++      },
++    })
++  },
++})
++
++export function decorate(stock: typeof import("../plugin/builtins")) {
++  return { builtins: [...stock.builtins, plugin] }
++}
+diff --git a/packages/tui/src/personalize/theme.ts b/packages/tui/src/personalize/theme.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a495820f7e553d4e815f0e65b70fd59c98394cd6
+--- /dev/null
++++ b/packages/tui/src/personalize/theme.ts
+@@ -0,0 +1,60 @@
++import { RGBA } from "@opentui/core"
++import { useRenderer } from "@opentui/solid"
++import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
++import { createComponentTheme } from "../theme/component"
++import { useStorageOptional } from "../context/storage"
++
++type Themes = ReturnType<typeof import("../context/theme").useThemes>
++const facades = new WeakMap<Themes, ReturnType<typeof facade>>()
++const NONE = RGBA.fromInts(0, 0, 0, 0)
++
++function facade(source: Themes) {
++  const renderer = useRenderer()
++  const storage = useStorageOptional()?.store<{ on?: boolean }>("theme-transparent", { initial: {} })
++  const [transparent, setTransparent] = createSignal(storage?.[0].on === true)
++  const tokens = createMemo(() => transparent()
++    ? { ...source.currentTokens(), background: { ...source.currentTokens().background, base: NONE } }
++    : source.currentTokens())
++  createEffect(() => renderer.setBackgroundColor(tokens().background.base))
++  return { ...source, currentTokens: tokens, current: createComponentTheme(tokens), transparent,
++    toggleTransparent() {
++      const next = !transparent()
++      setTransparent(next)
++      void storage?.[1]((draft) => { draft.on = next }).catch(() => {})
++    },
++  }
++}
++
++export function decorate(stock: typeof import("../context/theme")) {
++  const useThemes = () => {
++    const source = stock.useThemes()
++    const existing = facades.get(source)
++    if (existing) return existing
++    const value = facade(source)
++    facades.set(source, value)
++    onCleanup(() => facades.delete(source))
++    return value
++  }
++  const useTheme: typeof stock.useTheme = () => {
++    const theme = stock.useTheme()
++    const source = stock.useThemes()
++    const facade = useThemes()
++    // Color references can be shared by backgrounds, selection text and hues.
++    // Only background tokens may become transparent; never erase a foreground.
++    const caches = [new WeakMap<object, object>(), new WeakMap<object, object>()]
++    const view = <T extends object>(value: T, background = false): T => {
++      const cache = caches[background ? 1 : 0]!
++      const existing = cache.get(value)
++      if (existing) return existing as T
++      const wrapped = new Proxy(value, { get(target, key, receiver) {
++        const item = Reflect.get(target, key, receiver)
++        if (item instanceof RGBA) return background && facade.transparent() && item === source.currentTokens().background.base ? NONE : item
++        return item && typeof item === "object" ? view(item, background || key === "background") : item
++      } })
++      cache.set(value, wrapped)
++      return wrapped
++    }
++    return view(theme)
++  }
++  return { useThemes, useTheme }
++}
+diff --git a/packages/tui/test/personalize-transparency-plugin.test.tsx b/packages/tui/test/personalize-transparency-plugin.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..2131f7ce72c005b8e58759f41ae37ca3a8c5674a
+--- /dev/null
++++ b/packages/tui/test/personalize-transparency-plugin.test.tsx
+@@ -0,0 +1,77 @@
++import { InputRenderable } from "@opentui/core"
++import { expect, test } from "bun:test"
++import { takeDraft } from "../src/component/prompt/draft-stash"
++import { ConfigProvider, useConfig } from "../src/config"
++import { ThemeProvider, useThemes } from "../src/context/theme"
++import { TuiKeybind } from "../src/config/keybind"
++import { decorate } from "../src/personalize/keybind"
++import { createAppFixture } from "./fixture/app"
++import { tmpdir } from "./fixture/fixture"
++
++test("transparency command uses native plugin keyboard/palette registration and unloads", async () => {
++  takeDraft(undefined)
++  const providerDefault = TuiKeybind.Definitions["model.dialog.provider"].default
++  // Apply the separate, still-counted keybind data customization. The stock
++  // keymap implementation and plugin host are not replaced.
++  decorate(TuiKeybind)
++  try {
++    await using plugin = await tmpdir()
++    const registration = new URL("../src/personalize/transparency-registration.ts", import.meta.url).href
++    await Bun.write(`${plugin.path}/tui.ts`, `
++      import { registerTransparency } from ${JSON.stringify(registration)}
++      export default {
++        id: "fixture.transparency",
++        setup(context) {
++          let count = 0
++          registerTransparency(context, () => context.ui.toast.show({
++            message: "Transparency toggled " + ++count, variant: "info", duration: 60000,
++          }))
++          context.ui.toast.show({ message: "Transparency ready", variant: "info" })
++        },
++      }
++    `)
++    await using setup = await createAppFixture({ config: { animations: false, plugins: [plugin.path] } })
++    await setup.ready
++    await setup.waitForFrame((frame) => frame.includes("Transparency ready"))
++    // Loading this fixture must not evict host contexts. Previously its local
++    // dependency graph included keymap -> theme -> config, splitting providers
++    // from consumers in every subsequently loaded test file.
++    const config = await import("../src/config")
++    const theme = await import("../src/context/theme")
++    expect(config.ConfigProvider).toBe(ConfigProvider)
++    expect(config.useConfig).toBe(useConfig)
++    expect(theme.ThemeProvider).toBe(ThemeProvider)
++    expect(theme.useThemes).toBe(useThemes)
++    setup.mockInput.pressKey("t", { meta: true })
++    await setup.waitForFrame((frame) => frame.includes("Transparency toggled 1"))
++
++    const search = async () => {
++      setup.mockInput.pressKey("p", { ctrl: true })
++      await setup.waitForFrame((frame) => frame.includes("Commands"))
++      await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof InputRenderable)
++      await setup.mockInput.typeText("Toggle transparency")
++    }
++    await search()
++    await setup.waitForFrame((frame) => frame.includes("Toggle transparency"))
++    setup.mockInput.pressEnter()
++    await setup.waitForFrame((frame) => frame.includes("Transparency toggled 2"))
++
++    await setup.mockInput.typeText("/plugins")
++    setup.mockInput.pressEnter()
++    await setup.waitForFrame((frame) => frame.includes("fixture.transparency"))
++    await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof InputRenderable)
++    await setup.mockInput.typeText("fixture.transparency")
++    await setup.waitForFrame((frame) => frame.includes("disable"))
++    setup.mockInput.pressEnter()
++    await setup.waitForFrame((frame) => frame.includes("inactive"))
++    setup.mockInput.pressEscape()
++    setup.mockInput.pressKey("t", { meta: true })
++    await search()
++    await setup.waitForFrame((frame) => frame.includes("No results found"))
++    expect(setup.captureCharFrame()).not.toContain("Transparency toggled 3")
++  } finally {
++    Reflect.deleteProperty(TuiKeybind.Definitions, "theme.transparent")
++    Reflect.deleteProperty(TuiKeybind.Descriptions, "theme.transparent")
++    TuiKeybind.Definitions["model.dialog.provider"].default = providerDefault
++  }
++}, 30000)
+diff --git a/packages/tui/src/personalize/transparency-registration.ts b/packages/tui/src/personalize/transparency-registration.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..076ae0b60d0ccef60129fa4fea0bec178ba32627
+--- /dev/null
++++ b/packages/tui/src/personalize/transparency-registration.ts
+@@ -0,0 +1,15 @@
++import type { Plugin } from "@opencode/plugin/tui"
++
++// Keep this helper independent of host UI state. A reloadable external plugin
++// may import it without pulling providers into the plugin's invalidation graph.
++export function registerTransparency(context: Plugin.Context, toggle: () => void) {
++  context.keymap.layer(() => ({
++    mode: "global",
++    commands: [{
++      id: "theme.transparent", title: "Toggle transparency", group: "System", palette: true, run: toggle,
++    }],
++    // Use the configured binding, including "none"; no inline fallback may
++    // reactivate a key the user disabled.
++    bindings: ["theme.transparent"],
++  }))
++}

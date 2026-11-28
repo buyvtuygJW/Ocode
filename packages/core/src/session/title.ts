@@ -17,28 +17,21 @@ import type { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionUsage } from "./usage.js"
 import { SessionStore } from "./store.js"
+import { dateTitle, createTitleRenamer } from "../personalize/session-naming.js"
+import { prepareTitle } from "../personalize/title-request.js"
 
-const MAX_LENGTH = 100
-const MAX_CONTEXT_LENGTH = 8_000
-const MAX_FIRST_MESSAGE_LENGTH = 2_000
 // The title moved on while the model was naming it; the newer title wins.
 class TitleChanged extends Data.TaggedError("SessionTitle.TitleChanged") {}
 
 export interface Interface {
-  /** Generates an initial title or regenerates one from bounded conversation history. */
+  /** Generates or regenerates a dated title from the bounded first user message. */
   readonly generate: (sessionID: SessionSchema.ID) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
 
-const truncate = (value: string) =>
-  value.length <= MAX_LENGTH ? value : `${TextBoundary.head(value, MAX_LENGTH - 3)}...`
-// Framing the input as text to name keeps models from answering or carrying out the request instead.
-const messagePrompt = (text: string) =>
-  `Here is the first message of the conversation:\n\n<message>\n${text}\n</message>\n\nReply with only the title.`
-const conversationPrompt = (text: string) =>
-  `Here is the conversation so far:\n\n<conversation>\n${text}\n</conversation>\n\nReply with only the title.`
 export const isUntitled = (session: SessionSchema.Info) =>
+  session.title === dateTitle(session.time.created) ||
   isExactRootFallback({
     title: session.title,
     time: { created: DateTime.toEpochMillis(session.time.created) },
@@ -72,7 +65,7 @@ export const layer = Layer.effect(
             })
           : Effect.void,
       )
-      const prepared = yield* context.request.title({
+      const prepared = yield* prepareTitle(context, {
         session: input.session,
         agent: input.agent.id,
         model: input.model,
@@ -115,54 +108,32 @@ export const layer = Layer.effect(
     })
 
     const generate = Effect.fn("SessionTitle.generate")(function* (sessionID: SessionSchema.ID) {
-      const session = yield* store.get(sessionID)
+      const rename = createTitleRenamer({ bus, store, db, conflict: () => new TitleChanged() })
+      let session = yield* store.get(sessionID)
       if (!session) return
+      // Persist the date before model selection, streaming, or any early return.
+      // A failure must not leave the UI's plain "New session" fallback behind.
+      if (isUntitled(session)) {
+        const title = dateTitle(session.time.created)
+        const renamed = yield* rename(session, title)
+        if (!renamed) return
+        session = { ...session, title }
+      }
       const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
       if (!firstUser) return
-      const text = !isUntitled(session)
-        ? yield* store.context(session.id).pipe(
-            Effect.map((messages) => {
-              const original = `Original request:\n${TextBoundary.head(firstUser.text, MAX_FIRST_MESSAGE_LENGTH)}`
-              const recent = messages
-                .flatMap((message) => {
-                  if (message.type === "user" && message.id !== firstUser.id) return [`User: ${message.text.trim()}`]
-                  if (message.type !== "assistant") return []
-                  const text = message.content
-                    .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []))
-                    .filter(Boolean)
-                    .join("\n")
-                  return text ? [`Assistant: ${text}`] : []
-                })
-                .join("\n\n")
-              if (!recent) return conversationPrompt(original)
-              const prefix = `${original}\n\nRecent conversation:\n`
-              const budget = MAX_CONTEXT_LENGTH - conversationPrompt("").length - prefix.length
-              return conversationPrompt(`${prefix}${TextBoundary.tail(recent, budget)}`)
-            }),
-            Effect.orElseSucceed(() => messagePrompt(firstUser.text)),
-          )
-        : messagePrompt(firstUser.text)
+      const text = TextBoundary.head(firstUser.text, 1_000)
       const selection = yield* context.selectTitle(session)
       if (!selection) return
-      const title =
+      const generated =
         (yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
         (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
           ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
           : undefined)
-      if (!title) return
-      const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
-      const current = yield* store.get(sessionID)
-      if (!current || current.title !== session.title || current.title === truncate(title)) return
-      yield* bus
-        .publish(
-          SessionEvent.Renamed,
-          {
-            sessionID: session.id,
-            title: truncate(title),
-          },
-          { commit: (sequence) => (sequence === expectedSequence ? Effect.void : Effect.fail(new TitleChanged())) },
-        )
-        .pipe(Effect.catchTag("SessionTitle.TitleChanged", () => Effect.void))
+      if (!generated) return
+      const stamp = dateTitle(session.time.created)
+      const pseudonym = /^[\p{L}\p{N}]{1,5}$/u.test(generated) ? generated : ""
+      const title = pseudonym ? `${stamp}-${pseudonym}` : stamp
+      yield* rename(session, title)
     })
     return Service.of({ generate })
   }),
