@@ -4548,10 +4548,10 @@ index 0000000000000000000000000000000000000000..be571dad220619ee911a0b9c726bd4b8
 +})
 diff --git a/.personalize/permission-contract.test.mjs b/.personalize/permission-contract.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e71232edff42e070f230defd3a05c1097388236
+index 0000000000000000000000000000000000000000..7894f22a5c23c5b57919c2a02a3ae8c4b1250261
 --- /dev/null
 +++ b/.personalize/permission-contract.test.mjs
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,580 @@
 +import assert from "node:assert/strict"
 +import { readFileSync, existsSync } from "node:fs"
 +import { stripTypeScriptTypes } from "node:module"
@@ -4762,12 +4762,16 @@ index 0000000000000000000000000000000000000000..6e71232edff42e070f230defd3a05c10
 +  assert.deepEqual(policy.policyDirectories(value), ["D:/data"])
 +})
 +
-+test("unknown shell choices are exactly Allow one / CRUD policy / Deny", () => {
++test("unknown shell choices and editor describe command approval", () => {
 +  const value = unknown()
 +  assert.deepEqual(policy.choices(value), ["once", "policy", "reject"])
-+  assert.deepEqual(policy.choices(value).map((choice) => policy.choiceLabel(choice, true, () => "wrong")),
-+    ["Allow one", "CRUD policy", "Deny"])
-+  assert.match(policy.policyHint(true), /may bypass filesystem denies/)
++  assert.deepEqual(policy.choices(value).map((choice) => policy.choiceLabel(choice, true, (option) => option)),
++    ["once", "Custom…", "Deny"])
++  assert.equal(policy.policyEditor(value).title, "Unknown command policy")
++  assert.equal(policy.policyEditor(value).placeholder, "Unknown=1")
++  const script = executableRequest("$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'\ndotnet run")
++  assert.deepEqual(policy.choices(script), ["once", "Unknown=S", "policy", "reject"])
++  assert.equal(policy.policyEditor(script).placeholder, "Unknown=1 / Unknown=S")
 +})
 +
 +test("one-shot and exact session unknown policies share one parser and reject wildcards", () => {
@@ -4821,8 +4825,9 @@ index 0000000000000000000000000000000000000000..6e71232edff42e070f230defd3a05c10
 +    directory: "D:/private", operation: "delete", effect: "deny", lifetime: "session", scope: "selected", recursive: true,
 +  }
 +  assert.notEqual(engine.unknownExecutableKey(first, [deny], "executable-all"), key)
-+  assert.match(policy.policyHint(true, first), /any arguments/)
-+  assert.ok(policy.policyHint(true, first).includes("z:\\PortableGit\\cmd\\git.exe"))
++  assert.match(policy.policyEditor(first).hint, /any arguments/)
++  assert.ok(policy.policyEditor(first).hint.includes("z:\\PortableGit\\cmd\\git.exe"))
++  assert.equal(policy.policyEditor(first).placeholder, "Unknown=1 / Unknown=S / Unknown=SE / Unknown=SEA")
 +})
 +
 +test("reserved unknown records are validated and explicit denial wins", () => {
@@ -4952,6 +4957,7 @@ index 0000000000000000000000000000000000000000..6e71232edff42e070f230defd3a05c10
 +  assert.equal(engine.unknownExecutableKey(requestFor(compact), []), undefined)
 +  assert.match(policy.policyError("Unknown=SE", true, requestFor(script)), /literal name or path/)
 +  assert.equal(policy.policyError("Unknown=SEA", true, requestFor(script)), undefined)
++  assert.equal(policy.policyEditor(requestFor(script)).placeholder, "Unknown=1 / Unknown=S / Unknown=SEA")
 +  for (const changed of [
 +    script + "\nSet-Content log data", script.replace("ReadToEnd()", "ReadToEnd() > out"),
 +    script.replace("$e.Open()", "$other.Open()"), script.replace("OpenRead(", "OpenWrite("),
@@ -5312,14 +5318,14 @@ index 0000000000000000000000000000000000000000..c5d9e93ad78c6b38584e188b1fe0baac
 +})
 diff --git a/packages/app/src/session/requests/permission-controls.tsx b/packages/app/src/session/requests/permission-controls.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..f1b3bfa07b21c84c9aec1c95c09c14dd99e8377d
+index 0000000000000000000000000000000000000000..fff55995d26489b58b4f1367903af750130afced
 --- /dev/null
 +++ b/packages/app/src/session/requests/permission-controls.tsx
-@@ -0,0 +1,80 @@
-+import { For, Show, createEffect } from "solid-js"
+@@ -0,0 +1,89 @@
++import { For, Show, createEffect, createMemo } from "solid-js"
 +import { createStore } from "solid-js/store"
 +import type { PermissionDecision, PresenterRequest } from "@opencode/schema/personalize/permission-controller"
-+import { choices, choiceLabel, policyDirectories, policyError, policyHint, policyText, unknownShell } from "@opencode/schema/personalize/permission-policy"
++import { choices, choiceLabel, isCommandScope, policyDirectories, policyEditor, policyError, unknownPolicyTitle, unknownShell, type Choice } from "@opencode/schema/personalize/permission-policy"
 +import { Button } from "@opencode/ui/button"
 +import { useLanguage } from "@/runtime/i18n/language"
 +
@@ -5342,8 +5348,9 @@ index 0000000000000000000000000000000000000000..f1b3bfa07b21c84c9aec1c95c09c14dd
 +    setPolicy({ text: "", error: "", show: false })
 +  })
 +  const unknown = () => unknownShell(props.request)
++  const editor = createMemo(() => policyEditor(props.request))
 +  const options = () => choices(props.request)
-+  const label = (choice: "once" | "always" | "reject" | "session_read" | "policy") =>
++  const label = (choice: Choice) =>
 +    choiceLabel(choice, unknown(), (stock) => {
 +      if (stock === "once") return language.t("ui.permission.allowOnce")
 +      if (stock === "always") return language.t("ui.permission.allowAlways")
@@ -5358,24 +5365,32 @@ index 0000000000000000000000000000000000000000..f1b3bfa07b21c84c9aec1c95c09c14dd
 +
 +  return (
 +    <div class="flex flex-col gap-2 w-full">
-+      <Show when={unknown()}><span>Unknown effects may bypass filesystem denies.</span></Show>
++      <Show when={unknown()}><span>{unknownPolicyTitle} · Unknown effects may bypass filesystem denies.</span></Show>
 +      <Show when={options().includes("policy") && policy.show}>
 +        <label data-slot="permission-policy">
-+          <span>{policyText.label}</span>
++          <span>{editor().title}</span>
 +          <For each={policyDirectories(props.request)}>{(directory) => <code>{directory}</code>}</For>
 +          <input
 +            value={policy.text}
-+            placeholder={unknown() ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
++            placeholder={editor().placeholder}
 +            disabled={props.responding}
 +            onInput={(event) => setPolicy("text", event.currentTarget.value)}
 +            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyPolicy() } }}
 +          />
-+          <span>{policyHint(unknown(), props.request)}</span>
++          <span>{editor().hint}</span>
 +          <Show when={policy.error}><span role="alert">{policy.error}</span></Show>
 +        </label>
-+        <Button variant="neutral" disabled={props.responding} onClick={applyPolicy}>{policyText.apply}</Button>
++        <Button variant="neutral" disabled={props.responding} onClick={applyPolicy}>{editor().apply}</Button>
 +      </Show>
-+      <div data-slot="permission-footer-actions">
++      <div data-slot="permission-footer-actions" onKeyDown={(event) => {
++        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
++        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"))
++        const index = buttons.findIndex((button) => button.contains(event.target))
++        if (index < 0) return
++        event.preventDefault()
++        const offset = event.key === "ArrowRight" ? 1 : -1
++        buttons[(index + offset + buttons.length) % buttons.length]?.focus()
++      }}>
 +        <For each={options()}>
 +          {(choice) => (
 +            <Button
@@ -5385,7 +5400,7 @@ index 0000000000000000000000000000000000000000..f1b3bfa07b21c84c9aec1c95c09c14dd
 +              onClick={() => {
 +                if (props.responding) return
 +                if (choice === "policy") setPolicy("show", !policy.show)
-+                else props.onDecide(choice)
++                else props.onDecide(isCommandScope(choice) ? { scope: "session", policy: choice } : choice)
 +              }}
 +            >
 +              {label(choice)}
@@ -8820,10 +8835,10 @@ index 0000000000000000000000000000000000000000..076266e09fd340fa03974217f693d4c8
 +}
 diff --git a/packages/schema/src/personalize/permission-policy.ts b/packages/schema/src/personalize/permission-policy.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb302f887c837b2cbba920208177387d9453837b
+index 0000000000000000000000000000000000000000..b3be82d46e32b793511cfac17ff94d897f24b312
 --- /dev/null
 +++ b/packages/schema/src/personalize/permission-policy.ts
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,242 @@
 +import { parsePermissionShorthand, type FilesystemDecision } from "../permission-shorthand.js"
 +import { executableInvocations, singleExecutableScope } from "./single-executable.js"
 +import { zipEntryRead } from "./zip-entry-read.js"
@@ -8982,16 +8997,30 @@ index 0000000000000000000000000000000000000000..bb302f887c837b2cbba920208177387d
 +    ].includes(reply))
 +}
 +
-+export type Choice = "once" | "session_read" | "policy" | "always" | "reject"
-+export const policyText = {
-+  label: "Conversation filesystem policy",
++export type CommandScope = "Unknown=S" | "Unknown=SE" | "Unknown=SEA"
++export type Choice = "once" | "session_read" | "policy" | "always" | "reject" | CommandScope
++export const unknownPolicyTitle = "Unknown command policy"
++export function isCommandScope(choice: string): choice is CommandScope {
++  return choice === "Unknown=S" || choice === "Unknown=SE" || choice === "Unknown=SEA"
++}
++function commandScopes(request: RequestLike): CommandScope[] {
++  const metadata = request.metadata
++  if (metadata?.filesystemEffects !== "unknown" || typeof metadata.unknownCommand !== "string" ||
++    typeof metadata.unknownCwd !== "string" || typeof metadata.unknownShell !== "string") return []
++  const scopes: CommandScope[] = ["Unknown=S"]
++  if (unknownExecutableScope(request)) scopes.push("Unknown=SE")
++  if (unknownExecutable(request) || unknownZipRead(request)) scopes.push("Unknown=SEA")
++  return scopes
++}
++const filesystemEditor = {
++  title: "Session CRUD policy",
 +  placeholder: "RU=S* CD=D*",
-+  unknownPlaceholder: "Unknown=1 / Unknown=S / Unknown=SE / Unknown=SEA",
 +  apply: "Apply filesystem policy",
++  hint: "RU=S* CD=D* · selected subtree + descendants · survives restart · =1 once · =S session · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged.",
 +} as const
 +
 +export function choices(request: RequestLike): readonly Choice[] {
-+  if (unknownShell(request)) return ["once", "policy", "reject"]
++  if (unknownShell(request)) return ["once", ...commandScopes(request), "policy", "reject"]
 +  const facts = readFacts(request)
 +  const policy = facts !== undefined && (!!facts.directories?.length || request.action === "external_directory")
 +  return [
@@ -9004,9 +9033,10 @@ index 0000000000000000000000000000000000000000..bb302f887c837b2cbba920208177387d
 +}
 +
 +export function choiceLabel(choice: Choice, unknown: boolean, stock: (choice: "once" | "always" | "reject") => string): string {
++  if (choice === "Unknown=S") return "Allow exact"
++  if (isCommandScope(choice)) return `Allow (${choice.slice("Unknown=".length)})`
 +  if (unknown) {
-+    if (choice === "once") return "Allow one"
-+    if (choice === "policy") return "CRUD policy"
++    if (choice === "policy") return "Custom…"
 +    if (choice === "reject") return "Deny"
 +  }
 +  if (choice === "session_read") return "only read recursive"
@@ -9034,13 +9064,22 @@ index 0000000000000000000000000000000000000000..bb302f887c837b2cbba920208177387d
 +  return { directory: metadata.unknownCwd, machine: metadata.unknownMachine as string | undefined }
 +}
 +
-+export function policyHint(unknown: boolean, request?: RequestLike): string {
-+  const zip = unknown && request && unknownZipRead(request)
-+  if (zip) return `Unknown=SEA remembers this ZIP entry read for the conversation. Archive paths and entry names may change; file-read and external-directory permissions still apply to each archive.`
-+  const executable = request && unknownExecutable(request)
-+  return unknown
-+    ? `RU=S* CD=D* edits the displayed directory's CRUD policy; shell execution still needs separate approval. Unknown=1 once · S exact command/session · SE fixed literal arguments · SEA any arguments including scalar variables and same-command && chains${executable ? ` (${executable})` : ""} · names resolve in the shell · Unknown has no * · executable/code/child processes may bypass filesystem denies.`
-+    : "RU=S* CD=D* · selected subtree + descendants · survives restart · =1 once · =S session · =D deny · * recursive · R=-S parent listing only. Omitted operations unchanged."
++export function policyEditor(request: RequestLike) {
++  if (!unknownShell(request)) return filesystemEditor
++  const scopes = commandScopes(request)
++  const modes = ["Unknown=1", ...scopes]
++  const hints = ["Unknown=1: allow once."]
++  if (scopes.includes("Unknown=S")) hints.push("Unknown=S: allow this exact command in this session.")
++  const executable = unknownExecutable(request)
++  if (scopes.includes("Unknown=SEA") && executable) {
++    if (scopes.includes("Unknown=SE")) {
++      hints.push(`Unknown=SE: allow ${executable} with the same argument structure.`)
++    }
++    hints.push(`Unknown=SEA: allow ${executable} with any arguments, including same-command && chains.`)
++  } else if (scopes.includes("Unknown=SEA")) {
++    hints.push("Unknown=SEA: reuse this ZIP entry read. File permissions apply to each archive.")
++  }
++  return { title: unknownPolicyTitle, apply: "Apply command policy", placeholder: modes.join(" / "), hint: hints.join(" ") }
 +}
 diff --git a/packages/schema/src/personalize/single-executable.ts b/packages/schema/src/personalize/single-executable.ts
 new file mode 100644
@@ -9308,16 +9347,16 @@ index 0000000000000000000000000000000000000000..963785423c1a2b8533400b56d6ff78b2
 +)
 diff --git a/packages/tui/src/personalize/mini-permission-controls.tsx b/packages/tui/src/personalize/mini-permission-controls.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..d5ee5ca2f7412fde49c19dd43ed6905d25dda1d8
+index 0000000000000000000000000000000000000000..70b280d1fd7fb812d89a61e044ba96bea52bbebc
 --- /dev/null
 +++ b/packages/tui/src/personalize/mini-permission-controls.tsx
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,208 @@
 +/** @jsxImportSource @opentui/solid */
 +import { TextAttributes, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 +import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import { createPermissionController } from "@opencode/schema/personalize/permission-controller"
-+import { policyDirectories, policyHint, policyText, readFacts, unknownShell } from "@opencode/schema/personalize/permission-policy"
++import { policyDirectories, policyEditor, readFacts, unknownPolicyTitle, unknownShell } from "@opencode/schema/personalize/permission-policy"
 +import { createPermissionBodyState, permissionCancel, permissionEscape, permissionHover, permissionLabel,
 +  permissionOptions, permissionReject, permissionRun, permissionShift, type PermissionOption, type PermissionReply } from "./mini-permission"
 +import type { MiniPermissionRequest } from "../mini/types"
@@ -9352,20 +9391,15 @@ index 0000000000000000000000000000000000000000..d5ee5ca2f7412fde49c19dd43ed6905d
 +  onCleanup(() => controller.dispose())
 +  const stage = createMemo(() => state().stage)
 +  const unknown = () => unknownShell(props.request)
++  const editor = createMemo(() => policyEditor(props.request))
 +  const busy = () => state().submitting
-+  const opts = createMemo(() => {
-+    props.request.id
-+    props.request.sessionID
-+    state().requestID
-+    state().sessionID
-+    return stage() === "permission" ? [...controller.choices()] : permissionOptions(stage())
-+  })
++  const opts = createMemo(() => permissionOptions(stage(), props.request))
 +  const label = (option: PermissionOption) => permissionLabel(option, unknown())
 +  const controlsWidth = () => opts().reduce((sum, option) => sum + stringWidth(label(option)) + 3, -1)
 +  const hint = () => compact() && width() < 56 ? "pgup/pgdn scroll"
 +    : `${props.mono ? "left/right" : "⇆"} select  enter confirm  esc ${stage() === "always" ? "cancel" : "reject"}`
 +  const inline = () => controlsWidth() + stringWidth(hint()) + 1 <= width() - (compact() ? 0 : 5)
-+  const title = () => stage() === "policy" ? "Session CRUD policy" : stage() === "always" ? "Always allow"
++  const title = () => stage() === "policy" ? editor().title : stage() === "always" ? "Always allow"
 +    : stage() === "reject" ? (width() < 24 ? "Reject" : "Reject permission")
 +    : width() < 24 ? "Permission" : "Permission required"
 +  createEffect(() => {
@@ -9442,11 +9476,11 @@ index 0000000000000000000000000000000000000000..d5ee5ca2f7412fde49c19dd43ed6905d
 +          {title()}{readFacts(props.request)?.operations.length ? ` · ${readFacts(props.request)!.operations.join("/")}` : ""}
 +        </text>
 +        <Show when={!compact() && editing()}>
-+          <text fg={props.theme.muted}>{stage() === "policy" ? policyHint(unknown(), props.request) : "Tell OpenCode what to do differently"}</text>
++          <text fg={props.theme.muted}>{stage() === "policy" ? editor().hint : "Tell OpenCode what to do differently"}</text>
 +        </Show>
 +        <Show when={state().error}><text fg={props.theme.permission}>{state().error}</text></Show>
 +        <Show when={stage() === "permission" && unknown()}>
-+          <text fg={props.theme.permission}>Unknown effects may bypass filesystem denies.</text>
++          <text fg={props.theme.permission}>{unknownPolicyTitle} · Unknown effects may bypass filesystem denies.</text>
 +        </Show>
 +        <Show when={stage() === "policy" || stage() === "permission"}>
 +          <For each={policyDirectories(props.request)}>{(directory) => <text fg={props.theme.text}>{directory}</text>}</For>
@@ -9465,7 +9499,7 @@ index 0000000000000000000000000000000000000000..d5ee5ca2f7412fde49c19dd43ed6905d
 +                onChange={(text) => controller.setMessage(text)} onConfirm={confirm} onCancel={cancel} />
 +            }>
 +              <PolicyField theme={props.theme} text={state().message} disabled={busy()}
-+                placeholder={unknown() ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
++                 placeholder={editor().placeholder}
 +                onChange={(text) => controller.setMessage(text)} onConfirm={confirm} onCancel={cancel} />
 +             </Show>
 +            </box>
@@ -9527,13 +9561,13 @@ index 0000000000000000000000000000000000000000..d5ee5ca2f7412fde49c19dd43ed6905d
 +}
 diff --git a/packages/tui/src/personalize/mini-permission.ts b/packages/tui/src/personalize/mini-permission.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4297716fe0a3b090b2e7f7b1b5ed0f2bfe2ef3df
+index 0000000000000000000000000000000000000000..0d4c04d71d55e36909c2df62a187c93233088e0b
 --- /dev/null
 +++ b/packages/tui/src/personalize/mini-permission.ts
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,73 @@
 +import * as stock from "../mini/permission.shared"
 +import type { MiniPermissionRequest } from "../mini/types"
-+import { choiceLabel, choices, type Choice } from "@opencode/schema/personalize/permission-policy"
++import { choiceLabel, choices, isCommandScope, type Choice } from "@opencode/schema/personalize/permission-policy"
 +import type { PermissionDecision } from "@opencode/schema/personalize/permission-controller"
 +
 +export { permissionAlwaysLines, permissionInfo } from "../mini/permission.shared"
@@ -9563,7 +9597,7 @@ index 0000000000000000000000000000000000000000..4297716fe0a3b090b2e7f7b1b5ed0f2b
 +// transitions and request presentation keep using the unmodified stock module.
 +function stockState(state: PermissionBodyState): stock.PermissionBodyState {
 +  return { ...state, stage: state.stage === "policy" ? "reject" : state.stage,
-+    selected: state.selected === "policy" || state.selected === "session_read" ? "once" : state.selected }
++    selected: state.selected === "policy" || state.selected === "session_read" || isCommandScope(state.selected) ? "once" : state.selected }
 +}
 +function stockReply(reply: stock.PermissionStep["reply"]): PermissionReply | undefined {
 +  if (!reply) return
@@ -9573,11 +9607,13 @@ index 0000000000000000000000000000000000000000..4297716fe0a3b090b2e7f7b1b5ed0f2b
 +}
 +export function permissionRun(state: PermissionBodyState, requestID: string, option: PermissionOption): PermissionStep {
 +  if (state.submitting) return { state }
++  if (state.stage === "permission" && isCommandScope(option))
++    return { state, reply: { sessionID: state.sessionID, requestID, decision: { scope: "session", policy: option } } }
 +  if (state.stage === "permission" && option === "policy")
 +    return { state: { ...state, stage: "policy", message: "", error: undefined } }
 +  if (state.stage === "permission" && option === "session_read")
 +    return { state, reply: { sessionID: state.sessionID, requestID, decision: option } }
-+  if (option === "policy" || option === "session_read" || state.stage === "policy" ||
++  if (option === "policy" || option === "session_read" || isCommandScope(option) || state.stage === "policy" ||
 +    (state.stage === "permission" && option !== "once" && option !== "always" && option !== "reject") ||
 +    (state.stage === "always" && option !== "confirm" && option !== "cancel"))
 +    return { state }
@@ -9604,15 +9640,15 @@ index 0000000000000000000000000000000000000000..4297716fe0a3b090b2e7f7b1b5ed0f2b
 +}
 diff --git a/packages/tui/src/personalize/permission-view.tsx b/packages/tui/src/personalize/permission-view.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883e64a069a
+index 0000000000000000000000000000000000000000..976b73ad7800bb7522c6f517373fcb21fa7dcdf8
 --- /dev/null
 +++ b/packages/tui/src/personalize/permission-view.tsx
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,147 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import type { TextareaRenderable } from "@opentui/core"
 +import type { PermissionRequest } from "@opencode/client"
 +import { createPermissionController } from "@opencode/schema/personalize/permission-controller"
-+import { choiceLabel, policyDirectories, policyHint, policyText, readFacts, unknownShell } from "@opencode/schema/personalize/permission-policy"
++import { choiceLabel, choices, isCommandScope, policyDirectories, policyEditor, readFacts, unknownPolicyTitle, unknownShell } from "@opencode/schema/personalize/permission-policy"
 +import { useData } from "../context/data"
 +import { usePathFormatter } from "../context/path-format"
 +import { useTheme } from "../context/theme"
@@ -9693,7 +9729,7 @@ index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883
 +            <text fg={theme.text.muted}>{readFacts(props.request)!.operations.join("/")}</text>
 +          </Show>
 +          <Show when={state().error}><text fg={theme.text.feedback.error.base}>{state().error}</text></Show>
-+          <Show when={unknown()}><text fg={theme.text.feedback.warning.base}>Unknown effects may bypass filesystem denies.</text></Show>
++          <Show when={unknown()}><text fg={theme.text.feedback.warning.base}>{unknownPolicyTitle} · Unknown effects may bypass filesystem denies.</text></Show>
 +          <For each={policyDirectories(props.request)}>{(directory) => <text fg={theme.text.base}>{directory}</text>}</For>
 +        </box>}
 +        body={(option) => <Show when={option === "always"} fallback={input.body()}>
@@ -9703,10 +9739,11 @@ index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883
 +            </For>
 +          </box>
 +        </Show>}
-+        options={Object.fromEntries(controller.choices().map((choice) =>
++        options={Object.fromEntries(choices(props.request).map((choice) =>
 +          [choice, choiceLabel(choice, unknown(), permissionOptionLabel)]))}
 +        onSelect={(option) => {
 +          if (busy()) return
++          if (isCommandScope(option)) return controller.submit({ scope: "session", policy: option })
 +          if (option === "policy") return open("policy")
 +          if (option === "reject" && !unknown() && data.session.get(props.request.sessionID)?.parentID)
 +            return open("reject")
@@ -9727,6 +9764,7 @@ index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883
 +  const theme = useTheme()
 +  const cursor = useCursorStyle()
 +  const enabled = useInteractivity()
++  const editor = createMemo(() => policyEditor(props.request))
 +  let input: TextareaRenderable | undefined
 +  const confirm = () => { if (!props.busy && input) props.onConfirm(input.plainText) }
 +  const cancel = () => { if (!props.busy) props.onCancel() }
@@ -9741,11 +9779,11 @@ index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883
 +  return <box flexDirection="column" backgroundColor={theme.background.raised.base}
 +    border={["left"]} borderColor={theme.text.feedback.error.base} customBorderChars={SplitBorder.customBorderChars}
 +    paddingLeft={2} paddingRight={3} paddingTop={1} paddingBottom={1} gap={1}>
-+    <text fg={theme.text.base}>Session CRUD policy</text>
++    <text fg={theme.text.base}>{editor().title}</text>
 +    <For each={policyDirectories(props.request)}>{(directory) => <text fg={theme.text.base}>{directory}</text>}</For>
-+    <text fg={theme.text.muted}>{policyHint(unknownShell(props.request), props.request)}</text>
++    <text fg={theme.text.muted}>{editor().hint}</text>
 +    <textarea ref={(value) => { input = value }} minHeight={1} maxHeight={3} focused={enabled() && !props.busy}
-+      placeholder={unknownShell(props.request) ? `${policyText.placeholder} / ${policyText.unknownPlaceholder}` : policyText.placeholder}
++      placeholder={editor().placeholder}
 +      textColor={theme.text.base} focusedTextColor={theme.text.base} cursorColor={theme.text.base} cursorStyle={cursor()} />
 +    <box flexDirection="row" gap={2}>
 +      <text fg={theme.text.base} onMouseUp={confirm}>enter apply policy</text>
@@ -9755,10 +9793,10 @@ index 0000000000000000000000000000000000000000..ec4b6460becb5d20fa29ac73a2471883
 +}
 diff --git a/packages/tui/test/personalize-mini-permission.test.ts b/packages/tui/test/personalize-mini-permission.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d1221bf3595ce88d4c653a0bc9d3638afdb43b6b
+index 0000000000000000000000000000000000000000..9af2374faa656eebbec0a7691b5b5a0ed3a144bc
 --- /dev/null
 +++ b/packages/tui/test/personalize-mini-permission.test.ts
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,64 @@
 +import { expect, test } from "bun:test"
 +import * as stock from "../src/mini/permission.shared"
 +import * as policy from "../src/personalize/mini-permission"
@@ -9786,11 +9824,16 @@ index 0000000000000000000000000000000000000000..d1221bf3595ce88d4c653a0bc9d3638a
 +  expect(policy.permissionRun(always, request.id, "confirm").reply?.decision).toBe("always")
 +})
 +
-+test("Mini unknown choices and CRUD editor never turn navigation into approval", () => {
++test("Mini unknown choices and command editor never turn navigation into approval", () => {
 +  const initial = policy.createPermissionBodyState(request)
 +  const options = policy.permissionOptions("permission", request)
-+  expect(options).toEqual(["once", "policy", "reject"])
-+  expect(options.map((option) => policy.permissionLabel(option, true))).toEqual(["Allow one", "CRUD policy", "Deny"])
++  expect(options).toEqual(["once", "Unknown=S", "Unknown=SE", "Unknown=SEA", "policy", "reject"])
++  expect(options.map((option) => policy.permissionLabel(option, true))).toEqual([
++    "Allow once", "Allow exact", "Allow (SE)", "Allow (SEA)", "Custom…", "Deny",
++  ])
++  for (const scope of ["Unknown=S", "Unknown=SE", "Unknown=SEA"] as const) {
++    expect(policy.permissionRun(initial, request.id, scope).reply?.decision).toEqual({ scope: "session", policy: scope })
++  }
 +  const opened = policy.permissionRun({ ...initial, message: "old", error: "old" }, request.id, "policy")
 +  expect(opened.reply).toBeUndefined()
 +  expect(opened.state).toMatchObject({ stage: "policy", message: "", error: undefined })
@@ -9803,7 +9846,7 @@ index 0000000000000000000000000000000000000000..d1221bf3595ce88d4c653a0bc9d3638a
 +  const busy = { ...opened.state, submitting: true }
 +  expect(policy.permissionRun(busy, request.id, "policy").state).toBe(busy)
 +  expect(policy.permissionReject(busy, request.id)).toBeUndefined()
-+  expect(policy.permissionShift(initial, 1, options).selected).toBe("policy")
++  expect(policy.permissionShift(initial, 1, options).selected).toBe("Unknown=S")
 +  expect(policy.permissionShift(initial, -1, options).selected).toBe("reject")
 +})
 +
@@ -9820,10 +9863,10 @@ index 0000000000000000000000000000000000000000..d1221bf3595ce88d4c653a0bc9d3638a
 +})
 diff --git a/packages/tui/test/personalize-permission-render.test.tsx b/packages/tui/test/personalize-permission-render.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d420cf24b64
+index 0000000000000000000000000000000000000000..4db88f492e04ff64b52168f2d54270fa8c02fd7a
 --- /dev/null
 +++ b/packages/tui/test/personalize-permission-render.test.tsx
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,248 @@
 +/** @jsxImportSource @opentui/solid */
 +import { expect, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
@@ -9899,17 +9942,23 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +    </TestTuiContexts>
 +  ), { width: 112, height: 30, kittyKeyboard: true })
 +  const frame = async () => { await app.renderOnce(); return app.captureCharFrame() }
++  const buttonColor = (label: string) => {
++    const span = app.captureSpans().lines.flatMap((line) => line.spans).find((span) => span.text.includes(label))
++    if (!span) throw new Error(`Button not visible: ${label}`)
++    return span.bg.toInts()
++  }
 +  const enter = async () => { app.mockInput.pressEnter(); await app.renderOnce() }
 +  const policy = async () => {
-+    app.mockInput.pressArrow("right")
++    app.mockInput.pressArrow("left") // Deny
++    app.mockInput.pressArrow("left") // Custom…
 +    await enter()
-+    expect(await frame()).toContain("Session CRUD policy")
++    expect(await frame()).toContain("Unknown=1")
 +  }
 +  const type = async (text: string) => {
 +    await app.mockInput.typeText(text)
 +    await app.renderOnce()
 +  }
-+  return { app, sent, pending, replace, frame, enter, policy, type, close() {
++  return { app, sent, pending, replace, frame, buttonColor, enter, policy, type, close() {
 +    app.renderer.currentFocusedRenderable?.blur()
 +    app.renderer.currentFocusedEditor?.blur()
 +    app.renderer.destroy()
@@ -9917,6 +9966,42 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +}
 +
 +for (const surface of ["full", "mini"] as const) {
++  test(`${surface}: arrows move the visible highlight; Enter sends the selected dotnet decision`, async () => {
++    await using state = await tmpdir()
++    const view = await mount(surface, state.path)
++    const script = [
++      "$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'",
++      "$env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='false'",
++      "$env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'",
++      "dotnet run --project tests\\WindowsProcessEvidence",
++    ].join("\n")
++    try {
++      for (const [id, direction, label, decision] of [
++        ["per_exact", "right", "Allow exact", { scope: "session", policy: "Unknown=S" }],
++        ["per_deny", "left", "Deny", "reject"],
++      ] as const) {
++        const shell = request(id)
++        view.replace({ ...shell, resources: [script], metadata: { ...shell.metadata, unknownCommand: script } })
++        const initial = await view.frame()
++        expect(initial).toContain("Unknown command policy")
++        expect(initial).not.toMatch(/CRUD|Allow \(SE/)
++        const focused = view.buttonColor("Allow once")
++        expect(view.buttonColor(label)).not.toEqual(focused)
++        const before = view.sent.length
++        view.app.mockInput.pressArrow(direction)
++        await view.frame()
++        expect(view.buttonColor(label)).toEqual(focused)
++        expect(view.buttonColor("Allow once")).not.toEqual(focused)
++        expect(view.sent.length).toBe(before)
++        await view.enter()
++        await view.app.waitFor(() => view.sent.length === before + 1)
++        expect(view.sent[before]).toMatchObject({ requestID: id, decision })
++        view.pending[before]!.resolve()
++        await view.frame()
++      }
++    } finally { view.close() }
++  })
++
 +  test(`${surface}: v11 left/right opens CRUD first and accepts CRUD on shell prompts`, async () => {
 +    await using state = await tmpdir()
 +    const view = await mount(surface, state.path)
@@ -9937,12 +10022,15 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +      expect(view.sent[0]!.decision).toEqual({ scope: "session", policy: "RU=S* CD=D*" })
 +      view.pending[0]!.resolve()
 +      await view.frame()
-+      view.replace({ ...request("per_shell_crud"), resources: ["[IO.File]::ReadAllBytes($p)"] })
++      const dotnet = "$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'\ndotnet run --project tests\\WindowsProcessEvidence"
++      const shell = request("per_shell_crud")
++      view.replace({ ...shell, resources: [dotnet], metadata: { ...shell.metadata, unknownCommand: dotnet } })
 +      await view.frame()
 +      await view.policy()
 +      const policyFrame = await view.frame()
 +      expect(policyFrame).toContain("C:/work")
-+      expect(policyFrame).not.toContain("[IO.File]::ReadAllBytes($p)")
++      expect(policyFrame).toContain("Unknown=S")
++      expect(policyFrame).not.toMatch(/CRUD|RU=S\*|Unknown=SE/)
 +      await view.type("RU=S* CD=D*")
 +      await view.enter()
 +      await view.app.waitFor(() => view.sent.length === 2)
@@ -9956,7 +10044,8 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +    const view = await mount(surface, state.path)
 +    try {
 +      const initial = await view.frame()
-+      for (const label of ["Allow one", "CRUD policy", "Deny", "Unknown effects"]) expect(initial).toContain(label)
++      for (const label of ["Allow once", "Allow exact", "Unknown command policy", "Deny", "Unknown effects"]) expect(initial).toContain(label)
++      expect(initial).not.toContain("CRUD")
 +      expect(initial).not.toContain("Always allow")
 +      await view.policy()
 +      await view.type("Unknown=S")
@@ -9967,14 +10056,14 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +      expect(view.sent.length).toBe(1)
 +      view.pending[0]!.reject(new Error("settlement refused"))
 +      await view.app.waitFor(async () => (await view.frame()).includes("settlement refused"))
-+      expect(await view.frame()).toContain("Session CRUD policy")
++      expect(await view.frame()).toContain("Unknown command policy")
 +      expect(await view.frame()).toContain("Unknown=S")
 +      expect(view.sent.length).toBe(1)
 +      await view.enter()
 +      await view.app.waitFor(() => view.sent.length === 2)
 +      expect(view.sent[1]).toEqual(view.sent[0])
 +      view.pending[1]!.resolve()
-+      await view.app.waitFor(async () => (await view.frame()).includes("Allow one"))
++      await view.app.waitFor(async () => (await view.frame()).includes("Allow once"))
 +      expect(view.sent.length).toBe(2)
 +    } finally { view.close() }
 +  })
@@ -9989,8 +10078,8 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +      await view.enter()
 +      await view.app.waitFor(() => view.sent.length === 1)
 +      view.replace(request("per_renewed"))
-+      expect(await view.frame()).toContain("Allow one")
-+      expect(await view.frame()).not.toContain("Session CRUD policy")
++      expect(await view.frame()).toContain("Allow once")
++      expect(await view.frame()).not.toContain("Unknown=1")
 +      view.pending[0]!.reject(new Error("stale settlement refused"))
 +      await view.frame()
 +      await view.frame()
@@ -10015,9 +10104,9 @@ index 0000000000000000000000000000000000000000..01ceccc7353bfc7e1ad6368e5f9f5d42
 +      await view.type("Unknown=S*")
 +      await view.enter()
 +      expect(view.sent).toEqual([])
-+      expect(await view.frame()).toContain("Session CRUD policy")
++      expect(await view.frame()).toContain("Unknown command policy")
 +      view.app.mockInput.pressEscape()
-+      expect(await view.frame()).toContain("Allow one")
++      expect(await view.frame()).toContain("Allow once")
 +      expect(view.sent).toEqual([])
 +      view.app.mockInput.pressEscape()
 +      await view.app.waitFor(() => view.sent.length === 1)
