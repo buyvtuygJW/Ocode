@@ -1838,7 +1838,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
         action: "opencode_read_mcp_resource",
         resources: ["resources:docs://readme"],
         save: ["resources:*"],
-        metadata: { server: "resources", uri: "docs://readme" },
+        metadata: { server: "resources", uri: "docs://readme", filesystemEffects: "unknown" },
         sessionID,
         agent: toolIdentity.agent,
         // The call's own ID. The real service shows the request on the execute call's row.
@@ -3223,7 +3223,7 @@ it.effect("waits for permission before calling an MCP tool", () =>
       action: "demo_search",
       resources: ["*"],
       save: ["*"],
-      metadata: { input: { query: "open issues" } },
+      metadata: { input: { query: "open issues" }, filesystemEffects: "unknown" },
       sessionID: Session.ID.make("ses_mcp_permission"),
       agent: toolIdentity.agent,
       source: {

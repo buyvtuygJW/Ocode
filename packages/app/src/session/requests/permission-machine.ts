@@ -1,14 +1,17 @@
+import type { Permission } from "@opencode/schema/permission"
+import { isPolicyReply } from "@opencode/schema/personalize/permission-policy"
+
 export const PERMISSION_REPLY_TIMEOUT_MS = 15_000
 
 export const PERMISSION_REPLIED_LIMIT = 256
 
-export type PermissionDecision = "once" | "always" | "reject"
+export type PermissionDecision = Permission.Reply
 
 // One permission request's manual reply from the dock. `attempt` advances on each try, so a late failure or timeout
 // from an earlier click cannot move a newer one. `replied` is terminal: an answered request never re-enables or
 // resurfaces before `permission.replied` removes it from the store.
 export type PermissionReplyState =
-  | { readonly status: "idle"; readonly attempt: number }
+  | { readonly status: "idle"; readonly attempt: number; readonly awaitingResolution?: true }
   | {
       readonly status: "responding"
       readonly attempt: number
@@ -71,15 +74,24 @@ export function transitionPermissionReply(
     }
   }
 
-  if (state.status !== "responding") return unchanged(state)
+  if (event.type === "resolved") {
+    if (state.status !== "responding" && !(state.status === "idle" && state.awaitingResolution)) return unchanged(state)
+    return { state: { status: "replied" }, effects: ABORT }
+  }
 
-  if (event.type === "resolved") return { state: { status: "replied" }, effects: ABORT }
+  if (state.status !== "responding") return unchanged(state)
 
   if (event.type === "disposed") return { state: { status: "idle", attempt: state.attempt }, effects: ABORT }
 
   if (event.attempt !== state.attempt) return unchanged(state)
 
-  if (event.type === "reply.succeeded") return { state: { status: "replied" }, effects: ABORT }
+  if (event.type === "reply.succeeded") {
+    // A partial policy can succeed without answering the original request.
+    if (isPolicyReply(state.decision)) {
+      return { state: { status: "idle", attempt: state.attempt, awaitingResolution: true }, effects: ABORT }
+    }
+    return { state: { status: "replied" }, effects: ABORT }
+  }
 
   return {
     state: { status: "idle", attempt: state.attempt },

@@ -4,6 +4,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Array, Context, Effect, Layer, Schema } from "effect"
+import { externalMetadata, filesystemReadMetadata } from "./personalize/filesystem-permission.js"
 import path from "path"
 import { Environments } from "./environment/environments.js"
 import { Environment } from "./environment/index.js"
@@ -338,7 +339,7 @@ const layer = Layer.effect(
       if (!request) return
       yield* permission.assert({
         ...request,
-        ...(metadata === undefined ? {} : { metadata }),
+        ...(metadata === undefined ? {} : { metadata: externalMetadata(targets, metadata) }),
         ...Permission.invocation(context),
       })
     })
@@ -365,11 +366,13 @@ const layer = Layer.effect(
           options.siblingOf.environment.path.dirname(options.siblingOf.absolute)
 
       // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
-      if (!sibling) yield* authorizeExternal([target], context)
+      const metadata = yield* filesystemReadMetadata(target, environments)
+      if (!sibling) yield* authorizeExternal([target], context, metadata)
       yield* permission.assert({
         action: "read",
         resources: [target.resource],
         save: [always(target)],
+        metadata,
         ...Permission.invocation(context),
       })
       return target

@@ -163,6 +163,7 @@ const graph = (fixture: Fixture, realPermissions = false) =>
         : [
             Permission.node.replace(
               permissionLayer({
+                assertNotDenied: () => Effect.void,
                 assert: (input) => Effect.sync(() => void fixture.assertions.push(input)),
               }),
             ),
@@ -197,65 +198,59 @@ const slash = (value: string) => value.replaceAll("\\", "/")
 const on = testEffect(Layer.succeed(Flag.Overrides, "machines"))
 const off = testEffect(Layer.succeed(Flag.Overrides, "-machines"))
 
-on.live("reads, writes and runs commands on a paired machine without requesting approval under default rules", () =>
+on.live("reads and writes on a paired machine, then blocks unknown shell effects until explicitly approved", () =>
   withTempDir((tmp) =>
     Effect.gen(function* () {
       const database = yield* Database.Service
-      yield* database.db
-        .insert(ProjectTable)
-        .values({ id: Project.ID.global, worktree: AbsolutePath.make(tmp.path), sandboxes: [] })
-        .run()
-        .pipe(Effect.orDie)
-      yield* database.db
-        .insert(SessionTable)
-        .values({
-          id: sessionID,
-          project_id: Project.ID.global,
-          directory: tmp.path,
-          slug: "test",
-          version: "test",
-          agent: toolIdentity.agent,
-        })
-        .run()
-        .pipe(Effect.orDie)
+      yield* database.db.insert(ProjectTable).values({
+        id: Project.ID.global, worktree: AbsolutePath.make(tmp.path), sandboxes: [],
+      }).run().pipe(Effect.orDie)
+      yield* database.db.insert(SessionTable).values({
+        id: sessionID, project_id: Project.ID.global, directory: tmp.path,
+        slug: "test", version: "test", agent: toolIdentity.agent,
+      }).run().pipe(Effect.orDie)
       const agents = yield* Agent.Service
       yield* agents.transform((editor) => editor.update(toolIdentity.agent, () => {}))
-      const bus = yield* Bus.Service
-      const prompts: string[] = []
-      const unsubscribe = yield* bus.listen((event) =>
-        Effect.sync(() => {
-          if (event.type === Permission.Event.Asked.type) prompts.push(event.type)
-        }),
-      )
-      yield* Effect.addFinalizer(() => unsubscribe)
       const machines = yield* Machines.Service
       const { id, worker } = yield* connected(machines, "gpu")
       const machine = yield* machines.get(id)
       yield* machine.files.mkdir("/work")
       yield* machine.files.write("/work/a.txt", bytes("before\n"))
       const registry = yield* Tool.Service
-      expect(yield* executeTool(registry, call("read", { path: "gpu:/work/a.txt" }))).toMatchObject({
-        status: "completed",
-        output: { type: "text", content: "before\n" },
-      })
-      expect(
-        yield* executeTool(registry, call("write", { path: "gpu:/work/a.txt", content: "after\n" })),
-      ).toMatchObject({ status: "completed" })
+      const permission = yield* Permission.Service
+      const asked = yield* Deferred.make<Permission.Request>()
+      const bus = yield* Bus.Service
+      const unsubscribe = yield* bus.listen((event) => event.type === Permission.Event.Asked.type
+        ? Deferred.succeed(asked, event.data as Permission.Request).pipe(Effect.asVoid) : Effect.void)
+      yield* Effect.addFinalizer(() => unsubscribe)
+      for (const step of [
+        { name: "read", input: { path: "gpu:/work/a.txt" }, output: { type: "text", content: "before\n" } },
+        { name: "write", input: { path: "gpu:/work/a.txt", content: "after\n" }, output: undefined },
+      ]) {
+        const result = yield* executeTool(registry, call(step.name, step.input))
+        expect(result.status).toBe("completed")
+        if (step.output) expect(result).toMatchObject({ output: step.output })
+      }
       expect(text((yield* machine.files.read("/work/a.txt")).bytes)).toBe("after\n")
-      const running = yield* Effect.forkChild(
-        executeTool(registry, call("shell", { command: "pwd", workdir: "gpu:/work" })),
-        { startImmediately: true },
-      )
+      expect(yield* Deferred.isDone(asked)).toBe(false)
+      const running = yield* executeTool(registry, call("shell", {
+        command: "pwd", workdir: "gpu:/work",
+      })).pipe(Effect.forkChild({ startImmediately: true }))
+      const request = yield* Deferred.await(asked)
+      expect(request).toMatchObject({
+        action: "shell", metadata: { filesystemEffects: "unknown", unknownMachine: id, unknownCwd: "/work" },
+      })
+      expect(worker.runs).toHaveLength(0)
+      yield* permission.reply({ requestID: request.id, reply: "once" })
       while (worker.runs.length === 0) yield* Effect.yieldNow
-      yield* worker.runs[0].print("/work\n")
-      yield* worker.runs[0].exit(0)
+      const command = worker.runs[0]!
+      yield* command.print("/work\n")
+      yield* command.exit(0)
       expect(yield* Fiber.join(running)).toMatchObject({
         status: "completed",
         output: { exitCode: 0, output: "/work\n" },
       })
-      const permission = yield* Permission.Service
       expect(yield* permission.list()).toEqual([])
-      expect(prompts).toEqual([])
     }).pipe(Effect.provide(graph(fixture(tmp.path), true))),
   ),
 )
@@ -1274,7 +1269,10 @@ on.effect("locks a typed path and a resolved target to one file through a symlin
     return Effect.gen(function* () {
       yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, "real")))
       yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "real", "a"), "one"))
-      yield* Effect.promise(() => fs.symlink("real", path.join(tmp.path, "link")))
+      // Junctions exercise the same directory-alias lock boundary on Windows
+      // without requiring the symlink privilege. Other platforms use symlinks.
+      yield* Effect.promise(() => fs.symlink(path.join(tmp.path, "real"), path.join(tmp.path, "link"),
+        process.platform === "win32" ? "junction" : "dir"))
       const access = yield* FileAccess.Service
       const fileMutation = yield* FileMutation.Service
       // The resolved target keeps the symlinked text; the typed path names the real directory.

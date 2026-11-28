@@ -1,6 +1,7 @@
 export * as FileWrite from "./file-write.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { makeFileWritePermissions } from "./personalize/filesystem-permission.js"
 import type { FileDiff } from "@opencode/schema/file-diff"
 import { Bom } from "@opencode/util/bom"
 import { Context, Effect, Layer } from "effect"
@@ -33,7 +34,7 @@ export interface Interface {
     target: FileAccess.Target,
     context: FileAccess.Invocation,
     preview?: FileDiff.Info,
-  ) => Effect.Effect<void, Permission.Error | SessionErrors.NotFoundError>
+  ) => Effect.Effect<void, Environment.Failed | Permission.Error | SessionErrors.NotFoundError>
   /** Write approved text, keeping an existing UTF-8 BOM, then format the file. */
   readonly commit: (
     target: FileAccess.Target,
@@ -59,25 +60,7 @@ const layer = Layer.effect(
     const formatter = yield* Formatter.Service
     const permission = yield* Permission.Service
 
-    const target = Effect.fn("FileWrite.target")(function* (file: string, context: FileAccess.Invocation) {
-      const target = yield* access.resolve({ path: file, kind: "file" })
-      yield* access.authorizeExternal([target], context)
-      return target
-    })
-
-    const authorize = Effect.fn("FileWrite.authorize")(function* (
-      target: FileAccess.Target,
-      context: FileAccess.Invocation,
-      preview?: FileDiff.Info,
-    ) {
-      yield* permission.assert({
-        action: "edit",
-        resources: [target.resource],
-        save: [FileAccess.always(target)],
-        metadata: preview ? { files: [preview] } : undefined,
-        ...Permission.invocation(context),
-      })
-    })
+    const { target, authorize } = makeFileWritePermissions({ access, permission })
 
     const commit = Effect.fn("FileWrite.commit")(function* (target: FileAccess.Target, content: string) {
       const written = yield* fileMutation.writeTextPreservingBom({ target, content })

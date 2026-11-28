@@ -7,6 +7,10 @@ import { ConfigModel } from "./model.js"
 import { ConfigPolicy } from "./policy.js"
 
 export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
+  mcp_selection: Schema.String.pipe(optional).annotate({
+    description:
+      'Experimental: exact selection of configured MCP servers, e.g. "MCP:=playwright". Compiles to existing per-server disabled settings; native-tool permissions are unchanged. Filesystem shorthand belongs in session permission replies.',
+  }),
   portable_shell_scanner: Schema.Boolean.pipe(optional).annotate({
     description: "Deprecated: the built-in shell permission scanner is now always enabled.",
   }),

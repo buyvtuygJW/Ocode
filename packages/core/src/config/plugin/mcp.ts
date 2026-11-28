@@ -3,6 +3,7 @@ export * as ConfigMcpPlugin from "./mcp.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Document, type Entry } from "@opencode/schema/config"
 import type { ServerConfig } from "@opencode/schema/mcp"
+import { compilePermissionShorthand, PermissionShorthandError } from "@opencode/schema/permission-shorthand"
 import { Effect, Stream } from "effect"
 import { Config } from "../../config.js"
 import { Mcp } from "../../mcp/index.js"
@@ -49,8 +50,18 @@ export const register = Effect.fn("ConfigMCPPlugin.register")(function* (
         servers.set(name, server)
       }
     }
-    for (const [name, server] of servers) {
-      if (editor.get(name)) continue
+    const selection = documents.findLast((document) => document.info.experimental?.mcp_selection !== undefined)
+      ?.info.experimental?.mcp_selection
+    const compiled = selection === undefined ? undefined : compilePermissionShorthand(selection, Object.fromEntries(servers))
+    if (compiled && (compiled.decisions.filesystem.length || compiled.decisions.mcp === undefined))
+      throw new PermissionShorthandError("MCP selection accepts only MCP:=names; filesystem rules require a session permission reply", selection!)
+    // Validate the selection before mutating existing plugin definitions.
+    for (const [name, server] of Object.entries(compiled?.mcpSettings ?? Object.fromEntries(servers))) {
+      const current = editor.get(name)
+      if (current) {
+        if (compiled) editor.set(name, { ...current, disabled: server.disabled })
+        continue
+      }
       editor.set(name, { ...server, timeout: { ...timeout, ...server.timeout } })
     }
   })

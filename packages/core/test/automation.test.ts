@@ -191,6 +191,7 @@ const locations = makeGlobalNode({
     Effect.gen(function* () {
       const app = yield* App.Service
       const bus = yield* Bus.Service
+      const permissionDatabase = yield* Database.Service
       const store = yield* SessionStore.Service
       const saved = yield* PermissionSaved.Service
       const projects = yield* Project.Service
@@ -234,6 +235,7 @@ const locations = makeGlobalNode({
                     replacements: [
                       App.node.replace(Layer.succeed(App.Service, app)),
                       Bus.node.replace(Layer.succeed(Bus.Service, bus)),
+                      Database.node.replace(Layer.succeed(Database.Service, permissionDatabase)),
                       Config.node.replace(
                         ref.directory === enabledDirectory || ref.directory === missingDirectory
                           ? enabled
@@ -259,7 +261,7 @@ const locations = makeGlobalNode({
       )
     }),
   ),
-  deps: [App.node, Bus.node, SessionStore.node, PermissionSaved.node, Project.node],
+  deps: [App.node, Bus.node, Database.node, SessionStore.node, PermissionSaved.node, Project.node],
 })
 const it = testEffect(
   AppNodeBuilder.build(

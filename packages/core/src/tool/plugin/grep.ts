@@ -10,6 +10,7 @@ import { FileAccess } from "../../file-access.js"
 import { Permission } from "../../permission.js"
 import { Ripgrep } from "../../ripgrep.js"
 import { RelativePath } from "../../schema.js"
+import { filesystemMetadata } from "../../personalize/filesystem-permission.js"
 import { ToolSearch } from "../search.js"
 
 export const name = "grep"
@@ -82,23 +83,25 @@ export const Plugin = {
             Effect.gen(function* () {
               const target = yield* access.resolve({ path: input.path ?? "." })
               yield* ToolSearch.available(target.environment)
-              yield* access.authorizeExternal([target], context)
+              const type = yield* ToolSearch.pathType(target.environment.files, target.absolute, input.path ?? ".")
+              const scope = type === "directory" ? { filesystemReadScope: "recursive" } : {}
+              yield* access.authorizeExternal([target], context, filesystemMetadata([target], ["read"], "content", scope))
               yield* permission.assert({
                 action: name,
                 resources: [input.pattern],
                 save: ["*"],
-                metadata: {
+                metadata: filesystemMetadata([target], ["read"], "content", {
+                  ...scope,
                   root: ".",
                   path: input.path,
                   include: input.include,
                   literal: input.literal,
                   caseSensitive: input.caseSensitive,
                   limit: input.limit,
-                },
+                }),
                 ...Permission.invocation(context),
               })
               const root = target.absolute
-              const type = yield* ToolSearch.pathType(target.environment.files, root, input.path ?? ".")
               const cwd = type === "directory" ? root : path.dirname(root)
               const result = yield* ToolSearch.bounded(input.limit ?? FileSystem.DEFAULT_SEARCH_LIMIT, (limit) =>
                 ripgrep.grep({

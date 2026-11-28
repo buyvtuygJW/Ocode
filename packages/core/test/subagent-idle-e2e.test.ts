@@ -58,6 +58,22 @@ const pluginSupervisor = makeLocationNode({
   layer: Layer.effectDiscard(
     Effect.gen(function* () {
       const hooks = yield* PluginHooks.Service
+      const bus = yield* Bus.Service
+      const permission = yield* Permission.Service
+      // A scripted client grants only the two shell calls used by these report
+      // fixtures. Allow-all agent rules are not unknown-effect consent in v12.
+      yield* bus.subscribe(Permission.Event.Asked).pipe(
+        Stream.runForEach((event) => Effect.gen(function* () {
+          const request = event.data
+          expect(request.action).toBe("shell")
+          expect(request.metadata?.filesystemEffects).toBe("unknown")
+          expect(["call-shell", "call-grandchild-shell"]).toContain(request.source?.id ?? "")
+          expect(request.metadata?.unknownCommand).toContain("release")
+          expect(request.metadata?.unknownCommand).toContain("done")
+          yield* permission.reply({ requestID: request.id, reply: "once" })
+        })),
+        Effect.forkScoped({ startImmediately: true }),
+      )
       yield* registerToolPlugin(SubagentTool.Plugin, {}, (name, callback) => hooks.register("tool", name, callback))
       yield* registerToolPlugin(ShellTool.Plugin)
     }),

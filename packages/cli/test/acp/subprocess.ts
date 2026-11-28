@@ -38,6 +38,7 @@ type AcpProcess = {
   readonly exited: Promise<number>
   readonly request: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<JsonRpcResponse<T>>
   readonly waitForMessage: (predicate: Waiter["predicate"], description: string) => Promise<JsonRpcMessage>
+  readonly respond: (id: number, result: unknown) => Promise<void>
   readonly close: () => Promise<number>
   readonly stderr: () => string
   readonly [Symbol.asyncDispose]: () => Promise<void>
@@ -296,7 +297,7 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }): 
     })
   }
 
-  const write = async (message: JsonRpcRequest) => {
+  const write = async (message: JsonRpcRequest | JsonRpcResponse<unknown>) => {
     if (inputClosed) throw new Error("ACP stdin is closed")
     await child.stdin.write(encoder.encode(`${JSON.stringify(message)}\n`))
     await child.stdin.flush()
@@ -322,6 +323,7 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }): 
     exited: child.exited,
     request,
     waitForMessage: (predicate, description) => take(predicate, 10_000, description),
+    respond: (id, result) => write({ jsonrpc: "2.0", id, result }),
     async close() {
       if (!inputClosed) {
         inputClosed = true

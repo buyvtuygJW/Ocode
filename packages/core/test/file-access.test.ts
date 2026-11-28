@@ -61,6 +61,9 @@ describe("FileAccess.authorizeRead", () => {
           action: "read",
           resources: ["README.md"],
           save: ["*"],
+          metadata: { "opencode.permission.v1": {
+            operations: ["read"], paths: [absolute], directories: [location.directory], access: "content",
+          } },
           sessionID: invocation.sessionID,
           agent: invocation.agent,
           source: { type: "tool", messageID: invocation.messageID, id: invocation.id },

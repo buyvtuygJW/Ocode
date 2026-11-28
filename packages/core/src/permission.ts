@@ -129,7 +129,7 @@ export interface Interface {
   readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
   /** True only when the rules already allow the request; never asks the user. */
   readonly allows: (input: AssertInput) => Effect.Effect<boolean, SessionErrors.NotFoundError>
-  readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
+  readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError | PolicyError>
   readonly get: (id: ID) => Effect.Effect<Request | undefined>
   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
@@ -207,71 +207,18 @@ const layer = Layer.effect(
       return parent ? { ...source, id: parent } : source
     }
 
-    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
-      const base = yield* configured(input.sessionID, input.agent)
-      if (PermissionPolicy.evaluateAll(base, input.action, input.resources) === "deny")
-        return { effect: "deny" as const, policy: base }
-      const effective = PermissionPolicy.fallback(base, yield* savedPolicy())
-      const effect = PermissionPolicy.evaluateAll(effective, input.action, input.resources)
-      const event = yield* hooks.trigger("permission", "evaluate", {
-        sessionID: input.sessionID,
-        agent: input.agent,
-        action: input.action,
-        resources: input.resources,
-        metadata: input.metadata,
-        source: row(input.source),
-        effect,
-      })
-      const unattended = yield* Unattended
-      if (event.effect !== "ask" || unattended === undefined)
-        return { effect: event.effect, message: event.message, policy: effective }
-      // When an evaluate hook downgraded `allow` to `ask`, unattended rules must explicitly allow the request
-      // rather than inheriting the pre-hook `allow` from `effective`.
-      const settled =
-        effect === "ask" ? PermissionPolicy.override(effective, unattended) : PermissionPolicy.fromRules(unattended)
-      if (
-        (effect === "ask" || input.resources.length > 0) &&
-        PermissionPolicy.evaluateAll(settled, input.action, input.resources) === "allow"
-      )
-        return { effect: "allow" as const, policy: effective }
-      return {
-        effect: "deny" as const,
-        message: `Permission ${input.action} needs approval, and nobody is present to give it`,
-        policy: effective,
-      }
+    const { evaluate: evaluateInput, request, create } = yield* createPermissionRuntime({
+      pending, configured, savedPolicy, row, bus, sessions, hooks,
+      cleanMetadata: withoutUndefined,
+      unattended: Unattended,
+      events: Permission.Event,
+      makeID: () => ID.create(),
+      missingSession: (sessionID) => new SessionErrors.NotFoundError({ sessionID }),
+      missingRequest: (requestID) => new NotFoundError({ requestID }),
+      invalidPolicy: (message) => new InvalidPolicyError({ message }),
+      declined: () => new DeclinedError(),
+      isClosed: () => closed,
     })
-
-    function request(input: AssertInput, message?: string): Request {
-      return {
-        id: input.id ?? ID.create(),
-        sessionID: input.sessionID,
-        action: input.action,
-        resources: input.resources,
-        save: input.save,
-        metadata: input.metadata && withoutUndefined(input.metadata),
-        source: row(input.source),
-        message,
-      }
-    }
-
-    const create = (request: Request, agent?: Agent.ID) =>
-      Effect.uninterruptible(
-        Effect.gen(function* () {
-          const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
-          const item = { request, agent, deferred }
-          if (closed) {
-            yield* Deferred.fail(deferred, new DeclinedError())
-            return item
-          }
-          if (pending.has(request.id))
-            return yield* Effect.die(new Error(`Duplicate pending permission ID: ${request.id}`))
-          pending.set(request.id, item)
-          yield* bus
-            .publish(Permission.Event.Asked, request)
-            .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
-          return item
-        }),
-      )
 
     const ask = Effect.fn("Permission.ask")(function* (input: AssertInput) {
       if (closed) return { id: input.id ?? ID.create(), effect: "deny" as const }
@@ -420,7 +367,8 @@ function withoutUndefined(record: Record<string, unknown>): Record<string, unkno
   )
 }
 
-export const node = makeLocationNode({
+import { permissionNode, createPermissionRuntime, InvalidPolicyError, type PolicyError } from "./personalize/permission-runtime.js"
+export const node = permissionNode(makeLocationNode, {
   service: Service,
   layer,
   deps: [Bus.node, Location.node, Agent.node, SessionStore.node, PermissionSaved.node, PluginHooks.node],

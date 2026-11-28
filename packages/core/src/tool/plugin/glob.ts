@@ -12,6 +12,7 @@ import { FileAccess } from "../../file-access.js"
 import { Ripgrep } from "../../ripgrep.js"
 import { RelativePath } from "../../schema.js"
 import { Permission } from "../../permission.js"
+import { filesystemMetadata } from "../../personalize/filesystem-permission.js"
 
 export const name = "glob"
 
@@ -64,17 +65,19 @@ export const Plugin = {
               const searchPath = input.path === "undefined" || input.path === "null" ? undefined : input.path
               const target = yield* access.resolve({ path: searchPath ?? ".", kind: "directory" })
               yield* ToolSearch.available(target.environment)
-              yield* access.authorizeExternal([target], context)
+              const scope = { filesystemReadScope: "recursive" }
+              yield* access.authorizeExternal([target], context, filesystemMetadata([target], ["read"], "content", scope))
               yield* permission.assert({
                 action: name,
                 resources: [input.pattern],
                 save: ["*"],
-                metadata: {
+                metadata: filesystemMetadata([target], ["read"], "content", {
+                  ...scope,
                   root: searchPath ?? ".",
                   path: searchPath,
                   hidden: input.hidden,
                   limit: input.limit,
-                },
+                }),
                 ...Permission.invocation(context),
               })
               const type = yield* ToolSearch.pathType(target.environment.files, target.absolute, searchPath ?? ".")

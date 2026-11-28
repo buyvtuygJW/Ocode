@@ -214,19 +214,20 @@ describe("PatchTool", () => {
                   },
                 ],
               })
-              expect(assertions).toMatchObject([
-                {
+              expect(assertions).toMatchObject(
+                [["nested/new.txt", "create"], ["update.txt", "update"], ["remove.txt", "delete"]].map(([resource, operation]) => ({
                   sessionID,
                   action: "edit",
-                  resources: ["nested/new.txt", "update.txt", "remove.txt"],
+                  resources: [resource],
                   save: ["*"],
                   metadata: {
                     filepath: "nested/new.txt, update.txt, remove.txt",
                     diff: expect.stringContaining("Index:"),
                     files: expect.any(Array),
+                    "opencode.permission.v1": { operations: [operation], paths: [path.join(tmp.path, resource)] },
                   },
-                },
-              ])
+                })),
+              )
               expect(readsBeforeEditApproval).toBe(2)
               expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/new.txt"), "utf8"))).toBe(
                 "created\n",
@@ -554,37 +555,40 @@ describe("PatchTool", () => {
     ),
   )
 
-  it.live("uses Location-relative resources for move targets in a nested Location", () =>
-    withTempDir((tmp) => {
+  for (const scenario of [
+    { name: "includes the move destination in edit permission resources", location: "",
+      source: "old/name.txt", destination: "renamed/dir/name.txt" },
+    { name: "uses Location-relative resources for move targets in a nested Location", location: "nested/location",
+      source: "old.txt", destination: "moved.txt" },
+    { name: "a normalized no-op move requires update, never delete or create", location: "nested/location",
+      source: "old.txt", destination: "./old.txt" },
+  ]) {
+    it.live(scenario.name, () => withTempDir((tmp) => {
       reset()
-      const active = path.join(tmp.path, "nested", "location")
-      const source = path.join(active, "old.txt")
-      return Effect.promise(() =>
-        fs.mkdir(active, { recursive: true }).then(() => fs.writeFile(source, "before\n")),
-      ).pipe(
-        Effect.andThen(
-          withTool(
-            active,
-            (registry) =>
-              Effect.gen(function* () {
-                const settled = yield* executeTool(
-                  registry,
-                  call(
-                    "*** Begin Patch\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** End Patch",
-                  ),
-                )
-                expect(settled).toMatchObject({
-                  status: "completed",
-                  metadata: { files: [{ file: "moved.txt" }] },
-                })
-                expect(assertions).toMatchObject([{ action: "edit", resources: ["old.txt", "moved.txt"] }])
-              }),
-            tmp.path,
-          ),
-        ),
-      )
-    }),
-  )
+      const active = path.join(tmp.path, scenario.location)
+      const source = path.join(active, scenario.source)
+      const destination = path.join(active, scenario.destination)
+      const moved = source !== destination
+      return Effect.promise(async () => {
+        await fs.mkdir(path.dirname(source), { recursive: true })
+        await fs.writeFile(source, "before\n")
+      }).pipe(Effect.andThen(withTool(active, (registry) => Effect.gen(function* () {
+        const settled = yield* executeTool(registry, call(
+          `*** Begin Patch\n*** Update File: ${scenario.source}\n*** Move to: ${scenario.destination}\n@@\n-before\n+after\n*** End Patch`,
+        ))
+        expect(settled).toMatchObject({
+          status: "completed", metadata: { files: [{ file: path.relative(active, destination).replaceAll("\\", "/") }] },
+        })
+        const needs = moved ? [[source, "delete"], [destination, "create"]] : [[source, "update"]]
+        expect(assertions).toMatchObject(needs.map(([file, operation]) => ({
+          action: "edit", resources: [path.relative(active, file).replaceAll("\\", "/")],
+          metadata: { "opencode.permission.v1": { operations: [operation], paths: [file] } },
+        })))
+        expect(yield* exists(source)).toBe(!moved)
+        expect(yield* Effect.promise(() => fs.readFile(destination, "utf8"))).toBe("after\n")
+      }), tmp.path)))
+    }))
+  }
 
   it.live("inserts lines with an insert-only hunk", () =>
     withTempTool((directory, registry) =>
@@ -1082,94 +1086,50 @@ describe("PatchTool", () => {
     ),
   )
 
-  it.live("uses canonical external permissions and resources for a move destination", () =>
-    Effect.acquireUseRelease(
+  for (const scenario of [
+    { name: "uses canonical external permissions and resources for a move destination", move: true },
+    { name: "approves each external file under the same parent", move: false },
+  ]) {
+    it.live(scenario.name, () => Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
         reset()
-        const source = path.join(active.path, "source.txt")
-        const destination = path.join(outside.path, "moved.txt")
-        return Effect.promise(() => fs.writeFile(source, "before\n")).pipe(
-          Effect.andThen(
-            withTool(active.path, (registry) =>
-              Effect.gen(function* () {
-                const settled = yield* executeTool(
-                  registry,
-                  call(
-                    `*** Begin Patch\n*** Update File: source.txt\n*** Move to: ${destination}\n@@\n-before\n+after\n*** End Patch`,
-                  ),
-                )
-                expect(settled).toMatchObject({
-                  status: "completed",
-                  metadata: { files: [{ file: destination.replaceAll("\\", "/") }] },
-                })
-                expect(assertions).toMatchObject([
-                  {
-                    action: "external_directory",
-                    resources: [path.join(outside.path, "*").replaceAll("\\", "/")],
-                    save: [path.join(outside.path, "*").replaceAll("\\", "/")],
-                    metadata: { filepath: destination, parentDir: outside.path },
-                  },
-                  {
-                    action: "edit",
-                    resources: ["source.txt", destination.replaceAll("\\", "/")],
-                  },
-                ])
-                expect(yield* exists(source)).toBe(false)
-                expect(yield* Effect.promise(() => fs.readFile(destination, "utf8"))).toBe("after\n")
-              }),
-            ),
-          ),
-        )
+        const first = path.join(scenario.move ? active.path : outside.path, scenario.move ? "source.txt" : "first.txt")
+        const second = path.join(outside.path, scenario.move ? "moved.txt" : "second.txt")
+        return Effect.promise(async () => {
+          await fs.writeFile(first, "before\n")
+          if (!scenario.move) await fs.writeFile(second, "before\n")
+        }).pipe(Effect.andThen(withTool(active.path, (registry) => Effect.gen(function* () {
+          const patch = scenario.move
+            ? `*** Update File: source.txt\n*** Move to: ${second}\n@@\n-before\n+after\n`
+            : `*** Update File: ${first}\n@@\n-before\n+after\n*** Update File: ${second}\n@@\n-before\n+after\n`
+          const settled = yield* executeTool(registry, call(`*** Begin Patch\n${patch}*** End Patch`))
+          expect(settled).toMatchObject({
+            status: "completed", metadata: { files: scenario.move ? [{ file: second.replaceAll("\\", "/") }]
+              : [{ file: first.replaceAll("\\", "/") }, { file: second.replaceAll("\\", "/") }] },
+          })
+          const external = scenario.move ? [second] : [first, second]
+          const boundary = path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/")
+          expect(assertions).toMatchObject([
+            ...external.map((file) => ({
+              action: "external_directory", resources: [boundary], save: [boundary],
+              metadata: { filepath: file, parentDir: outside.path,
+                "opencode.permission.v1": { operations: [scenario.move ? "create" : "update"], paths: [file] } },
+            })),
+            ...[[first, scenario.move ? "delete" : "update"], [second, scenario.move ? "create" : "update"]].map(([file, operation]) => ({
+              action: "edit", resources: [file === first && scenario.move ? "source.txt" : file.replaceAll("\\", "/")],
+              metadata: { "opencode.permission.v1": { operations: [operation], paths: [file] } },
+            })),
+          ])
+          expect(yield* exists(first)).toBe(!scenario.move)
+          if (!scenario.move) expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("after\n")
+          expect(yield* Effect.promise(() => fs.readFile(second, "utf8"))).toBe("after\n")
+        }))))
       },
-      ([active, outside]) =>
-        Effect.promise(() =>
-          Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
-        ),
-    ),
-  )
-
-  it.live("approves each external file under the same parent", () =>
-    Effect.acquireUseRelease(
-      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
-      ([active, outside]) => {
-        reset()
-        const first = path.join(outside.path, "first.txt")
-        const second = path.join(outside.path, "second.txt")
-        return Effect.promise(() =>
-          Promise.all([fs.writeFile(first, "before\n"), fs.writeFile(second, "before\n")]),
-        ).pipe(
-          Effect.andThen(
-            withTool(active.path, (registry) =>
-              Effect.gen(function* () {
-                expect(
-                  yield* executeTool(
-                    registry,
-                    call(
-                      `*** Begin Patch\n*** Update File: ${first}\n@@\n-before\n+after\n*** Update File: ${second}\n@@\n-before\n+after\n*** End Patch`,
-                    ),
-                  ),
-                ).toMatchObject({ status: "completed" })
-                expect(assertions.map((input) => input.action)).toEqual([
-                  "external_directory",
-                  "external_directory",
-                  "edit",
-                ])
-                expect(assertions[0]?.resources).toEqual([
-                  path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),
-                ])
-                expect(assertions[1]?.resources).toEqual(assertions[0]?.resources)
-              }),
-            ),
-          ),
-        )
-      },
-      ([active, outside]) =>
-        Effect.promise(() =>
-          Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
-        ),
-    ),
-  )
+      ([active, outside]) => Effect.promise(() =>
+        Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined)),
+    ))
+  }
 
   it.live("rejects invalid later update before applying an earlier add", () =>
     withTempDir((tmp) => {

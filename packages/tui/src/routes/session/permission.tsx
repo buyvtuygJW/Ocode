@@ -1,23 +1,19 @@
 import { createStore } from "solid-js/store"
-import { createMemo, For, Match, Show, Switch } from "solid-js"
+import { createMemo, For, Show } from "solid-js"
 import { Portal, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { TextareaRenderable } from "@opentui/core"
 import { useTheme, useThemes } from "../../context/theme"
-import type { PermissionReply, PermissionRequest } from "@opencode/client"
+import type { PermissionRequest } from "@opencode/client"
+import { createPermissionView } from "../../personalize/permission-view"
 import { SplitBorder } from "../../ui/border"
-import { useData } from "../../context/data"
 import { filetype } from "../../util/filetype"
-import { permissionAlwaysLines, permissionOptionLabel, permissionPresentation } from "../../util/permission"
+import { permissionPresentation } from "../../util/permission"
 import { getScrollAcceleration } from "../../util/scroll"
 import { useConfig, useCursorStyle } from "../../config"
 import { Keymap } from "../../context/keymap"
 import { useInteractivity } from "../../context/interactivity"
-import { usePathFormatter } from "../../context/path-format"
 import { SimulationSemantics } from "../../simulation/semantics"
 import { PatchDiff } from "../../component/patch-diff"
-import { useToast } from "../../ui/toast"
-
-type PermissionStage = "permission" | "reject"
 
 function EditBody(props: { file?: string; diff?: string; patch?: string }) {
   const theme = useTheme()
@@ -111,50 +107,14 @@ function EditBody(props: { file?: string; diff?: string; patch?: string }) {
 }
 
 export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
-  const data = useData()
-  const toast = useToast()
-  const [store, setStore] = createStore({
-    stage: "permission" as PermissionStage,
-  })
-  const pathFormatter = usePathFormatter()
-  const session = createMemo(() => data.session.get(props.request.sessionID))
-
-  const source = createMemo(() => {
-    const tool = props.request.source
-    if (!tool) return { input: undefined, metadata: undefined }
-    const message = data.session.message.get(props.request.sessionID, tool.messageID)
-    if (message?.type !== "assistant") return { input: undefined, metadata: undefined }
-    const part = message.content.find((part) => part.type === "tool" && part.id === tool.id)
-    if (part?.type === "tool" && part.state.status !== "streaming") {
-      return { input: part.state.input, metadata: part.state.metadata }
-    }
-    return { input: undefined, metadata: undefined }
-  })
-
+  const view = createPermissionView(props, { Question: SessionQuestion, Reject: RejectPrompt, label: permissionSemanticLabel })
+  const pathFormatter = view.pathFormatter
+  const source = view.source
   const theme = useTheme()
 
-  function reply(value: PermissionReply, message?: string) {
-    void data.session.permission
-      .reply({ sessionID: props.request.sessionID, requestID: props.request.id, decision: value, message })
-      .catch((error: unknown) => toast.error(error))
-  }
-
   return (
-    <Switch>
-      <Match when={store.stage === "reject"}>
-        <RejectPrompt
-          action={props.request.action}
-          instance={props.request.id}
-          onConfirm={(message) => {
-            reply("reject", message || undefined)
-          }}
-          onCancel={() => {
-            setStore("stage", "permission")
-          }}
-        />
-      </Match>
-      <Match when={store.stage === "permission"}>
-        {(() => {
+    <view.Frame>
+        {() => {
           const current = permissionPresentation(
             {
               action: props.request.action,
@@ -214,54 +174,9 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
             </box>
           )
 
-          const body = (
-            <SessionQuestion
-              title="Permission required"
-              semanticLabel={permissionSemanticLabel(props.request.action, current.title)}
-              instance={props.request.id}
-              header={header()}
-              body={(option) => (
-                <Show when={option === "always"} fallback={presentationBody()}>
-                  <box paddingLeft={1} gap={1}>
-                    <For each={permissionAlwaysLines(props.request)}>
-                      {(line, index) => <text fg={index() === 0 ? theme.text.muted : theme.text.base}>{line}</text>}
-                    </For>
-                  </box>
-                </Show>
-              )}
-              options={
-                props.request.save?.length
-                  ? {
-                      once: permissionOptionLabel("once"),
-                      always: permissionOptionLabel("always"),
-                      reject: permissionOptionLabel("reject"),
-                    }
-                  : { once: permissionOptionLabel("once"), reject: permissionOptionLabel("reject") }
-              }
-              escapeKey="reject"
-              fullscreen
-              onSelect={(option) => {
-                if (option === "always") {
-                  reply("always")
-                  return
-                }
-                if (option === "reject") {
-                  if (session()?.parentID) {
-                    setStore("stage", "reject")
-                    return
-                  }
-                  reply("reject")
-                  return
-                }
-                reply("once")
-              }}
-            />
-          )
-
-          return body
-        })()}
-      </Match>
-    </Switch>
+          return view.question({ header: header(), body: presentationBody, title: current.title })
+        }}
+    </view.Frame>
   )
 }
 

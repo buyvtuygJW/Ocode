@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { PersonalizeBuild } from "../../../.personalize/build.mjs"
 
 import { $ } from "bun"
 import { createHash } from "node:crypto"
@@ -107,7 +108,12 @@ const pluginRuntimePlugin: BunPlugin = {
       contents: pluginRuntimeModulesSource,
       loader: "ts",
     }))
-    build.onLoad({ filter: /[/\\]internal[/\\]httpApi(?:Scalar|Swagger)\.js$/ }, () => ({
+    // Effect's documentation assets are virtual: resolve before loading them.
+    build.onResolve({ filter: /^\.\/internal\/httpApi(?:Scalar|Swagger)\.js$/ }, (args) => ({
+      path: path.resolve(args.resolveDir, args.path),
+      namespace: "opencode-effect-docs",
+    }))
+    build.onLoad({ filter: /[/\\]internal[/\\]httpApi(?:Scalar|Swagger)\.js$/, namespace: "opencode-effect-docs" }, () => ({
       contents:
         'export const css = ""; export const javascript = \'document.body.textContent = "Scalar/Swagger UI assets are not bundled in OpenCode"\'',
       loader: "js",
@@ -184,7 +190,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
   const name = target.replace(binary, "cli")
   const executablePath = await compileExecutable(item)
   console.log(`building ${name}`)
-  const result = await Bun.build({
+  const result = await PersonalizeBuild.build({
     entrypoints: ["./src/index.ts", "./src/photon-worker.ts", "./src/claude-folder-worker.ts"],
     tsconfig: "./tsconfig.json",
     plugins: [

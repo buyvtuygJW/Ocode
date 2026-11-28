@@ -37,8 +37,29 @@ test("streams turns woken by background shells and keeps the session usable", as
   const acp = fixture.spawn()
   await initialize(acp)
   const { sessionId } = await newSession(acp, fixture.home)
-  const prompt = (text: string) =>
-    acp.request<PromptResponse>("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).then(expectOk)
+  const prompt = async (text: string) => {
+    const response = acp.request<PromptResponse>("session/prompt", {
+      sessionId, prompt: [{ type: "text", text }],
+    }).then(expectOk)
+    // v12 deliberately asks even when stock shell rules allow unknown effects.
+    // Exercise the actual client response instead of bypassing that approval.
+    if (text === "run the slow shell" || text === "run the fast shell") {
+      const request = await acp.waitForMessage(
+        (message) => message.method === "session/request_permission",
+        "the explicit unknown-shell approval",
+      )
+      expect(typeof request.id).toBe("number")
+      expect(request.params).toMatchObject({
+        sessionId,
+        toolCall: { rawInput: { command: text === "run the slow shell" ? releasedCommand : fastCommand } },
+        options: expect.arrayContaining([expect.objectContaining({ optionId: "once", kind: "allow_once" })]),
+      })
+      await acp.respond(request.id as number, {
+        outcome: { outcome: "selected", optionId: "once" },
+      })
+    }
+    return await response
+  }
   const update = (description: string, match: (update: Record<string, unknown>) => boolean) =>
     acp
       .waitForMessage(

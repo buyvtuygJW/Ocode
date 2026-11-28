@@ -1,7 +1,6 @@
 import { Option, Schema } from "effect"
 import { For, Show } from "solid-js"
-import type { PermissionRequest } from "@opencode/client/promise"
-import { Button } from "@opencode/ui/button"
+import { PermissionControls, type PermissionControlsProps } from "./permission-controls"
 import { DockPrompt } from "@opencode/session-ui/dock-prompt"
 import { Icon } from "@opencode/ui/icon"
 import { useLanguage } from "@/runtime/i18n/language"
@@ -10,11 +9,7 @@ const decodeToolInput = Schema.decodeUnknownOption(Schema.Record(Schema.String, 
 
 const isString = Schema.is(Schema.String)
 
-export function SessionPermissionDock(props: {
-  request: PermissionRequest
-  responding: boolean
-  onDecide: (response: "once" | "always" | "reject") => void
-}) {
+export function SessionPermissionDock(props: PermissionControlsProps) {
   const language = useLanguage()
 
   const toolDescription = () => {
@@ -48,22 +43,7 @@ export function SessionPermissionDock(props: {
       footer={
         <>
           <div />
-          <div data-slot="permission-footer-actions">
-            <Button variant="ghost" size="normal" onClick={() => props.onDecide("reject")} disabled={props.responding}>
-              {language.t("ui.permission.deny")}
-            </Button>
-            <Button
-              variant="neutral"
-              size="normal"
-              onClick={() => props.onDecide("always")}
-              disabled={props.responding}
-            >
-              {language.t("ui.permission.allowAlways")}
-            </Button>
-            <Button variant="submit" size="normal" onClick={() => props.onDecide("once")} disabled={props.responding}>
-              {language.t("ui.permission.allowOnce")}
-            </Button>
-          </div>
+          <PermissionControls request={props.request} responding={props.responding} onDecide={props.onDecide} />
         </>
       }
     >

@@ -39,8 +39,10 @@ export const Request = Schema.Struct({
 }).annotate({ identifier: "Permission.Request" })
 export interface Request extends Schema.Schema.Type<typeof Request> {}
 
-export const Reply = Schema.Literals(["once", "always", "reject"]).annotate({ identifier: "Permission.Reply" })
-export type Reply = typeof Reply.Type
+import { Reply } from "./personalize/permission-contract.js"
+export {
+  Reply, Operation, SessionPolicy, CompactPolicy, Selection, StructuredPolicy, InvalidPolicyError,
+} from "./personalize/permission-contract.js"
 
 const Asked = ephemeral({ type: "permission.asked", schema: Request.fields })
 const Replied = ephemeral({

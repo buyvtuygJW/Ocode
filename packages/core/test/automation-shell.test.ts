@@ -15,6 +15,7 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionInboxTable } from "@opencode/core/session/sql"
 import { AbsolutePath } from "@opencode/schema/schema"
+import { ShellSelect } from "@opencode/core/shell/select"
 import { Tool } from "@opencode/schema/tool"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { eq } from "drizzle-orm"
@@ -275,6 +276,26 @@ it.live("scheduled code uses session capabilities after one-time approval", () =
     }).pipe(instances.provide(session))
     // An unexpected extra request would keep creation waiting for approval.
     const created = yield* Fiber.join(creating).pipe(Effect.timeout("10 seconds"))
+    yield* Effect.gen(function* () {
+      const permission = yield* Permission.Service
+      const shell = yield* (yield* ShellSelect.Service).resolve({ priority: "compat" })
+      const input = {
+        sessionID: session.id, action: "shell", resources: ["echo automation-output"],
+        metadata: {
+          filesystemEffects: "unknown", unknownCommand: "echo automation-output",
+          unknownCwd: directory, unknownShell: shell,
+        },
+      }
+      const unattended = [{ action: "*", resource: "*", effect: "allow" }] as const
+      // Broad unattended capability approval is not exact unknown-shell consent.
+      expect(yield* permission.allows(input).pipe(Effect.provideService(Permission.Unattended, unattended))).toBe(false)
+      const request = yield* permission.ask(input)
+      expect(request.effect).toBe("ask")
+      yield* permission.reply({
+        requestID: request.id, reply: { scope: "session", policy: "Unknown=S" },
+      })
+      expect(yield* permission.allows(input).pipe(Effect.provideService(Permission.Unattended, unattended))).toBe(true)
+    }).pipe(instances.provide(session))
     // Run now instead of waiting for the one-hour interval.
     const database = yield* Database.Service
     yield* database.db

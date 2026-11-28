@@ -1019,28 +1019,19 @@ const prepareTitleGeneration = Effect.gen(function* () {
   )
 })
 
-const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
-  const bus = yield* Bus.Service
-  return yield* bus.subscribe(SessionEvent.Renamed).pipe(
-    Stream.filter((event) => event.data.sessionID === sessionID),
-    Stream.take(1),
-    Stream.runDrain,
-    Effect.forkScoped({ startImmediately: true }),
-  )
-})
-
+export { scenario, prepareTitleGeneration, sessionID, invalidRequest, providerRejected, type Scenario }
+import { dateTitle } from "../src/personalize/session-naming"
+import { beginTitleScenario, titleRunnerScenarios } from "./personalize/title-runner-fixture"
 describe("SessionRunnerLLM", () => {
   scenario("generates the title while the first model step is still running", function* (s) {
-    yield* prepareTitleGeneration
-
-    yield* s.admit("First prompt")
-    yield* s.llm.push(TestLLM.text("Generated title", "text-title"), Stream.never)
-    const renamed = yield* watchRename(sessionID)
+    const renamed = yield* beginTitleScenario(s, prepareTitleGeneration, sessionID)
     const runner = yield* SessionRunner.Service
     const fiber = yield* runner.drain({ sessionID, at: { _tag: "Fresh", forced: true } }).pipe(Effect.forkChild)
     yield* Fiber.join(renamed)
 
-    expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
+    const session = yield* s.session.get(sessionID)
+    expect(session.title).toBe(`${dateTitle(session.time.created)}-Brief`)
+    expect(fiber.pollUnsafe()).toBeUndefined()
     yield* Fiber.interrupt(fiber)
   })
 
@@ -1056,75 +1047,7 @@ describe("SessionRunnerLLM", () => {
     expect((yield* s.session.get(sessionID)).title).toBe("Manual title")
   })
 
-  scenario("coalesces title generation while a request is active", function* (s) {
-    yield* prepareTitleGeneration
-
-    const titleStarted = yield* Deferred.make<void>()
-    const releaseTitle = yield* Deferred.make<void>()
-    yield* Effect.gen(function* () {
-      yield* s.admit("First prompt")
-      yield* s.llm.push(
-        Stream.unwrap(
-          Deferred.succeed(titleStarted, undefined).pipe(
-            Effect.andThen(Deferred.await(releaseTitle)),
-            Effect.as(Stream.fromIterable(TestLLM.text("Generated title", "text-title"))),
-          ),
-        ),
-        TestLLM.text("First response", "text-first"),
-        TestLLM.text("Second response", "text-second"),
-      )
-
-      const first = yield* s.resume.pipe(Effect.forkChild)
-      yield* Deferred.await(titleStarted).pipe(Effect.timeout("5 seconds"))
-      expect(s.requests[0]?.system.map((part) => part.text)).toContain("Generate a title.")
-      yield* Fiber.join(first)
-      yield* s.admit("Second prompt")
-      yield* s.resume
-
-      expect(s.requests).toHaveLength(3)
-      const renamed = yield* watchRename(sessionID)
-      yield* Deferred.succeed(releaseTitle, undefined)
-      yield* Fiber.join(renamed)
-      expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
-    }).pipe(Effect.ensuring(Deferred.succeed(releaseTitle, undefined)))
-  })
-
-  scenario("retries title generation from the first prompt after title and execution failures", function* (s) {
-    yield* prepareTitleGeneration
-
-    yield* s.admit("First prompt")
-    yield* s.llm.push(Stream.fail(invalidRequest()), Stream.fail(invalidRequest()))
-    expect((yield* s.resume.pipe(Effect.exit))._tag).toBe("Failure")
-
-    yield* s.admit("Second prompt")
-    const titleFailed = yield* Deferred.make<void>()
-    yield* s.llm.push(
-      Stream.fail(providerRejected({ message: "Title provider unavailable" })).pipe(
-        Stream.ensuring(Deferred.succeed(titleFailed, undefined)),
-      ),
-      TestLLM.text("Recovered", "text-recovered"),
-    )
-    yield* s.resume
-    yield* Deferred.await(titleFailed)
-    yield* Effect.yieldNow
-    expect((yield* s.session.get(sessionID)).title).toBeUndefined()
-
-    const renamed = yield* watchRename(sessionID)
-    yield* s.admit("Third prompt")
-    yield* s.llm.push(
-      TestLLM.text("Generated title", "text-title"),
-      TestLLM.text("Recovered again", "text-recovered-again"),
-    )
-    yield* s.resume
-    yield* Fiber.join(renamed)
-
-    expect(s.requests).toHaveLength(6)
-    expect(JSON.stringify(s.requests[2]?.messages)).toContain("First prompt")
-    expect(JSON.stringify(s.requests[2]?.messages)).not.toContain("Second prompt")
-    expect(JSON.stringify(s.requests[4]?.messages)).toContain("First prompt")
-    expect(JSON.stringify(s.requests[4]?.messages)).not.toContain("Third prompt")
-    expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
-  })
+  titleRunnerScenarios({ scenario, prepareTitleGeneration, sessionID, invalidRequest, providerRejected })
 
   scenario("advertises and executes a location registered tool", function* (s) {
     const registry = yield* Tool.Service

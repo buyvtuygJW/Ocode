@@ -314,7 +314,34 @@ export type CommandInfo = { name: string; description?: string }
 
 export type RpcOutput = { output?: any }
 
-export type PermissionReply = "once" | "always" | "reject"
+export type PermissionReply =
+  | "once"
+  | "always"
+  | "reject"
+  | "session_read"
+  | "session_create"
+  | "session_update"
+  | "session_delete"
+  | "session_crud"
+  | {
+      scope: "session"
+      read: "allow" | "ask" | "deny"
+      create: "allow" | "ask" | "deny"
+      update: "allow" | "ask" | "deny"
+      delete: "allow" | "ask" | "deny"
+      recursive?: Array<"read" | "create" | "update" | "delete">
+    }
+  | { scope: "session"; policy: string }
+  | {
+      scope: "session"
+      rules: Array<{
+        operation: "read" | "create" | "update" | "delete"
+        effect: "allow" | "deny" | "ask"
+        lifetime: "once" | "session"
+        recursive: boolean
+        scope: "selected" | "parent-list"
+      }>
+    }
 
 export type PtyID = string
 
@@ -2766,6 +2793,7 @@ export type ConfigEntry =
           }
         }
         experimental?: {
+          mcp_selection?: string
           portable_shell_scanner?: boolean
           codemode_vm?: boolean
           all_flags?: boolean
@@ -4590,8 +4618,35 @@ export type PermissionGetOutput = { data: PermissionRequest }["data"]
 export type PermissionReplyInput = {
   readonly sessionID: string
   readonly requestID: string
-  readonly decision: "once" | "always" | "reject"
-  readonly message?: string | undefined
+  readonly decision:
+    | "once"
+    | "always"
+    | "reject"
+    | "session_read"
+    | "session_create"
+    | "session_update"
+    | "session_delete"
+    | "session_crud"
+    | {
+        readonly scope: "session"
+        readonly read: "allow" | "ask" | "deny"
+        readonly create: "allow" | "ask" | "deny"
+        readonly update: "allow" | "ask" | "deny"
+        readonly delete: "allow" | "ask" | "deny"
+        readonly recursive?: ReadonlyArray<"read" | "create" | "update" | "delete">
+      }
+    | { readonly scope: "session"; readonly policy: string }
+    | {
+        readonly scope: "session"
+        readonly rules: ReadonlyArray<{
+          readonly operation: "read" | "create" | "update" | "delete"
+          readonly effect: "allow" | "deny" | "ask"
+          readonly lifetime: "once" | "session"
+          readonly recursive: boolean
+          readonly scope: "selected" | "parent-list"
+        }>
+      }
+  readonly message?: string | null | undefined
 }
 
 export type PermissionReplyOutput = void

@@ -664,6 +664,18 @@ it.live(
         expect(calls).toEqual([])
 
         yield* opencode.sessions.prompt({ sessionID: session.id, text: "Run echo" })
+        const requests = yield* loaded("unknown-shell approval",
+          opencode.permission.list({ sessionID: session.id }), (items) => items.length > 0)
+        expect(requests).toMatchObject([{
+          action: "shell",
+          metadata: { filesystemEffects: "unknown", unknownCommand: "echo hi" },
+        }])
+        // Authorization precedes the execution-plane demand. Grant through the
+        // SDK, then retain the original lazy-provisioning and blocking checks.
+        expect(calls).toEqual([])
+        yield* opencode.permission.reply({
+          sessionID: session.id, requestID: requests[0]!.id, decision: "once",
+        })
         // The model-selected shell tool is the first execution-plane demand: it alone
         // starts provisioning and blocks inside the tool call until the provider is ready.
         yield* Deferred.await(createStarted).pipe(

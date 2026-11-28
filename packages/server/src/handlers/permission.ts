@@ -6,7 +6,7 @@ import { Session } from "@opencode/core/session"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Api } from "../api"
-import { ConflictError, PermissionNotFoundError, PermissionSavedNotFoundError } from "@opencode/protocol/errors"
+import { ConflictError, InvalidRequestError, PermissionNotFoundError, PermissionSavedNotFoundError } from "@opencode/protocol/errors"
 import { locationErrors, response, sessionInfo } from "../location"
 import { missingSession } from "./session-error"
 
@@ -79,7 +79,13 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission", 
           const owned = yield* requireOwnedRequest(ctx.params.sessionID, ctx.params.requestID)
           yield* owned.permission
             .reply({ requestID: ctx.params.requestID, reply: ctx.payload.decision, message: ctx.payload.message })
-            .pipe(Effect.catchTag("Permission.NotFoundError", () => missingRequest(ctx.params.requestID)))
+            .pipe(
+              Effect.catchTag("Permission.NotFoundError", () => missingRequest(ctx.params.requestID)),
+              Effect.catchTag("Session.NotFoundError", missingSession),
+              Effect.catchTag("Permission.InvalidPolicyError", (error) => new InvalidRequestError({
+                message: error.message, kind: "permission_policy", field: "decision",
+              })),
+            )
           return HttpApiSchema.NoContent.make()
         }),
       )

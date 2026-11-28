@@ -246,6 +246,7 @@ const graph = (fixture: Fixture, realPermissions = false) =>
             Permission.node.replace(
               permissionLayer({
                 assert: (input) => Effect.sync(() => void fixture.assertions.push(input)),
+                assertNotDenied: () => Effect.void,
               }),
             ),
           ]),

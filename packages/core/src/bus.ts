@@ -16,6 +16,10 @@ import { SessionEvent } from "@opencode/schema/session-event"
 import { SessionLegacy } from "@opencode/schema/session-legacy"
 import type { SessionID } from "@opencode/schema/session-id"
 import { AbsolutePath } from "@opencode/schema/schema"
+import { acknowledgeCommit, makeCheckedPublisher, type CheckedBus } from "./personalize/checked-publication.js"
+export type { CheckedPublishOptions } from "./personalize/checked-publication.js"
+// Merge the separately implemented capability into the public service contract.
+export interface Interface extends CheckedBus {}
 
 export type Subscriber<D extends Event.Definition = Event.Definition> = (event: Event.Payload<D>) => Effect.Effect<void>
 export type Unsubscribe = Effect.Effect<void>
@@ -449,6 +453,7 @@ export function configured(options?: Options) {
                   )
                   .pipe(Effect.catchIf(isSqlError, Effect.die))
                 if (committed) {
+                  yield* acknowledgeCommit(event, committed.event)
                   committed.route()
                   yield* Effect.forEach(
                     pubsub.durable.get(committed.aggregateID) ?? [],
@@ -915,6 +920,10 @@ export function configured(options?: Options) {
 
         return Service.of({
           publish,
+          ...yield* makeCheckedPublisher({
+            listeners, locks: durableLocks, makePayload, aggregateID: requireAggregateID,
+            commit: commitDurableEvent, live: pubsub.live, typed: pubsub.typed,
+          }),
           publishAll,
           subscribe,
           log,

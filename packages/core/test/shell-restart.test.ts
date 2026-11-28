@@ -89,7 +89,7 @@ const world = Effect.gen(function* () {
           LayerNodePlatform.llmClient.replace(Layer.succeedContext(Context.pick(LLMClient.Service)(llm))),
           PersistentPty.node.replace(PersistentPty.configured(daemon.options)),
           Environment.node.replace(recordingEnvironmentLayer(spawns)),
-          Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
+          Permission.node.replace(permissionLayer({ assert: () => Effect.void, assertNotDenied: () => Effect.void })),
           Watcher.node.replace(Watcher.configured({ enabled: false })),
           offlineModels,
           model,

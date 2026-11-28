@@ -13,6 +13,7 @@ import { FileMutation } from "../../file-mutation.js"
 import { FileAccess } from "../../file-access.js"
 import { Patch } from "@opencode/util/patch"
 import { Permission } from "../../permission.js"
+import { makePatchPermissions } from "../../personalize/patch-permission.js"
 import DESCRIPTION from "../patch.txt"
 import GRAMMAR from "../patch-grammar.txt"
 import { fileDiff } from "./file-diff.js"
@@ -100,18 +101,10 @@ export const Plugin = {
               }
               const prepared: Prepared[] = []
               const updates = new Map<string, { target: FileAccess.Target; content: string | null }>()
-              const resolveTarget = Effect.fnUntraced(function* (value: string) {
-                const target = yield* access.resolve({ path: value, kind: "file" })
-                if (!target.externalDirectory) return target
-                yield* access.authorizeExternal([target], context, {
-                  filepath: target.absolute,
-                  parentDir: target.externalDirectory.directory,
-                })
-                return target
-              })
+              const authorization = makePatchPermissions({ access, permission, context, updates })
               for (const hunk of hunks) {
                 yield* Effect.gen(function* () {
-                  const target = yield* resolveTarget(hunk.path)
+                  const { target, resolveTarget } = yield* authorization.prepare(hunk)
                   const file = FileAccess.key(target)
                   if (hunk.type === "add") {
                     prepared.push({
@@ -198,17 +191,7 @@ export const Plugin = {
                 change.target,
                 ...(change.type === "update" && change.moveTarget ? [change.moveTarget] : []),
               ])
-              yield* permission.assert({
-                action: "edit",
-                resources: [...new Set(targets.map((target) => target.resource))],
-                save: [...new Set(targets.map(FileAccess.always))],
-                metadata: {
-                  filepath: targets.map((target) => target.resource).join(", "),
-                  diff: patchFiles.map((file) => `${file.patch}\n`).join(""),
-                  files: patchFiles,
-                },
-                ...Permission.invocation(context),
-              })
+              yield* authorization.assert(targets, patchFiles)
 
               yield* Effect.forEach(
                 prepared,

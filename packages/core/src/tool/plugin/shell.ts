@@ -20,6 +20,7 @@ import { SessionMessage } from "../../session/message.js"
 import { SessionSchema } from "../../session/schema.js"
 import { Shell } from "../../shell.js"
 import { ShellPermissions } from "../../shell/permissions.js"
+import { authorizeShellRequests } from "../../personalize/shell-permission.js"
 import { ShellSelect } from "../../shell/select.js"
 import { ShellResult } from "../../shell/result.js"
 import { toolFailure } from "../runtime.js"
@@ -347,11 +348,7 @@ export const Plugin = {
           return Permission.Policy.fromRules(agent?.permissions ?? [], session.permissions ?? [])
         }),
       })
-      yield* Effect.forEach(
-        requests,
-        (request) => permission.assert({ ...request, ...Permission.invocation(context) }),
-        { discard: true },
-      )
+      yield* authorizeShellRequests({ invocation, target, context, permission, access, requests })
       // Approval can outlive the directory, so validate immediately before spawning.
       const workdir = yield* Environment.typeFollowing(target.environment.files, target.absolute).pipe(
         Effect.catchTag("Environment.NotFound", () =>
