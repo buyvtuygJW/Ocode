@@ -8835,7 +8835,7 @@ index 0000000000000000000000000000000000000000..076266e09fd340fa03974217f693d4c8
 +}
 diff --git a/packages/schema/src/personalize/permission-policy.ts b/packages/schema/src/personalize/permission-policy.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3be82d46e32b793511cfac17ff94d897f24b312
+index 0000000000000000000000000000000000000000..57bcf655e5c29d21c9107bdeb4b2573fefda22ff
 --- /dev/null
 +++ b/packages/schema/src/personalize/permission-policy.ts
 @@ -0,0 +1,242 @@
@@ -9000,7 +9000,7 @@ index 0000000000000000000000000000000000000000..b3be82d46e32b793511cfac17ff94d89
 +export type CommandScope = "Unknown=S" | "Unknown=SE" | "Unknown=SEA"
 +export type Choice = "once" | "session_read" | "policy" | "always" | "reject" | CommandScope
 +export const unknownPolicyTitle = "Unknown command policy"
-+export function isCommandScope(choice: string): choice is CommandScope {
++export function isCommandScope(choice: unknown): choice is CommandScope {
 +  return choice === "Unknown=S" || choice === "Unknown=SE" || choice === "Unknown=SEA"
 +}
 +function commandScopes(request: RequestLike): CommandScope[] {
