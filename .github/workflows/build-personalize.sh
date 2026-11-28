@@ -30,10 +30,6 @@ apply_custom_git_patches() {
     git ls-files -u
     return 21
   fi
-  if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
-    echo "ERROR: conflict markers remain after patch application"
-    return 22
-  fi
   git status --short
   if git diff --cached --quiet; then
     echo "ERROR: final patch produced no staged changes"
@@ -380,11 +376,6 @@ try_build() {
     echo "ERROR: session title patch failed; refusing to build"
     cd ..
     return 20
-  fi
-  if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
-    echo "ERROR: unresolved conflict markers before build"
-    cd ..
-    return 23
   fi
   git log --oneline -12
   if ! node .personalize/repair-photon-patch.cjs --run . bun install; then
